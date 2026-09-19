@@ -1,6 +1,6 @@
 # Trusted worker and dispatcher
 
-The worker executes fixed numerical operations using local Hugging Face weights and NNsight. The dispatcher follows the controller's already approved, consumed compute interval and publishes verified artifacts to the ledger. Neither process can authorize compute, provision a Pod, renew an allowance, or run agent-supplied Python. The shipped provider remains a simulator; these instructions do not provision or start cloud resources.
+The worker executes fixed numerical operations using local Hugging Face weights and NNsight. The dispatcher follows the controller's already approved, consumed compute interval and publishes verified artifacts to the ledger. Neither process can authorize compute, provision a Pod, renew an allowance, or run agent-supplied Python. Provider actions belong to the separate controller; these instructions do not provision or start cloud resources.
 
 ## Deployment identities and configuration
 
@@ -23,7 +23,7 @@ Install from the reviewed source commit and locked environment. Before an accept
 }
 ```
 
-The host key must be verified through a trusted channel before it is added. SSH uses an explicit key, explicit known-hosts file, strict host-key checks, no interactive authentication, and a loopback-only forward. The HTTP client ignores proxy environment variables and refuses redirects. Only a literal `http://127.0.0.1:<port>` URL is accepted. If connectivity fails, attempts remain unresolved until the worker can be queried or its termination is positively established; restarting the dispatcher never blindly resubmits them. Restart the dispatcher service to recreate a lost SSH tunnel.
+The host key must be verified through a trusted channel before it is added. SSH uses an explicit key, explicit known-hosts file, strict host-key checks, no interactive authentication, and a loopback-only forward. The HTTP client ignores proxy environment variables and refuses redirects. Only a literal `http://127.0.0.1:<port>` URL is accepted. If connectivity fails, attempts remain unresolved until the worker can be queried or its termination is positively established; restarting the dispatcher never blindly resubmits them. When its owned SSH process exits, the dispatcher exits with an error so the supplied systemd unit restarts it and opens a new pinned-key tunnel. It then queries the existing attempt with the original approval and deadline. An HTTP outage while SSH remains alive is retried within the existing dispatcher process.
 
 The worker configuration is a `WorkerConfig` JSON document with these fields:
 

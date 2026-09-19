@@ -32,6 +32,10 @@ class TransportError(LedgerError):
     """Worker response is absent or untrusted; remote liveness remains unresolved."""
 
 
+class TunnelExited(TransportError):
+    """The owned SSH process is gone; the service manager must restart transport."""
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -214,6 +218,10 @@ class SSHTunnel:
                 self.process.wait(timeout=5)
             self.process = None
 
+    def ensure_alive(self):
+        if self.process is None or self.process.poll() is not None:
+            raise TunnelExited("owned SSH tunnel exited; restart dispatcher to reconcile the existing attempt")
+
     def __enter__(self):
         self.start()
         return self
@@ -378,11 +386,14 @@ class Dispatcher:
 
 class DispatcherService:
     """Restartable controller-side pump bound to one explicitly configured worker."""
-    def __init__(self, dispatcher: Dispatcher):
+    def __init__(self, dispatcher: Dispatcher, *, tunnel: SSHTunnel | None = None):
         self.dispatcher = dispatcher
+        self.tunnel = tunnel
         self.last_error_code = None
 
     def tick(self):
+        if self.tunnel is not None:
+            self.tunnel.ensure_alive()
         ledger = self.dispatcher.ledger
         with ledger.read_connection() as reader:
             # No controller request means no dispatch, even if a bare approval
@@ -408,11 +419,18 @@ class DispatcherService:
             elif len(grants) > 1:
                 raise LedgerError("multiple active grants violate worker exclusivity")
         except (TransportError, ApprovalError, LeaseError) as exc:
+            # An HTTP outage can recover on the existing connection. A dead
+            # owned SSH child cannot: let systemd restart the process/tunnel.
+            # This changes no remote execution or durable approval state.
+            if self.tunnel is not None:
+                self.tunnel.ensure_alive()
             code = type(exc).__name__
             if code != self.last_error_code:
                 ledger.record_event("policy_evaluation", {"decision": "dispatch_unavailable", "worker_id": self.dispatcher.worker_id, "reason_code": code})
             self.last_error_code = code
             return results
+        if self.tunnel is not None:
+            self.tunnel.ensure_alive()
         if self.last_error_code is not None:
             ledger.record_event("policy_evaluation", {"decision": "dispatch_recovered", "worker_id": self.dispatcher.worker_id})
         self.last_error_code = None
@@ -462,6 +480,7 @@ def main():
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: stop.set())
     with ExitStack() as stack:
+        tunnel = None
         if "ssh" in config:
             ssh = dict(config["ssh"])
             ssh["identity_file"] = Path(ssh["identity_file"])
@@ -472,7 +491,7 @@ def main():
             url = config["base_url"]
         ledger = stack.enter_context(Ledger(config["ledger_path"]))
         dispatcher = Dispatcher(ledger, WorkerClient(url, secret), worker_id=config["worker_id"], transfer_directory=Path(config["transfer_directory"]), input_artifact_root=Path(config["input_artifact_root"]), lease_seconds=config.get("lease_seconds", 30))
-        service = DispatcherService(dispatcher)
+        service = DispatcherService(dispatcher, tunnel=tunnel)
         if args.once:
             service.tick()
         else:
