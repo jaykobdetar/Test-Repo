@@ -2,9 +2,11 @@ from dataclasses import replace
 from pathlib import Path
 import hashlib
 import json
+import os
 import shutil
 import stat
 import subprocess
+import sys
 
 import pytest
 
@@ -62,7 +64,7 @@ def test_cpu_acceptance_uses_the_actual_research_service_security_profile(tmp_pa
     root = tmp_path / "rendered"
     research = (root / "probe-research.service").read_text().splitlines()
     acceptance = (root / "probe-sandbox-acceptance.service").read_text().splitlines()
-    profile_keys = {"User", "Group", "SupplementaryGroups", "WorkingDirectory", "Environment",
+    profile_keys = {"User", "Group", "SupplementaryGroups", "WorkingDirectory", "Environment", "ExecStartPre",
                     "ProtectSystem", "ProtectHome", "ReadWritePaths", "PrivateTmp", "NoNewPrivileges",
                     "KillMode", "Delegate", "UMask", "RuntimeDirectory", "RuntimeDirectoryMode"}
     profile = lambda lines: [line for line in lines if line.split("=", 1)[0] in profile_keys]
@@ -71,6 +73,67 @@ def test_cpu_acceptance_uses_the_actual_research_service_security_profile(tmp_pa
     assert "EnvironmentFile=/etc/probe-core/research-runtime.env" in acceptance
     assert "EnvironmentFile=/etc/probe-core/sandbox-acceptance.env" in acceptance
     assert any("-I -m probe_core.sandbox_acceptance --image ${SANDBOX_IMAGE}" in line for line in acceptance)
+
+
+@pytest.mark.parametrize("unit", ["probe-research.service", "probe-sandbox-acceptance.service"])
+def test_rootless_units_keep_primary_group_and_prepare_research_socket_first(tmp_path, unit):
+    render(tmp_path)
+    root = tmp_path / "rendered"
+    lines = (root / unit).read_text().splitlines()
+    settings = dict(line.split("=", 1) for line in lines if "=" in line and not line.startswith("#"))
+    # The installer creates this account with --gid probe-trusted. A different
+    # effective primary group makes newuidmap reject its own target process.
+    assert settings["User"] == settings["Group"] == "probe-trusted"
+    assert "probe-research" in settings["SupplementaryGroups"].split()
+    assert settings["RuntimeDirectory"] == "probe-research"
+    assert settings["RuntimeDirectoryMode"] == "0750"
+    preparation = [line.removeprefix("ExecStartPre=") for line in lines if line.startswith("ExecStartPre=")]
+    assert preparation == [
+        "/usr/bin/chgrp probe-research /run/probe-research",
+        "/usr/bin/test -S /run/user/991/bus",
+    ]
+    assert lines.index("ExecStartPre=" + preparation[0]) < next(
+        index for index, line in enumerate(lines) if line.startswith("ExecStart="))
+    configuration = ServiceConfig.model_validate_json((root / "research.json").read_bytes())
+    assert configuration.socket_gid == identities().research_gid
+    assert configuration.socket_path == "/run/probe-research/research.sock"
+
+
+def test_installer_podman_calls_execute_with_account_primary_group(tmp_path):
+    installer = (Path(__file__).resolve().parents[1] / "deploy/install-controller.sh").read_text()
+    commands = [line.strip() for line in installer.splitlines() if "/usr/bin/podman --remote=false" in line]
+    assert len(commands) == 2
+    archive = tmp_path / "cpu-sandbox.tar"
+    archive.write_bytes(b"test archive input only; never loaded")
+    command_log = tmp_path / "arguments.jsonl"
+    binary_directory = tmp_path / "bin"
+    binary_directory.mkdir()
+    runuser = binary_directory / "runuser"
+    runuser.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "with open(os.environ['PROBE_TEST_ARGUMENT_LOG'], 'a') as stream:\n"
+        "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "print(os.environ['PROBE_SANDBOX_IMAGE'])\n"
+    )
+    runuser.chmod(0o700)
+    shell = "set -euo pipefail\n" + "\n".join(commands).replace(
+        "/opt/probe-core/images/cpu-sandbox.tar", '"$PROBE_TEST_ARCHIVE"')
+    shell += '\n[ "$PROBE_LOADED_IMAGE" = "$PROBE_SANDBOX_IMAGE" ]\n'
+    image = "sha256:" + "a" * 64
+    subprocess.run(["/bin/bash", "-c", shell], check=True, capture_output=True, env={
+        **os.environ, "PATH": str(binary_directory) + ":/usr/bin:/bin",
+        "PROBE_TEST_ARCHIVE": str(archive), "PROBE_TEST_ARGUMENT_LOG": str(command_log),
+        "PROBE_SANDBOX_IMAGE": image, "PROBE_TRUSTED_UID": "991",
+    })
+    calls = [json.loads(line) for line in command_log.read_text().splitlines()]
+    assert len(calls) == 2
+    for arguments in calls:
+        assert arguments[:6] == ["-u", "probe-trusted", "-g", "probe-trusted", "--", "env"]
+        assert "XDG_RUNTIME_DIR=/run/user/991" in arguments
+        assert "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/991/bus" in arguments
+    assert calls[0][-3:] == ["/usr/bin/podman", "--remote=false", "load"]
+    assert calls[1][-5:] == ["image", "inspect", "--format", "{{.Id}}", image]
 
 
 @pytest.mark.parametrize("field", ["trusted_uid", "research_uid", "watchdog_uid", "backup_uid"])

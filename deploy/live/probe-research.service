@@ -5,12 +5,14 @@ After=probe-controller.service
 [Service]
 Type=simple
 User=probe-trusted
-Group=probe-research
-SupplementaryGroups=probe-trusted probe-ipc probe-ledger-read
+# Rootless mapping helpers require the account's own primary group.
+Group=probe-trusted
+SupplementaryGroups=probe-research probe-ipc probe-ledger-read
 WorkingDirectory=/opt/probe-core
 Environment=HOME=/var/lib/probe-sandbox
 EnvironmentFile=/etc/probe-core/research-runtime.env
 Environment=PYTHONNOUSERSITE=1
+ExecStartPre=/usr/bin/chgrp probe-research /run/probe-research
 ExecStartPre=/usr/bin/test -S @USER_RUNTIME@/bus
 ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.research_service --config /etc/probe-core/research.json
 RuntimeDirectory=probe-research

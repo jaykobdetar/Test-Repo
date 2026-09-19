@@ -83,6 +83,10 @@ container enforces no-new-privileges, dropped capabilities, seccomp, no network,
 read-only inputs, and hard resource limits. `ProtectHome=read-only` keeps the user
 runtime visible; the exact `/run/user/<trusted-uid>` writable exception permits
 Podman state without broadly writable host paths.
+Both the image import and the research service use the account's own primary
+group, `probe-trusted`, as required by `newuidmap`. The service also receives the
+supplementary `probe-research` group and assigns that group to its private runtime
+directory before opening the socket, preserving access for the research client.
 
 If the release includes a CPU image, the installer loads it into the trusted
 account's rootless store, verifies its exact image ID, and runs
@@ -113,6 +117,11 @@ Before executing research:
    key location. Numerical execution still uses its separate non-root worker UID.
 4. Verify filesystem/socket denial from `probe-research`, watchdog credential
    denial, unauthorized-wake rejection, independent shutdown and stopped state.
+   Also hard-kill the research facade during a harmless CPU job and verify
+   bounded container termination. Podman's default cgroups may be managed by the
+   user manager separately from the facade's system service; `KillMode` alone
+   does not establish this guarantee. The current acceptance command verifies
+   normal timeout cleanup, not this process-crash case.
 5. Produce, upload, download and restore one real research snapshot using the
    selected private Drive folder. Retain the verification receipt.
 
@@ -141,3 +150,28 @@ reviewed helper with isolated system Python as administrator and the same human
 and private credential paths used in the original installation. The original
 bundle and manifest remain unchanged. Other installation failures require their
 own diagnosis; this helper is not a general overwrite or reset command.
+
+## Recovery from the first rootless image import failure
+
+An earlier template launched `probe-trusted` with the primary group
+`probe-research`. Rootless Podman then stopped at image import with
+`newuidmap: Target process ... is owned by a different user`, identifying a GID
+that differed from the account's password-database GID. At this point the Python
+environment, configuration, credentials and empty databases already exist.
+
+`deploy/resume-controller-sandbox.py` handles only this later interrupted state.
+It verifies the original release, administrator-owned installed runtime,
+unchanged inactive service units, disabled sandbox configuration and empty work
+state. It corrects the primary and supplementary groups in both the research and
+derived acceptance units, reloads them, and resumes the verified installer at
+image import with the corrected primary group. It preserves installed
+credentials, databases and any Podman metadata from the failed import.
+
+The original release manifest remains unchanged. Python source and native
+runtime bytes remain pinned; recognized bytecode caches may have been regenerated
+by installation and must remain administrator-owned and protected from writes by
+other accounts. This helper does not rerun package installation, environment
+creation or credential handoff. It still requires the actual service acceptance
+gate before enabling CPU execution. Run it through the separately reviewed,
+checksum-pinned administrator launcher for this exact failure, not the first
+interpreter repair command.

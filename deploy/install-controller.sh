@@ -192,8 +192,9 @@ PROBE_SANDBOX_IMAGE=$(/opt/probe-core/venv/bin/python -I -c 'import json; print(
 if [ -n "$PROBE_SANDBOX_IMAGE" ]; then
   # The importing UID and real user bus must match the research service. Input
   # redirection lets only the administrator read the immutable release archive.
-  runuser -u probe-trusted -g probe-research -- env HOME=/var/lib/probe-sandbox XDG_RUNTIME_DIR="/run/user/$PROBE_TRUSTED_UID" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$PROBE_TRUSTED_UID/bus" /usr/bin/podman --remote=false load < /opt/probe-core/images/cpu-sandbox.tar
-  PROBE_LOADED_IMAGE=$(runuser -u probe-trusted -g probe-research -- env HOME=/var/lib/probe-sandbox XDG_RUNTIME_DIR="/run/user/$PROBE_TRUSTED_UID" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$PROBE_TRUSTED_UID/bus" /usr/bin/podman --remote=false image inspect --format '{{.Id}}' "$PROBE_SANDBOX_IMAGE")
+  # UID-mapping helpers also require the account's own primary group.
+  runuser -u probe-trusted -g probe-trusted -- env HOME=/var/lib/probe-sandbox XDG_RUNTIME_DIR="/run/user/$PROBE_TRUSTED_UID" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$PROBE_TRUSTED_UID/bus" /usr/bin/podman --remote=false load < /opt/probe-core/images/cpu-sandbox.tar
+  PROBE_LOADED_IMAGE=$(runuser -u probe-trusted -g probe-trusted -- env HOME=/var/lib/probe-sandbox XDG_RUNTIME_DIR="/run/user/$PROBE_TRUSTED_UID" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$PROBE_TRUSTED_UID/bus" /usr/bin/podman --remote=false image inspect --format '{{.Id}}' "$PROBE_SANDBOX_IMAGE")
   if [ "${PROBE_LOADED_IMAGE#sha256:}" != "${PROBE_SANDBOX_IMAGE#sha256:}" ]; then
     echo "Imported CPU image identity does not match the reviewed release." >&2
     exit 1
