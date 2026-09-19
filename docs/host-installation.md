@@ -36,7 +36,7 @@ sudo ./install-controller.sh /absolute/published/bundle MANIFEST_SHA256 HUMAN_US
 ```
 
 The initial installer refuses an existing `/opt/probe-core` or `/etc/probe-core`.
-It installs maintained Ubuntu Podman, UID-mapping helpers, user-session D-Bus,
+It installs maintained Ubuntu Podman and crun, UID-mapping helpers, user-session D-Bus,
 rclone and filesystem ACL packages. It changes no global AppArmor, polkit, or sudoers policy.
 The metadata-discarding copy deliberately removes executable permissions. After
 verifying the staged bytes, the installer explicitly restores execution only on
@@ -87,6 +87,10 @@ Both the image import and the research service use the account's own primary
 group, `probe-trusted`, as required by `newuidmap`. The service also receives the
 supplementary `probe-research` group and assigns that group to its private runtime
 directory before opening the socket, preserving access for the research client.
+An administrator-owned `containers.conf` under the dedicated
+`/var/lib/probe-sandbox/.config/containers` selects `/usr/bin/crun` explicitly.
+Image import and service execution share that HOME and the same rootless image
+store. No system-wide container configuration is rewritten.
 
 If the release includes a CPU image, the installer loads it into the trusted
 account's rootless store, verifies its exact image ID, and runs
@@ -97,6 +101,9 @@ containment and resource limits and writes
 `/var/lib/probe-sandbox/acceptance-report.json`. Only a successful gate enables
 that image in the root-owned facade configuration. A failure stops installation
 with CPU execution still disabled; no weaker fallback is selected.
+Failure receipts in newer releases retain the attempted check, exit status,
+attestation count and bounded runtime diagnostics in a private `0600` file.
+Public failure messages contain only a fixed reason and the check's stage.
 
 ## Final activation gates
 
@@ -175,3 +182,28 @@ creation or credential handoff. It still requires the actual service acceptance
 gate before enabling CPU execution. Run it through the separately reviewed,
 checksum-pinned administrator launcher for this exact failure, not the first
 interpreter repair command.
+
+## Recovery from the known runc filesystem setup failure
+
+On the first installed service attempt, runc 1.3.4 with the rootless overlay
+store failed before runtime attestation: `remount-private ... MS_PRIVATE:
+permission denied`. The full system journal contained the conmon/runtime error;
+the older acceptance receipt recorded only `cpu_and_isolation` and the generic
+exception type. The image identity check had succeeded, and cleanup removed the
+failed container. Passing the same checks as the human account did not validate
+the installed service context.
+
+For this exact interrupted state, `deploy/resume-controller-runtime.py` uses a
+checksum-verified copy of the prior recovery checks, requires the corrected
+service groups and the known failed receipt, and verifies that no research or
+provider work has begun. It installs Ubuntu's maintained crun package alongside
+runc, writes only the dedicated Probe runtime configuration, verifies that
+Podman selects `/usr/bin/crun`, then retries the unchanged installed acceptance
+service. The image and storage driver stay the same. A successful service gate
+is required before enabling CPU execution and continuing service/backup startup.
+If it fails, the helper reports the bounded runtime journal evidence and stops.
+
+This is a compatibility repair that still needs verification on the installed
+service. It does not change AppArmor policy, service filesystem restrictions,
+container capabilities or resource limits. The original release manifest and
+credential handoffs remain unchanged.

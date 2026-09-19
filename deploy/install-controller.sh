@@ -64,7 +64,7 @@ for entry in manifest['files']:
 actual = {str(p.relative_to(root)) for p in root.rglob('*') if p.is_file() or p.is_symlink()}
 if actual != known:
     raise SystemExit('Release contains missing or unreviewed files')
-for required in ('python/bin/python3.13', 'controller-requirements.lock', 'deployment.json', 'deploy/install-controller.sh'):
+for required in ('python/bin/python3.13', 'controller-requirements.lock', 'deployment.json', 'deploy/install-controller.sh', 'deploy/sandbox/containers.conf'):
     if required not in known:
         raise SystemExit('Release is missing required installation input')
 PY
@@ -77,7 +77,7 @@ chmod 0755 "$PROBE_STAGE/python/bin/python3.13"
 # Maintained Ubuntu packages supply the existing distro AppArmor integration.
 # This installs packages; it does not disable AppArmor or add polkit grants.
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y podman uidmap dbus-user-session rclone acl
+DEBIAN_FRONTEND=noninteractive apt-get install -y podman crun uidmap dbus-user-session rclone acl
 
 for PROBE_GROUP in probe-trusted probe-research probe-watchdog probe-backup probe-ipc probe-ledger-read probe-watch-read probe-stop probe-backup-read; do
   if ! getent group "$PROBE_GROUP" >/dev/null; then groupadd --system "$PROBE_GROUP"; fi
@@ -131,6 +131,10 @@ chown -hR root:root /opt/probe-core
 chmod 0755 /opt/probe-core
 chmod -R a+rX /opt/probe-core/python /opt/probe-core/venv
 chmod -R go-w /opt/probe-core
+# Select the maintained OCI runtime for this Probe account only. Both image
+# import and the unchanged acceptance service use this HOME and existing store.
+install -d -o root -g probe-trusted -m 0750 /var/lib/probe-sandbox/.config /var/lib/probe-sandbox/.config/containers
+install -o root -g probe-trusted -m 0640 /opt/probe-core/deploy/sandbox/containers.conf /var/lib/probe-sandbox/.config/containers/containers.conf
 /opt/probe-core/venv/bin/python -I - /opt/probe-core "$PROBE_HUMAN" "$PROBE_RCLONE_SOURCE" <<'PY'
 import grp, json, os, pathlib, pwd, shutil, sys
 from probe_core.host_setup import Identities, copy_gdrive_only, render_configuration

@@ -17,6 +17,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -25,6 +26,47 @@ from .sandbox import PodmanSandbox, SandboxLimits, SandboxResult
 
 class AcceptanceError(RuntimeError):
     pass
+
+
+_DIAGNOSTIC_BYTES = 8192
+_STAGES = {"configuration", "runtime", "cpu_and_isolation", "pid_and_output", "memory", "wall_time", "complete"}
+_PUBLIC_REASONS = {
+    "report parent must be a trusted, owned directory without symlinks": "unsafe_report_directory",
+    "report must be an owned regular file": "unsafe_report_file",
+    "acceptance workspace must be private, owned and without symlinks": "unsafe_workspace",
+    "acceptance requires the packaged reviewed seccomp profile": "seccomp_profile_mismatch",
+    "the requested immutable image is not present in the service Podman store": "immutable_image_unavailable",
+    "check lacks exactly one accepted runtime attestation": "runtime_attestation_missing_or_duplicated",
+    "contained check did not finish successfully": "contained_check_failed",
+    "contained check did not return its exact result artifact": "result_artifact_mismatch",
+    "contained result exceeds its bound": "result_artifact_too_large",
+    "contained check did not prove every required condition": "required_condition_unproven",
+    "memory pressure was not refused after verified startup": "memory_limit_unproven",
+    "wall time did not terminate a verified running job within the cleanup bound": "wall_time_limit_unproven",
+}
+
+
+def _safe_reason(error: BaseException) -> str:
+    # Never make arbitrary exception or subprocess text part of public output.
+    return (_PUBLIC_REASONS.get(str(error), "acceptance_check_failed")
+            if isinstance(error, AcceptanceError) else "runtime_error")
+
+
+def _bounded_diagnostic(value: str | bytes) -> dict:
+    raw = value.encode("utf-8", errors="replace") if isinstance(value, str) else value
+    return {"tail": raw[-_DIAGNOSTIC_BYTES:].decode("utf-8", errors="ignore"),
+            "bytes": len(raw), "truncated": len(raw) > _DIAGNOSTIC_BYTES}
+
+
+def _exception_diagnostics(error: BaseException) -> dict:
+    diagnostics = {"exception": _bounded_diagnostic(str(error))}
+    for name in ("stdout", "stderr"):
+        value = getattr(error, name, None)
+        if isinstance(value, (str, bytes)):
+            diagnostics[name] = _bounded_diagnostic(value)
+    if isinstance(error, AcceptanceError):
+        diagnostics.update(getattr(error, "private_diagnostics", {}))
+    return diagnostics
 
 
 _ATTESTATION_FIELDS = (
@@ -166,7 +208,11 @@ def _image_identity(sandbox: PodmanSandbox) -> str:
     if not identity.startswith("sha256:"):
         identity = "sha256:" + identity
     if result.returncode or identity != sandbox.image:
-        raise AcceptanceError("the requested immutable image is not present in the service Podman store")
+        error = AcceptanceError("the requested immutable image is not present in the service Podman store")
+        error.private_diagnostics = {"returncode": result.returncode,
+                                     "stdout": _bounded_diagnostic(result.stdout),
+                                     "stderr": _bounded_diagnostic(result.stderr)}
+        raise error
     return identity
 
 
@@ -212,14 +258,24 @@ def run_acceptance(*, image: str, workspace: Path, output: Path,
             report["stage"] = stage
             before = len(sandbox.attestations)
             started = time.monotonic()
-            result = sandbox.run(code, limits=limits, inputs=inputs)
-            if len(sandbox.attestations) != before + 1:
+            info = {"limits": asdict(limits), "returncode": None, "termination_reason": None,
+                    "elapsed_seconds": None, "attestation_count": 0}
+            report.setdefault("runs", {})[stage] = info
+            try:
+                result = sandbox.run(code, limits=limits, inputs=inputs)
+                info.update(returncode=result.returncode, termination_reason=result.termination_reason,
+                            private_diagnostics={"stdout": _bounded_diagnostic(result.stdout),
+                                                 "stderr": _bounded_diagnostic(result.stderr)})
+            except BaseException as error:
+                info["private_diagnostics"] = _exception_diagnostics(error)
+                raise
+            finally:
+                info["elapsed_seconds"] = round(time.monotonic() - started, 3)
+                info["attestation_count"] = len(sandbox.attestations) - before
+                if info["attestation_count"] == 1:
+                    info["attestation"] = sandbox.attestations[-1]
+            if info["attestation_count"] != 1:
                 raise AcceptanceError("check lacks exactly one accepted runtime attestation")
-            report.setdefault("runs", {})[stage] = {
-                "limits": asdict(limits), "attestation": sandbox.attestations[-1],
-                "returncode": result.returncode, "termination_reason": result.termination_reason,
-                "elapsed_seconds": round(time.monotonic() - started, 3),
-            }
             return result
 
         sentinel = scratch / "unmounted-host-sentinel"
@@ -264,8 +320,12 @@ def run_acceptance(*, image: str, workspace: Path, output: Path,
         report["status"] = "passed"
     except BaseException as error:
         report["status"] = "failed"
-        # Do not publish arbitrary subprocess stderr or environment data.
         report["error_type"] = type(error).__name__
+        report["reason"] = _safe_reason(error)
+        # Only the fixed synthetic acceptance programs run here. Keep bounded
+        # launch diagnostics in this owned 0600 receipt, never in public output.
+        report["private_diagnostics"] = _exception_diagnostics(error)
+        error.acceptance_stage = report["stage"]
         raise
     finally:
         if scratch is not None:
@@ -286,7 +346,10 @@ def main(argv=None) -> int:
     try:
         report = run_acceptance(**vars(args))
     except Exception as error:
-        print(json.dumps({"status": "failed", "error_type": type(error).__name__}))
+        stage = getattr(error, "acceptance_stage", "configuration")
+        print(json.dumps({"status": "failed", "error_type": type(error).__name__,
+                          "stage": stage if stage in _STAGES else "configuration",
+                          "reason": _safe_reason(error)}), file=sys.stderr)
         return 1
     print(json.dumps({"status": report["status"], "image": report["image"], "checks": report["checks"]}, sort_keys=True))
     return 0

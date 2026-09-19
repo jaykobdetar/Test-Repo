@@ -7,6 +7,7 @@ the two rootless service group settings and the two image-import group arguments
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import grp
 import hashlib
 import json
@@ -160,7 +161,8 @@ def expected_units(root: Path, users: dict, groups: dict, human: str) -> dict[st
     return result
 
 
-def verify_units(root: Path, expected: dict, *, filesystem_root=Path("/"), owner=0, run=subprocess.run):
+def verify_units(root: Path, expected: dict, *, filesystem_root=Path("/"), owner=0, run=subprocess.run,
+                 repaired_groups=False, failed_acceptance=False):
     installed = filesystem_root / "etc/systemd/system"
     listed = run(["/usr/bin/systemctl", "list-units", "--all", "--plain", "--no-legend", "--no-pager", "probe-*"],
                  capture_output=True, env=ENV, timeout=30, check=False)
@@ -169,12 +171,21 @@ def verify_units(root: Path, expected: dict, *, filesystem_root=Path("/"), owner
     for name, text in expected.items():
         for path in (installed / name, root / "rendered" / name):
             regular(path, owner)
-            require(path.read_text() == text, "Installed unit differs from its original generated template: " + name)
-        reply = run(["/usr/bin/systemctl", "show", name, "--no-pager", "--property=LoadState,ActiveState,SubState,UnitFileState,DropInPaths"],
+            wanted = patch_unit(text) if (repaired_groups and path.parent == installed
+                       and name in {"probe-research.service", "probe-sandbox-acceptance.service"}) else text
+            require(path.read_text() == wanted, "Installed unit differs from its expected generated template: " + name)
+        properties = "LoadState,ActiveState,SubState,UnitFileState,DropInPaths"
+        if failed_acceptance:
+            properties += ",ExecMainStatus,Result"
+        reply = run(["/usr/bin/systemctl", "show", name, "--no-pager", "--property=" + properties],
                     capture_output=True, env=ENV, timeout=30, check=False)
         require(reply.returncode == 0, "Unable to inspect installed service state")
         state = dict(line.split("=", 1) for line in reply.stdout.decode().splitlines() if "=" in line)
-        require(state.get("LoadState") == "loaded" and state.get("ActiveState") == "inactive" and state.get("SubState") == "dead"
+        activity = ((state.get("ActiveState"), state.get("SubState")) == ("inactive", "dead"))
+        if failed_acceptance and name == "probe-sandbox-acceptance.service":
+            activity = ((state.get("ActiveState"), state.get("SubState"), state.get("ExecMainStatus"), state.get("Result"))
+                        == ("failed", "failed", "1", "exit-code"))
+        require(state.get("LoadState") == "loaded" and activity
                 and state.get("UnitFileState") in {"disabled", "static"} and state.get("DropInPaths") == "", "Probe service has unexpected activity, enablement or overrides: " + name)
     for relative in ("etc/systemd/system", "run/systemd/system", "usr/lib/systemd/system", "usr/local/lib/systemd/system"):
         folder = filesystem_root / relative
@@ -198,7 +209,8 @@ def empty_database(path: Path, tables: set[str], *, owner: int):
         connection.close()
 
 
-def verify_state(root: Path, users: dict, groups: dict, human: str, *, filesystem_root=Path("/"), owner=0):
+def verify_state(root: Path, users: dict, groups: dict, human: str, *, filesystem_root=Path("/"), owner=0,
+                 allow_failed_acceptance=False):
     config = filesystem_root / "etc/probe-core"
     directory(config, owner)
     require({p.name for p in config.iterdir()} == CONFIGS | {"runpod.json", "runpod-api-key"}, "Unexpected installed configuration inventory")
@@ -234,7 +246,25 @@ def verify_state(root: Path, users: dict, groups: dict, human: str, *, filesyste
         require(not any(path.iterdir()), "Existing data or service state will not be overwritten: /" + relative)
     sandbox = filesystem_root / "var/lib/probe-sandbox"
     directory(sandbox, users["probe-trusted"])
-    require({p.name for p in sandbox.iterdir()} <= {".config", ".local", ".cache"}, "Unexpected sandbox artifacts or acceptance state")
+    allowed = {".config", ".local", ".cache"}
+    if allow_failed_acceptance:
+        allowed |= {"acceptance", "acceptance-report.json"}
+        workspace = sandbox / "acceptance"
+        directory(workspace, users["probe-trusted"])
+        require(not workspace.stat().st_mode & 0o077 and not any(workspace.iterdir()), "Acceptance workspace is not empty and private")
+        report_path = sandbox / "acceptance-report.json"
+        require(regular(report_path, users["probe-trusted"], private=True).st_size <= 65536, "Acceptance report exceeds its known bound")
+        report = json.loads(report_path.read_bytes())
+        wanted = {"schema_version": 1, "status": "failed", "image": deployment["sandbox_image"],
+                  "service_uid": users["probe-trusted"], "stage": "cpu_and_isolation",
+                  "checks": {"immutable_image_present": True}, "error_type": "AcceptanceError",
+                  "seccomp_sha256": "sha256:" + hashlib.sha256((root / "seccomp.json").read_bytes()).hexdigest()}
+        require(type(report) is dict and set(report) == set(wanted) | {"started_at", "finished_at"}
+                and all(report.get(key) == value for key, value in wanted.items()), "Acceptance report is not the known pre-attestation failure")
+        started, finished = (datetime.fromisoformat(report[key]) for key in ("started_at", "finished_at"))
+        require(started.utcoffset() is not None and finished.utcoffset() is not None and finished >= started,
+                "Acceptance report has invalid timestamps")
+    require({p.name for p in sandbox.iterdir()} <= allowed, "Unexpected sandbox artifacts or acceptance state")
     for relative in ("run/probe-controller", "run/probe-provider", "run/probe-research", "var/lib/probe-core/research.artifacts"):
         path = filesystem_root / relative
         require(not path.exists() and not path.is_symlink(), "Unexpected service runtime or accepted artifacts")

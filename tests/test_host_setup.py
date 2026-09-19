@@ -7,6 +7,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 
 import pytest
 
@@ -134,6 +135,34 @@ def test_installer_podman_calls_execute_with_account_primary_group(tmp_path):
         assert "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/991/bus" in arguments
     assert calls[0][-3:] == ["/usr/bin/podman", "--remote=false", "load"]
     assert calls[1][-5:] == ["image", "inspect", "--format", "{{.Id}}", image]
+
+
+def test_installer_selects_maintained_crun_for_probe_before_import_and_gate(tmp_path):
+    project = Path(__file__).resolve().parents[1]
+    source = project / "deploy/sandbox/containers.conf"
+    configuration = tomllib.loads(source.read_text())
+    assert configuration == {"engine": {"runtime": "crun", "runtimes": {"crun": ["/usr/bin/crun"]}}}
+    installer = (project / "deploy/install-controller.sh").read_text()
+    package_command = next(line for line in installer.splitlines() if "apt-get install -y" in line)
+    assert "crun" in package_command.split()
+    assert "'deploy/sandbox/containers.conf'" in installer
+    install_command = next(line for line in installer.splitlines()
+                           if line.startswith("install -o root -g probe-trusted -m 0640 /opt/probe-core/deploy/sandbox/containers.conf"))
+    destination = "/var/lib/probe-sandbox/.config/containers/containers.conf"
+    assert install_command.endswith(" " + destination)
+    assert "install -d -o root -g probe-trusted -m 0750 /var/lib/probe-sandbox/.config /var/lib/probe-sandbox/.config/containers" in installer
+    assert installer.index(install_command) < installer.index("/usr/bin/podman --remote=false load")
+    assert installer.index(install_command) < installer.index("systemctl start probe-sandbox-acceptance.service")
+
+    # The service and both importer invocations resolve the same per-HOME file;
+    # no global runtime defaults, storage driver or image identity are changed.
+    render(tmp_path)
+    for name in ("probe-research.service", "probe-sandbox-acceptance.service"):
+        unit = (tmp_path / "rendered" / name).read_text()
+        assert "Environment=HOME=/var/lib/probe-sandbox\n" in unit
+    import_commands = [line for line in installer.splitlines() if "/usr/bin/podman --remote=false" in line]
+    assert all("HOME=/var/lib/probe-sandbox " in line for line in import_commands)
+    assert "--storage-driver" not in installer and "--root " not in installer
 
 
 @pytest.mark.parametrize("field", ["trusted_uid", "research_uid", "watchdog_uid", "backup_uid"])

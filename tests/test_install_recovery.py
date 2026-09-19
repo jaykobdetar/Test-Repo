@@ -98,7 +98,10 @@ def partial_state(tmp_path):
     root.mkdir()
     # Use the real directory-creation commands from the installer; this catches
     # inherited setgid behavior that a hand-built permissions fixture misses.
-    installer = SCRIPT.with_name("install-controller.sh").read_text()
+    # Only replay directory creation before this recovery's failed first exec.
+    # Later installation phases may create additional runtime configuration.
+    installer = SCRIPT.with_name("install-controller.sh").read_text().split(
+        "/opt/probe-core/python/bin/python3.13 -I -m venv /opt/probe-core/venv\n", 1)[0]
     for line in installer.splitlines():
         if not line.startswith("install -d "):
             continue
