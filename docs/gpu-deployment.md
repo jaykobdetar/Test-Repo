@@ -36,6 +36,25 @@ The pinned PyTorch wheel uses CUDA 13. NVIDIA lists driver branch 580 as the min
 
 The current worker requires a real writable **delegated cgroup-v2 subtree**, with CPU, memory and PID controllers enabled for children. The diagnostic checks the filesystem type, writes fixed limits into a temporary empty child and reads them back. It does not change host processes or enable controllers on behalf of the provider. An ordinary writable directory cannot imitate this result. A read-only mount or missing delegation blocks model execution. Public RunPod API documentation has not established a way to request this delegation; an image cannot grant itself missing host capabilities. Provider-specific alternatives require measured evidence and a separate reviewed implementation.
 
+Before the empty-child probe, the diagnostic now records bounded cgroup mount,
+membership, namespace, ownership and permission observations. It opens the three
+management files for writing without writing any bytes, creating files or
+truncating them; the exact access error distinguishes a read-only mount from
+permission denial. Namespace identifiers and mount flags are observations, not
+proof that the Pod exclusively owns the hierarchy.
+
+When started as root, it also runs inspection-only code as numeric UID/GID10001
+with no supplementary groups, inherited descriptors or capabilities. That child
+reopens paths after dropping privileges. Root permission checks never certify
+worker access. `worker_prerequisites_passed` requires the active empty-child
+probe to have run as the verified worker identity, including `cgroup.kill`
+availability and successful cleanup; a root diagnostic intentionally cannot
+grant that result. These probes still do not prove enforcement under load.
+The bootstrap's existing UID10001 invocation remains the worker prerequisite
+gate. Missing delegation is reported without changing controllers or migrating
+processes. Linux distinguishes controller availability from enabling controllers
+for children; see [cgroup v2 delegation](https://docs.kernel.org/admin-guide/cgroup-v2.html#delegation).
+
 ## Full worker image
 
 The `.github/workflows/worker-image.yml` workflow requires the reviewed diagnostic image **including its digest**. Manual runs accept that reference as an input; changes to the image recipe or workflow on the configured branches use the digest pinned in the workflow. It builds `deploy/gpu/Dockerfile.worker` for Linux/amd64, installs the exact worker dependency graph from `uv.lock`, and records the actual source commit and lock hash inside the image. The uv bootstrap wheel is hash-pinned in `bootstrap-requirements.txt`. The final registry digest is recorded by the workflow. Model assets stay on the volume, outside the image. This follows [uv's locked Docker deployment pattern](https://docs.astral.sh/uv/guides/integration/docker/).
@@ -93,7 +112,7 @@ While the worker is reachable through the authenticated SSH tunnel, collect actu
 python -m probe_core.gpu_acceptance collect --plan base-plan.json --ledger /var/lib/probe-core/research.sqlite --worker-url http://127.0.0.1:LOCAL_FORWARDED_PORT --token-file /etc/probe-core/worker-token --output base-observations.json
 ```
 
-The collector refuses missing/mismatched jobs, missing stop acknowledgments, wrong terminal outcomes, changed artifact bytes, and absent canonical GPU/image provenance. It includes observed usage receipts when the endpoint is supplied. Without that endpoint it can still inspect the authoritative ledger after shutdown. It deliberately leaves `lifecycle_acceptance_complete: false`: ledger rows alone cannot prove an operator changed the supervisor PID or a provider replaced a Pod.
+The collector refuses missing/mismatched jobs, missing stop acknowledgments, wrong terminal outcomes, changed artifact bytes, and absent canonical GPU/image provenance. It includes observed usage receipts when the endpoint is supplied. Without that endpoint it can still inspect the authoritative ledger after shutdown, but the cancellation case remains inconclusive: the ledger does not retain the actual worker outcome. Cancellation requires an exact job/attempt receipt showing `CANCELLED`, `failure_kind=cancelled` and positive stop evidence. A job that finished before cancellation arrived cannot pass that check. It deliberately leaves `lifecycle_acceptance_complete: false`: separate evidence must prove cancellation followed an observed running attempt, the supervisor changed while preserving the attempt, and the provider replaced a Pod.
 
 Complete the lifecycle gate with actual before/after supervisor PID and same-attempt records, provider-confirmed stopped state, and a separately approved restart/replacement. Keep the same network volume. Re-read all pinned model hashes and retained artifact hashes after the new worker starts, and rerun its bounded parity job under the new allowance. Preserve the previous accepted manifests and cloud identity readbacks. A simulated provider result or a copied success JSON is not replacement evidence.
 

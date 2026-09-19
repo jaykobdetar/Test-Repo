@@ -10,11 +10,11 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from .dispatcher import WorkerClient
+from .dispatcher import TransportError, WorkerClient
 from .ledger import Ledger
 from .schemas import FrozenModel, Identifier, JobSpec, ModelIdentity
 from .worker import prompt_set_hash, sha256_file
-from .worker_contracts import PromptDataset, WorkerConfig
+from .worker_contracts import PromptDataset, WorkerConfig, WorkerState
 
 
 class AcceptanceCase(FrozenModel):
@@ -82,6 +82,9 @@ def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = 
     for case in plan.cases:
         job = jobs.get(case.spec.idempotency_key)
         row = {"case": case.name, "passed": False, "action": case.action}
+        cancellation_case = case.name == "cancel-running" or case.action == "cancel_after_running"
+        if cancellation_case:
+            row["cancellation_observation"] = "inconclusive"
         reports.append(row)
         if job is None or job.spec != case.spec:
             row["reason"] = "exact approved job is missing"
@@ -96,12 +99,26 @@ def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = 
         if job.state.value != case.expected_state or job.failure_kind != case.expected_failure_kind or stopped is None:
             row["reason"] = "expected terminal state and positive stop evidence are absent"
             continue
+        if cancellation_case and client is None:
+            # Ledger cancellation and stopped_at do not preserve the worker's
+            # outcome: the worker may have completed before cancellation arrived.
+            row["reason"] = "cancellation observation is inconclusive without an actual worker receipt"
+            continue
         if client is not None:
-            receipt = client.status(job.attempt_id)
-            if receipt.job_id != job.job_id or not receipt.process_stopped:
+            try:
+                receipt = client.status(job.attempt_id)
+            except TransportError:
+                row["reason"] = "worker receipt is unavailable or invalid"
+                continue
+            if receipt.job_id != job.job_id or receipt.attempt_id != job.attempt_id or not receipt.process_stopped:
                 row["reason"] = "worker receipt identity or stop evidence mismatches"
                 continue
             row["observed_receipt"] = receipt.model_dump(mode="json")
+            if cancellation_case:
+                if receipt.state != WorkerState.CANCELLED or receipt.failure_kind != "cancelled":
+                    row["reason"] = "worker receipt does not confirm cancellation of the exact attempt"
+                    continue
+                row["cancellation_observation"] = "confirmed"
         if job.state.value == "COMPLETED":
             manifest = ledger.get_manifest(job.job_id)
             if manifest.model != plan.model or manifest.hardware.provider_backend != "runpod" or manifest.hardware.gpu_count != 1 or manifest.software.container_image_digest is None:
@@ -125,7 +142,8 @@ def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = 
     return {"schema_version": 1, "kind": "gpu_runtime_acceptance_observations", "model": plan.model.model_dump(mode="json"),
             "case_results_passed": all(row["passed"] for row in reports), "cases": reports,
             "scientific_evidence": False, "lifecycle_acceptance_complete": False,
-            "remaining_evidence": ["supervisor PID changed while the same attempt remained fenced",
+            "remaining_evidence": ["cancellation requested after the exact attempt was observed running",
+                                   "supervisor PID changed while the same attempt remained fenced",
                                    "provider-confirmed stop and separately approved restart/replacement",
                                    "model and retained-artifact hash readback after replacement"]}
 
