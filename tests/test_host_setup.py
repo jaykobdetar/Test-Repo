@@ -1,6 +1,10 @@
 from dataclasses import replace
 from pathlib import Path
+import hashlib
 import json
+import shutil
+import stat
+import subprocess
 
 import pytest
 
@@ -104,3 +108,47 @@ def test_first_backup_has_provider_state_before_async_service_start():
     assert installer.index('install -o probe-trusted -g probe-trusted -m 0600') < installer.index(initialization)
     assert installer.index(initialization) < installer.index('systemctl enable --now probe-provider-stop.service')
     assert installer.index(initialization) < installer.index('systemctl start probe-backup.service')
+
+
+def test_staged_runtime_restores_only_verified_interpreter_execution(tmp_path):
+    installer = (Path(__file__).resolve().parents[1] / "deploy/install-controller.sh").read_text()
+    copy_command = next(line for line in installer.splitlines()
+                        if line.startswith("cp -R --no-preserve=all --no-dereference -- "))
+    repair_command = 'chmod 0755 "$PROBE_STAGE/python/bin/python3.13"'
+    assert repair_command in installer
+    assert installer.index('chown -hR root:root "$PROBE_STAGE"') < installer.index(repair_command)
+    assert installer.index(repair_command) < installer.index('mv -- "$PROBE_STAGE" /opt/probe-core')
+
+    bundle = tmp_path / "bundle"
+    source = bundle / "python/bin/python3.13"
+    source.parent.mkdir(parents=True)
+    # Execute a real harmless ELF binary; no administrator or system changes.
+    shutil.copyfile("/usr/bin/true", source)
+    source.chmod(0o755)
+    (source.parent / "python3").symlink_to("python3.13")
+    (bundle / "data.json").write_text('{}\n')
+    (bundle / "data.json").chmod(0o644)
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+    subprocess.run([
+        "/bin/bash", "-c",
+        'set -euo pipefail\numask 077\nPROBE_BUNDLE=$1\nPROBE_STAGE=$2\n' + copy_command,
+        "installer-copy-test", str(bundle), str(stage),
+    ], check=True)
+    copied = stage / "python/bin/python3.13"
+    assert stat.S_IMODE(copied.stat().st_mode) == 0o600
+    assert hashlib.sha256(copied.read_bytes()).digest() == hashlib.sha256(source.read_bytes()).digest()
+    with pytest.raises(PermissionError):
+        subprocess.run([str(copied)], check=True)
+
+    subprocess.run([
+        "/bin/bash", "-c", 'set -euo pipefail\nPROBE_STAGE=$1\n' + repair_command,
+        "installer-permission-test", str(stage),
+    ], check=True)
+    subprocess.run([str(copied)], check=True)
+    alias = stage / "python/bin/python3"
+    assert alias.is_symlink()
+    subprocess.run([str(alias)], check=True)
+    assert stat.S_IMODE(copied.stat().st_mode) == 0o755
+    assert stat.S_IMODE(stage.stat().st_mode) == 0o700
+    assert stat.S_IMODE((stage / "data.json").stat().st_mode) == 0o600

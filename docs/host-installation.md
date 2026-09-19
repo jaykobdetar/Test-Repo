@@ -38,6 +38,9 @@ sudo ./install-controller.sh /absolute/published/bundle MANIFEST_SHA256 HUMAN_US
 The initial installer refuses an existing `/opt/probe-core` or `/etc/probe-core`.
 It installs maintained Ubuntu Podman, UID-mapping helpers, user-session D-Bus,
 rclone and filesystem ACL packages. It changes no global AppArmor, polkit, or sudoers policy.
+The metadata-discarding copy deliberately removes executable permissions. After
+verifying the staged bytes, the installer explicitly restores execution only on
+the pinned Python interpreter before creating the installed environment.
 It creates the following accounts and relevant private directories:
 
 | Identity | Authority |
@@ -120,3 +123,21 @@ alone cannot repair that OS-level identity reuse. An administrator can launch
 the model-facing process using `runuser -u probe-research -- ...`; no broad
 passwordless sudo rule is supplied. The exact-human ACL avoids depending on the
 current session's cached supplementary groups.
+
+## Recovery from the first interpreter permission failure
+
+An earlier installer omitted that interpreter permission restoration and could
+stop with `python3.13: Permission denied` immediately after moving the verified
+bundle into `/opt/probe-core`. Package installation and account creation had
+already completed, but no venv or Probe services had been configured.
+
+For this exact state, `deploy/resume-controller-install.py` rechecks the original
+manifest digest, all installed file hashes and ownership, and the absence of
+later installation state. It refuses unexpected files, existing services or
+nonempty research/backup state. It restores the verified interpreter permission
+and runs the remaining commands from the checksum-verified installed installer.
+It does not reinstall packages, recreate accounts, or clear any data. Run the
+reviewed helper with isolated system Python as administrator and the same human
+and private credential paths used in the original installation. The original
+bundle and manifest remain unchanged. Other installation failures require their
+own diagnosis; this helper is not a general overwrite or reset command.

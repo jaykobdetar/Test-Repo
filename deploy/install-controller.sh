@@ -70,6 +70,9 @@ for required in ('python/bin/python3.13', 'controller-requirements.lock', 'deplo
 PY
 chown -hR root:root "$PROBE_STAGE"
 chmod -R go-w "$PROBE_STAGE"
+# The metadata-discarding copy removes executable bits even from the runtime.
+# Restore only this byte-verified interpreter; keep the staging root private.
+chmod 0755 "$PROBE_STAGE/python/bin/python3.13"
 
 # Maintained Ubuntu packages supply the existing distro AppArmor integration.
 # This installs packages; it does not disable AppArmor or add polkit grants.
