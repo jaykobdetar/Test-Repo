@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "run": {
+    "run_id": "run-001",
+    "parent_run_id": null,
+    "started_at": "2026-09-19T12:00:00Z",
+    "experiment_stage": "confirmatory",
+    "hypothesis_id": "H-0042",
+    "preregistration_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "approval_id": "WAKE-001",
+    "explorer_session_id": "explorer-001",
+    "replicator_blinded": true
+  },
+  "model": {
+    "repo": "Qwen/Qwen3-1.7B-Base",
+    "revision_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "local_weight_hashes": ["sha256:2222222222222222222222222222222222222222222222222222222222222222"],
+    "tokenizer_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "dtype": "bfloat16",
+    "quantized": false,
+    "chat_template_hash": null,
+    "thinking_mode": null
+  },
+  "software": {
+    "probe_mcp_git_commit": "cccccccccccccccccccccccccccccccccccccccc",
+    "container_image_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "python_version": "3.13.13",
+    "torch_version": "2.8.0",
+    "transformers_version": "4.56.0",
+    "nnsight_version": "0.5.1",
+    "cuda_version": "12.8"
+  },
+  "hardware": {
+    "provider_backend": "runpod",
+    "gpu_model": "RTX A5000",
+    "gpu_count": 1,
+    "region": "US-TEST-1",
+    "live_price_usd_per_hour": 0.5
+  },
+  "inputs": {
+    "dataset_revision": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "prompt_set_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "prompt_ids": ["prompt-001", "prompt-002"],
+    "random_seed": 12345,
+    "generation": {"temperature": 0, "max_new_tokens": 128}
+  },
+  "experiment": {
+    "tool": "activation_patch",
+    "modules": ["model.layers.0.mlp"],
+    "positions": ["last"],
+    "intervention_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+    "predicted_direction": "increase",
+    "primary_metric": "target_behavior_delta",
+    "falsifier": "No positive effect on the registered metric.",
+    "alternative_explanations": ["lexical confound", "generic model degradation"]
+  },
+  "controls": {
+    "random_component": true,
+    "norm_matched_direction": true,
+    "unrelated_behavior_suite": "control-v3"
+  },
+  "results": {
+    "effect_size": 0.21,
+    "confidence_interval": [0.14, 0.28],
+    "heldout": true,
+    "replication_status": "pending"
+  },
+  "cost": {"gpu_seconds": 30, "estimated_compute_usd": 0.004166667, "bytes_persisted": 4096},
+  "artifacts": [
+    {"path": "artifacts/metrics.parquet", "sha256": "7777777777777777777777777777777777777777777777777777777777777777", "retention_class": "validated"}
+  ],
+  "security": {"outbound_network_attempts": 0, "policy_denials": 0, "secret_access_attempts": 0}
+}
