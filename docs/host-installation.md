@@ -87,6 +87,10 @@ Both the image import and the research service use the account's own primary
 group, `probe-trusted`, as required by `newuidmap`. The service also receives the
 supplementary `probe-research` group and assigns that group to its private runtime
 directory before opening the socket, preserving access for the research client.
+The group assignment and Python `exec` run in the same startup command. Systemd
+prepares runtime-directory ownership for each command, so assigning the group
+in a separate `ExecStartPre` can be undone before the service starts. The fixed
+prologue exits if the group change fails and preserves the Python service's PID.
 An administrator-owned `containers.conf` under the dedicated
 `/var/lib/probe-sandbox/.config/containers` selects `/usr/bin/crun` explicitly.
 Image import and service execution share that HOME and the same rootless image

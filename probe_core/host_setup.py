@@ -103,10 +103,18 @@ def render_configuration(destination: str | Path, *, identities: Identities,
         elif line == "Type=simple":
             line = "Type=oneshot\nTimeoutStartSec=240\nEnvironmentFile=/etc/probe-core/sandbox-acceptance.env"
         elif line.startswith("ExecStart="):
-            line = ("ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.sandbox_acceptance "
+            research_command = ("/opt/probe-core/venv/bin/python -I -m probe_core.research_service "
+                                "--config /etc/probe-core/research.json")
+            prefix, matched, suffix = line.partition(research_command)
+            if (not matched or prefix != "ExecStart=/bin/sh -ec '/usr/bin/chgrp probe-research /run/probe-research; exec "
+                    or suffix != "'"):
+                raise ValueError("research startup must use the exact reviewed directory preparation and exec prologue")
+            # Both units share the runtime directory. Preserve its group repair
+            # inside the main command, after systemd's per-command directory setup.
+            line = (prefix + "/opt/probe-core/venv/bin/python -I -m probe_core.sandbox_acceptance "
                     "--image ${SANDBOX_IMAGE} --workspace /var/lib/probe-sandbox/acceptance "
                     "--podman /usr/bin/podman --seccomp-profile /opt/probe-core/seccomp.json "
-                    "--output /var/lib/probe-sandbox/acceptance-report.json")
+                    "--output /var/lib/probe-sandbox/acceptance-report.json" + suffix)
         acceptance_lines.append(line)
     (destination / "probe-sandbox-acceptance.service").write_text("\n".join(acceptance_lines) + "\n")
     for file in destination.iterdir():

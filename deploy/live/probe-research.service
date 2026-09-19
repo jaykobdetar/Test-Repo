@@ -12,9 +12,10 @@ WorkingDirectory=/opt/probe-core
 Environment=HOME=/var/lib/probe-sandbox
 EnvironmentFile=/etc/probe-core/research-runtime.env
 Environment=PYTHONNOUSERSITE=1
-ExecStartPre=/usr/bin/chgrp probe-research /run/probe-research
 ExecStartPre=/usr/bin/test -S @USER_RUNTIME@/bus
-ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.research_service --config /etc/probe-core/research.json
+# Set the socket directory group after systemd prepares this command's runtime
+# directory. A separate pre-start command is undone by the next command's setup.
+ExecStart=/bin/sh -ec '/usr/bin/chgrp probe-research /run/probe-research; exec /opt/probe-core/venv/bin/python -I -m probe_core.research_service --config /etc/probe-core/research.json'
 RuntimeDirectory=probe-research
 RuntimeDirectoryMode=0750
 Restart=on-failure

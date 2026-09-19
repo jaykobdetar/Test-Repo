@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -77,7 +78,7 @@ def test_cpu_acceptance_uses_the_actual_research_service_security_profile(tmp_pa
 
 
 @pytest.mark.parametrize("unit", ["probe-research.service", "probe-sandbox-acceptance.service"])
-def test_rootless_units_keep_primary_group_and_prepare_research_socket_first(tmp_path, unit):
+def test_rootless_units_keep_primary_group_and_prepare_socket_in_main_command(tmp_path, unit):
     render(tmp_path)
     root = tmp_path / "rendered"
     lines = (root / unit).read_text().splitlines()
@@ -89,15 +90,73 @@ def test_rootless_units_keep_primary_group_and_prepare_research_socket_first(tmp
     assert settings["RuntimeDirectory"] == "probe-research"
     assert settings["RuntimeDirectoryMode"] == "0750"
     preparation = [line.removeprefix("ExecStartPre=") for line in lines if line.startswith("ExecStartPre=")]
-    assert preparation == [
-        "/usr/bin/chgrp probe-research /run/probe-research",
-        "/usr/bin/test -S /run/user/991/bus",
-    ]
+    assert preparation == ["/usr/bin/test -S /run/user/991/bus"]
     assert lines.index("ExecStartPre=" + preparation[0]) < next(
         index for index, line in enumerate(lines) if line.startswith("ExecStart="))
+    command = shlex.split(settings["ExecStart"])
+    assert command[:2] == ["/bin/sh", "-ec"] and len(command) == 3
+    if unit == "probe-research.service":
+        assert command[2] == ("/usr/bin/chgrp probe-research /run/probe-research; exec "
+                              "/opt/probe-core/venv/bin/python -I -m probe_core.research_service "
+                              "--config /etc/probe-core/research.json")
+    else:
+        assert command[2] == ("/usr/bin/chgrp probe-research /run/probe-research; exec "
+                              "/opt/probe-core/venv/bin/python -I -m probe_core.sandbox_acceptance "
+                              "--image ${SANDBOX_IMAGE} --workspace /var/lib/probe-sandbox/acceptance "
+                              "--podman /usr/bin/podman --seccomp-profile /opt/probe-core/seccomp.json "
+                              "--output /var/lib/probe-sandbox/acceptance-report.json")
+    assert not any(line.startswith("ExecStartPost=") for line in lines)
     configuration = ServiceConfig.model_validate_json((root / "research.json").read_bytes())
     assert configuration.socket_gid == identities().research_gid
     assert configuration.socket_path == "/run/probe-research/research.sock"
+
+
+@pytest.mark.parametrize("group_change_succeeds", [True, False])
+@pytest.mark.parametrize("unit_name", ["probe-research.service", "probe-sandbox-acceptance.service"])
+def test_main_prologue_execs_same_pid_only_after_successful_group_change(tmp_path, group_change_succeeds, unit_name):
+    render(tmp_path)
+    unit = (tmp_path / "rendered" / unit_name).read_text().splitlines()
+    command = shlex.split(next(line.split("=", 1)[1] for line in unit if line.startswith("ExecStart=")))
+    directory = tmp_path / "runtime directory"
+    directory.mkdir(mode=0o750)
+    # Execute the actual shell prologue with only its fixed host paths replaced
+    # by this test's owned directory and a process that reports its identity.
+    group_command = (shlex.join(["/usr/bin/chgrp", str(os.getgid()), str(directory)])
+                     if group_change_succeeds else "/usr/bin/false")
+    original_python = ("/opt/probe-core/venv/bin/python -I -m probe_core.research_service "
+                       "--config /etc/probe-core/research.json")
+    if unit_name == "probe-sandbox-acceptance.service":
+        original_python = ("/opt/probe-core/venv/bin/python -I -m probe_core.sandbox_acceptance "
+                           "--image ${SANDBOX_IMAGE} --workspace /var/lib/probe-sandbox/acceptance "
+                           "--podman /usr/bin/podman --seccomp-profile /opt/probe-core/seccomp.json "
+                           "--output /var/lib/probe-sandbox/acceptance-report.json")
+    command[2] = command[2].replace("/usr/bin/chgrp probe-research /run/probe-research", group_command)
+    command[2] = command[2].replace(original_python, shlex.join([sys.executable, "-I", "-c", "import os; print(os.getpid())"]))
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, error = process.communicate(timeout=5)
+    assert not error
+    if group_change_succeeds:
+        assert process.returncode == 0 and int(out) == process.pid
+        assert directory.stat().st_gid == os.getgid() and stat.S_IMODE(directory.stat().st_mode) == 0o750
+    else:
+        assert process.returncode != 0 and out == b""
+
+
+@pytest.mark.parametrize("before,after", [
+    ("; exec /opt/probe-core", "; /opt/probe-core"),
+    ("chgrp probe-research /run/probe-research", "chgrp probe-trusted /run/probe-research"),
+    ("--config /etc/probe-core/research.json'", "--config /etc/probe-core/research.json; /usr/bin/true'"),
+])
+def test_acceptance_derivation_rejects_changed_main_prologue(tmp_path, before, after):
+    templates = tmp_path / "templates"
+    shutil.copytree(Path(__file__).resolve().parents[1] / "deploy/live", templates)
+    research = templates / "probe-research.service"
+    original = research.read_text()
+    assert original.count(before) == 1
+    research.write_text(original.replace(before, after))
+    with pytest.raises(ValueError, match="exact reviewed directory preparation and exec prologue"):
+        render_configuration(tmp_path / "rendered", identities=identities(), templates=templates,
+                             source_commit="a" * 40, drive_folder_id="pinnedDriveFolder123")
 
 
 def test_installer_podman_calls_execute_with_account_primary_group(tmp_path):

@@ -44,6 +44,12 @@ def installed(tmp_path):
             text = text.replace("\nGroup=probe-trusted\n", "\nGroup=probe-research\n")
             text = text.replace("SupplementaryGroups=probe-research probe-ipc probe-ledger-read", "SupplementaryGroups=probe-trusted probe-ipc probe-ledger-read")
             text = text.replace("ExecStartPre=/usr/bin/chgrp probe-research /run/probe-research\n", "")
+            # This fixture reconstructs the original historical unit, before
+            # both the primary-group repair and the main-command prologue.
+            text = text.replace("# Set the socket directory group after systemd prepares this command's runtime\n"
+                                "# directory. A separate pre-start command is undone by the next command's setup.\n", "")
+            text = text.replace("ExecStart=/bin/sh -ec '/usr/bin/chgrp probe-research /run/probe-research; exec ", "ExecStart=")
+            text = text.replace("--config /etc/probe-core/research.json'\n", "--config /etc/probe-core/research.json\n")
         write(root / "deploy/live" / path.name, text)
     installer = (PROJECT / "deploy/install-controller.sh").read_text().replace(
         "runuser -u probe-trusted -g probe-trusted -- env HOME=", "runuser -u probe-trusted -g probe-research -- env HOME=")
