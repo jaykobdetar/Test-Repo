@@ -6,35 +6,34 @@ validated separately.
 
 ## Verified local deployment
 
-On September 19, 2026, the first Ubuntu controller installation completed:
+On September 19, 2026, the Ubuntu controller installation completed local acceptance:
 
-- The installed CPU acceptance service passed all 14 containment, attestation,
-  resource-limit and normal-cleanup checks under the actual research service
-  profile. No service security restriction was relaxed.
+- The installed CPU service passed all 16 containment, attestation, resource-limit
+  and cleanup checks. The crash test killed both launchers before their host
+  timer could act, then observed independent process termination and removal.
+- All 26 checks of the actual installed identities passed, including denied
+  credential/admin access, allowed research status/discovery, and their audit
+  records. The research socket directory's group is assigned in the same startup
+  command that execs Python; a separate pre-start assignment was being reset by
+  systemd before the service could accept research clients.
 - Controller, research facade, independent watchdog and provider stop broker
-  were enabled and running. The human administrative socket responded with no
-  compute requests.
-- The installed snapshot and backup identities uploaded the initial local
-  snapshot to Drive, downloaded it, verified its hashes and restored it offline.
-  The first transfer failed; a backup-only retry reused the pending archive and
-  passed without changing code, credentials or permissions. Its specific initial
-  transfer failure was not retained, so its cause remains undetermined.
-- The daily backup timer was enabled. No paid compute was launched.
+  were enabled and running, with no upgrade guard overrides. The human
+  administrative socket returned no compute requests.
+- The installed backup identity uploaded a snapshot to Drive, downloaded it,
+  verified its hashes and restored it offline. The daily backup timer is active.
 
-This initial snapshot contained empty controller/provider state, not scientific
-results. Tests of denial under each installed identity, CPU cleanup after a
-facade crash, and all live GPU/storage/provider acceptance conditions remain
-open. The service installation does not establish unattended readiness.
+The accepted application wheel is from `e6bfc71`, with the reviewed research
+startup command correction. Later dispatcher tunnel recovery and deployment
+renderer changes are committed but still need packaging for GPU service setup.
+No paid compute or persistent volume has been created. The verified snapshots
+contain initial controller/provider state rather than scientific results. These
+local checks do not establish live CUDA, provider shutdown or unattended readiness.
 
-A subsequent application update is prepared but has not yet been installed.
-It adds a container-monitor deadline and automatic removal after a facade
-crash. Its packaged wheel passed all 16 CPU acceptance conditions in a separate
-human-owned rootless store, including killing both launchers before their host
-timer could fire. The old launcher failed that crash test. The local regression
-suite passed 758 tests; its ten real-container cases were configured separately.
-The update also includes a 26-check administrator-run identity gate and an
-infrastructure-only diagnostic that does not require buying a network volume.
-Neither the installed update nor its actual-identity gate is claimed complete.
+The packaged application passed 758 local regression tests and all 16 CPU
+acceptance conditions in a separate human-owned store before installation.
+Subsequent dispatcher tests passed 19 cases, and service-template/recovery tests
+passed 81 cases. These are separate, overlapping validation sets, not a summed
+full-suite result for the latest commit.
 
 ## Selected setup
 
