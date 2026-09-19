@@ -240,6 +240,9 @@ class PodmanSandbox:
     def _run_command(self, name: str, inputs: Path, limits: SandboxLimits) -> list[str]:
         return self._command(
             "run", "--name", name, "--pull=never", "--interactive", "--log-driver=none",
+            # Conmon enforces this deadline even if the facade and attached
+            # Podman client die. Keep the host timer for startup-inclusive limits.
+            "--timeout=" + str(limits.wall_seconds), "--rm",
             "--network=none", "--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private",
             "--userns=keep-id:uid=1000,gid=1000", "--user=1000:1000", "--cap-drop=ALL",
             "--security-opt=no-new-privileges", "--security-opt=seccomp=" + str(self.seccomp_profile),
@@ -385,6 +388,10 @@ class PodmanSandbox:
                     if sum(map(len, logs.values())) + sum(map(len, buffers.values())) > limits.max_log_bytes + 128 * 1024:
                         raise SandboxProtocolError("log output limit exceeded")
             proc.wait(timeout=5)
+            # A kill can close both streams during select(), ending the loop
+            # before its next timeout check. Preserve the actual timer outcome.
+            if reason is None and timed_out.is_set():
+                reason = "wall_time_limit"
             if sum(map(len, logs.values())) > limits.max_log_bytes:
                 raise SandboxProtocolError("log output limit exceeded")
             if reason is None and (not attested or receiver.close()):

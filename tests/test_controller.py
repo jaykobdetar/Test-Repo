@@ -98,6 +98,30 @@ def test_human_infrastructure_allowance_creates_no_dispatchable_research_jobs(ha
     assert controller.status()[0]["state"] == "STOPPED"
 
 
+def test_ephemeral_preflight_cannot_be_provisioned_replaced_or_reused_for_research(harness):
+    controller = harness["controller"]
+    spec = deployment(storage_mode="ephemeral_preflight", volume_id=None, volume_gb=0,
+                      image_repository="ghcr.io/test/diagnostic", launch_config_hash="sha256:" + "d" * 64)
+    for replaces in (None, "old-worker"):
+        with pytest.raises(ControllerConflict, match="infrastructure preflight"):
+            controller.request_provision(spec, [harness["job"].job_id], 300, replaces_worker_id=replaces)
+    params = {"deployment": spec.model_dump(), "script_sha256": "sha256:" + "c" * 64,
+              "max_runtime_seconds": 300}
+    with pytest.raises(PermissionError):
+        controller.research_dispatch("request_preflight", params)
+    request = controller.admin_dispatch("request_preflight", params)
+    assert request["job_ids"] == [] and request["configuration_hash"] == spec.digest
+    controller.approve_and_start(request["request_id"], price_ceiling_usd_per_hour=.80)
+    assert harness["ledger"].dispatch_next(request["worker_id"], approval_id=request["approval_id"]) is None
+    harness["clock"].advance(300)
+    harness["watcher"].tick()
+    controller.reconcile()
+    assert controller.status()[0]["state"] == "STOPPED"
+    with pytest.raises(ControllerConflict, match="cannot run research"):
+        controller.request_start(request["worker_id"], [harness["job"].job_id], 300)
+    assert len(calls(harness, "create")) == 1 and calls(harness, "start") == []
+
+
 @pytest.mark.parametrize("purpose", ["research", "infrastructure_preflight"])
 def test_research_and_infrastructure_approval_scopes_cannot_cross(harness, purpose):
     ledger, clock = harness["ledger"], harness["clock"]

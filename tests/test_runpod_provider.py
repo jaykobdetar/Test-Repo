@@ -65,7 +65,8 @@ class HTTP:
                    "dataCenterId": config["dataCenterId"], "cudaVersion": config["minCudaVersion"],
                    "image": config["imageName"], "args": config["dockerArgs"], "disk": config["containerDiskInGb"],
                    "ports": config["ports"].split(',') if config["ports"] else [],
-                   "mounts": {"network": [{"volumeId": config["networkVolumeId"], "path": "/workspace"}]},
+                   "mounts": {"network": ([{"volumeId": config["networkVolumeId"], "path": "/workspace"}]
+                                            if "networkVolumeId" in config else [])},
                    "locked": False, "status": self.initial_state, "cost": self.price}
             self.pods.append(pod)
             if self.fail_after_create:
@@ -127,6 +128,84 @@ def test_create_binds_image_approval_deadline_and_atomic_provider_price_ceiling(
     assert body["startSsh"] is False
     assert {v["key"] for v in body["env"]} == {"PROBE_WORKER_ID", "PROBE_REQUEST_ID", "PROBE_CONFIGURATION_HASH", "PROBE_ABSOLUTE_DEADLINE"}
     assert backend.capabilities()["host_loss_guarantee"] == "unverified"
+
+
+def ephemeral(runpod):
+    backend, http, clock, spec = runpod
+    values = spec.model_dump()
+    values.update(storage_mode="ephemeral_preflight", volume_id=None, volume_gb=0)
+    return backend, http, clock, DeploymentSpec.model_validate(values)
+
+
+def test_ephemeral_preflight_creates_no_persistent_storage_and_reconciles_after_restart(runpod):
+    runpod = ephemeral(runpod)
+    backend, http, clock, spec = runpod
+    http.volumes.clear()
+    quote = backend.quote(deployment=spec)
+    assert quote.projected_storage_usd_per_day == 0
+    assert quote.usd_per_hour == pytest.approx(.74 + 20 * .10 / (28 * 24))
+    assert create(runpod).state == WorkerState.RUNNING
+    body = http.purchases[0][2]["variables"]["input"]
+    assert "networkVolumeId" not in body and "volumeMountPath" not in body
+    assert body["volumeInGb"] == 0 and body["containerDiskInGb"] == 20
+    assert body["stopAfter"] == (clock() + timedelta(seconds=300)).isoformat()
+    assert .74 < body["deployCost"] < .80
+    assert {entry["key"]: entry["value"] for entry in body["env"]}["PROBE_CONFIGURATION_HASH"] == spec.digest
+    reopened = RunPodProvider(backend.config, transport=http, clock=clock)
+    assert reopened.status("worker1").state == WorkerState.RUNNING
+    with pytest.raises(ProviderUncertain, match="already consumed"):
+        create((reopened, http, clock, spec))
+    reopened.stop("worker1")
+    assert reopened.status("worker1").state == WorkerState.STOPPED
+    assert len(http.purchases) == 1
+
+
+def test_ephemeral_preflight_still_counts_and_limits_all_account_storage(runpod):
+    runpod = ephemeral(runpod)
+    backend, http, _, spec = runpod
+    http.volumes.append({"id": "detached-old", "size": 1000, "dataCenter": "US-TX-3", "type": "STANDARD"})
+    assert backend.quote(deployment=spec).projected_storage_usd_per_day == pytest.approx(1100 * .07 / 28)
+    with pytest.raises(ProviderBudgetRefused):
+        create(runpod)
+    assert http.purchases == []
+
+
+@pytest.mark.parametrize("unexpected", [
+    {"network": [{"volumeId": "unexpected", "path": "/workspace"}]},
+    {"network": [], "persistent": {"size": 1}},
+])
+def test_ephemeral_preflight_rejects_unapproved_persistent_storage_readback(runpod, unexpected):
+    runpod = ephemeral(runpod)
+    backend, http, _, _ = runpod
+    create(runpod)
+    http.pods[0]["mounts"] = unexpected
+    with pytest.raises(ProviderUncertain, match="configuration differs"):
+        backend.status("worker1")
+    backend.stop("worker1")
+    assert http.pods[0]["status"] == "EXITED"
+
+
+@pytest.mark.parametrize("overrides", [
+    {"volume_id": None, "volume_gb": 0},
+    {"volume_gb": 0},
+    {"storage_mode": "ephemeral_preflight"},
+    {"storage_mode": "ephemeral_preflight", "volume_id": None, "volume_gb": 1},
+    {"storage_mode": "ephemeral_preflight", "volume_id": None, "volume_gb": 0, "launch_config_hash": None},
+    {"storage_mode": "ephemeral_research", "volume_id": None, "volume_gb": 0},
+])
+def test_only_explicit_image_bound_preflight_can_omit_a_volume(runpod, overrides):
+    values = runpod[3].model_dump()
+    values.update(overrides)
+    with pytest.raises(ValueError):
+        DeploymentSpec.model_validate(values)
+
+
+def test_research_deployment_still_requires_existing_matching_volume(runpod):
+    backend, http, _, spec = runpod
+    http.volumes.clear()
+    with pytest.raises(ProviderCapabilityError, match="persistent volume"):
+        backend.quote(deployment=spec)
+    assert http.purchases == []
 
 
 def test_disabled_mode_and_resume_never_submit_a_paid_operation(runpod):

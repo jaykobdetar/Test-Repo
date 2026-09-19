@@ -26,6 +26,16 @@ results. Tests of denial under each installed identity, CPU cleanup after a
 facade crash, and all live GPU/storage/provider acceptance conditions remain
 open. The service installation does not establish unattended readiness.
 
+A subsequent application update is prepared but has not yet been installed.
+It adds a container-monitor deadline and automatic removal after a facade
+crash. Its packaged wheel passed all 16 CPU acceptance conditions in a separate
+human-owned rootless store, including killing both launchers before their host
+timer could fire. The old launcher failed that crash test. The local regression
+suite passed 758 tests; its ten real-container cases were configured separately.
+The update also includes a 26-check administrator-run identity gate and an
+infrastructure-only diagnostic that does not require buying a network volume.
+Neither the installed update nor its actual-identity gate is claimed complete.
+
 ## Selected setup
 
 | Decision | Initial choice | Reason |

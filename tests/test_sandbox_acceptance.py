@@ -68,6 +68,10 @@ def fake_runtime(monkeypatch):
 
     monkeypatch.setattr(acceptance, "_RecordedSandbox", FakeSandbox)
     monkeypatch.setattr(acceptance, "_image_identity", lambda sandbox: sandbox.image)
+    monkeypatch.setattr(acceptance, "run_lifecycle_check", lambda sandbox: {
+        "program_started": True, "launchers_killed": True, "host_timer_excluded": True,
+        "container_processes_stopped": True, "container_removed": True,
+    })
     return FakeSandbox
 
 
@@ -221,6 +225,32 @@ def test_wall_time_includes_a_bounded_cleanup_window(tmp_path, fake_runtime, mon
         invoke(tmp_path)
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["status"] == "failed" and report["stage"] == "wall_time"
+
+
+@pytest.mark.parametrize("missing", ["program_started", "launchers_killed", "host_timer_excluded", "container_processes_stopped", "container_removed"])
+def test_crash_gate_requires_observed_start_death_and_removal(tmp_path, fake_runtime, monkeypatch, missing):
+    observations = dict.fromkeys(("program_started", "launchers_killed", "host_timer_excluded", "container_processes_stopped", "container_removed"), True)
+    observations[missing] = False
+    monkeypatch.setattr(acceptance, "run_lifecycle_check", lambda sandbox: observations)
+    with pytest.raises(acceptance.AcceptanceError, match="independent termination"):
+        invoke(tmp_path)
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["stage"] == "launcher_crash" and report["status"] == "failed"
+    assert "crash_deadline_enforced" not in report["checks"]
+
+
+def test_crash_failure_retains_partial_evidence_privately(tmp_path, fake_runtime, monkeypatch):
+    from probe_core.sandbox_lifecycle import LifecycleError
+    def failure(sandbox):
+        error = LifecycleError("container outlived its independent cleanup deadline")
+        error.lifecycle_report = {"program_started": True, "container_removed": False}
+        raise error
+    monkeypatch.setattr(acceptance, "run_lifecycle_check", failure)
+    with pytest.raises(LifecycleError):
+        invoke(tmp_path)
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["stage"] == "launcher_crash" and report["status"] == "failed"
+    assert report["lifecycle"] == {"program_started": True, "container_removed": False}
 
 
 def test_modified_profile_is_rejected_before_containers(tmp_path, fake_runtime):

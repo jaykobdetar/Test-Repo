@@ -88,8 +88,8 @@ def test_pin_and_hardening_command_are_mandatory(tmp_path):
     with pytest.raises(ValueError):
         PodmanSandbox(image="python:latest", workspace=tmp_path)
     sandbox = PodmanSandbox(image="sha256:" + "a" * 64, workspace=tmp_path)
-    command = sandbox._run_command("probe-test", tmp_path / "input", SandboxLimits())
-    for flag in ("--network=none", "--read-only", "--read-only-tmpfs=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pull=never", "--unsetenv-all", "--http-proxy=false", "--user=1000:1000"):
+    command = sandbox._run_command("probe-test", tmp_path / "input", SandboxLimits(wall_seconds=17))
+    for flag in ("--network=none", "--read-only", "--read-only-tmpfs=false", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pull=never", "--unsetenv-all", "--http-proxy=false", "--user=1000:1000", "--timeout=17", "--rm"):
         assert flag in command
     assert not any(arg.startswith("--device") or "docker.sock" in arg or "podman.sock" in arg for arg in command)
     assert all("ro=true" in arg for arg in command if arg.startswith("--mount"))

@@ -135,11 +135,21 @@ reviewable deployment copy. The seccomp allowlist additionally denies socket cre
 ptrace/process-memory access, keyring operations and BPF. Allowed process
 creation remains constrained by the PID and memory cgroups.
 
-The controller owns the wall-time/cancellation watchdog. It kills the container,
+Podman's independent `--timeout` deadline and `--rm` cleanup remain active if
+the facade and its attached Podman client are killed. The controller also owns
+the startup-inclusive wall-time/cancellation watchdog. It kills the container,
 cleans up its Podman instance and requires confirmed removal. A cleanup failure
 raises `SandboxUnavailable`; callers must not treat that as a completed stop.
 Input and returned output directories are retained under the private workspace
 for provenance; retention/backup policy belongs to the controller.
+
+The installed `probe_core.sandbox_acceptance` gate additionally starts a fixed
+synthetic program, confirms its execution, kills both launchers with SIGKILL,
+and requires the container processes to stop and its record to disappear within
+the bounded observation window. PID descriptors prevent confusing reused PIDs
+with surviving processes. Explicit cleanup happens only after the observation
+has passed or failed; it cannot supply evidence for a passing result. Run this
+gate under the actual installed service profile after a launcher change.
 
 ## Verified environment and image
 

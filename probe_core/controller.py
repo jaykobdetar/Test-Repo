@@ -143,10 +143,19 @@ class Controller:
             _identifier(job_id, "job ID")
         if replaces_worker_id is not None:
             _identifier(replaces_worker_id, "replacement worker ID")
+        self._deployment_scope(deployment, action, infrastructure, job_ids)
         request_id = "request-" + uuid.uuid4().hex
         approval_id = "approval-" + uuid.uuid4().hex
 
         def create(connection, now):
+            if infrastructure is None:
+                # A stopped diagnostic identity cannot later acquire a research
+                # allowance through the existing-worker start endpoint.
+                previous = connection.execute(
+                    "SELECT configuration FROM compute_requests WHERE worker_id=? AND configuration IS NOT NULL",
+                    (worker_id,))
+                if any(json.loads(row[0]).get("storage_mode") == "ephemeral_preflight" for row in previous):
+                    raise ControllerConflict("ephemeral preflight workers cannot run research jobs")
             batch_hash = self._infrastructure_hash(infrastructure, deployment.digest) if infrastructure else Ledger._batch(connection, job_ids)
             for job_id in job_ids:
                 if Ledger._row(connection, job_id)["state"] != JobState.PENDING:
@@ -165,6 +174,12 @@ class Controller:
             })
             return self._public(self._row(connection, request_id))
         return self.ledger._submit(create)
+
+    @staticmethod
+    def _deployment_scope(deployment, action, infrastructure, job_ids):
+        if (deployment is not None and deployment.storage_mode == "ephemeral_preflight" and
+                (action != "CREATE" or not infrastructure or infrastructure.get("kind") != "gpu_preflight" or job_ids)):
+            raise ControllerConflict("ephemeral storage is restricted to an infrastructure preflight with no research jobs")
 
     def request_start(self, worker_id: str, job_ids: list[str], max_runtime_seconds: int) -> dict:
         return self._request("START", worker_id, job_ids, max_runtime_seconds)
@@ -268,6 +283,7 @@ class Controller:
             if request["state"] != "PENDING":
                 raise ControllerConflict("request was already considered; uncertain actions cannot be repeated")
             deployment = DeploymentSpec.model_validate(request["configuration"]) if request["configuration"] else None
+            self._deployment_scope(deployment, request["action"], request["infrastructure"], request["job_ids"])
             if deployment is None:
                 existing = self.backend.status(request["worker_id"])
                 if existing.state != WorkerState.STOPPED:

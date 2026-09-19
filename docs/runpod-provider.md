@@ -9,6 +9,11 @@ controller process crash, but shares the host's power and network failure modes.
 
 - Create a fresh, single-GPU Secure Cloud Pod from a digest-pinned image, attaching
   an existing Standard network volume of the approved size and data center.
+- A separately approved infrastructure diagnostic may set
+  `storage_mode="ephemeral_preflight"`, `volume_id=null`, and `volume_gb=0`.
+  It binds the exact image and launch configuration and creates no retained
+  volume. That worker cannot later acquire a research-job allowance; research
+  creation and replacement continue to require persistent storage.
 - Quote the GPU price from the live catalog, add a conservative container-disk
   charge, and count all account Standard network volumes and retained Pod disks.
 - Submit one GraphQL `podFindAndDeployOnDemand` mutation with `deployCost` below

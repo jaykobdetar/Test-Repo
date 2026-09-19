@@ -22,6 +22,7 @@ import tempfile
 import time
 
 from .sandbox import PodmanSandbox, SandboxLimits, SandboxResult
+from .sandbox_lifecycle import run_lifecycle_check
 
 
 class AcceptanceError(RuntimeError):
@@ -29,7 +30,7 @@ class AcceptanceError(RuntimeError):
 
 
 _DIAGNOSTIC_BYTES = 8192
-_STAGES = {"configuration", "runtime", "cpu_and_isolation", "pid_and_output", "memory", "wall_time", "complete"}
+_STAGES = {"configuration", "runtime", "cpu_and_isolation", "pid_and_output", "memory", "wall_time", "launcher_crash", "complete"}
 _PUBLIC_REASONS = {
     "report parent must be a trusted, owned directory without symlinks": "unsafe_report_directory",
     "report must be an owned regular file": "unsafe_report_file",
@@ -43,6 +44,7 @@ _PUBLIC_REASONS = {
     "contained check did not prove every required condition": "required_condition_unproven",
     "memory pressure was not refused after verified startup": "memory_limit_unproven",
     "wall time did not terminate a verified running job within the cleanup bound": "wall_time_limit_unproven",
+    "launcher crash did not prove independent termination and removal": "crash_cleanup_unproven",
 }
 
 
@@ -316,6 +318,16 @@ def run_acceptance(*, image: str, workspace: Path, output: Path,
             raise AcceptanceError("wall time did not terminate a verified running job within the cleanup bound")
         report["checks"].update({"wall_time_enforced": True, "runtime_attestation": True,
                                  "cpu_cgroup_limit_attested": True, "container_removal_confirmed": True})
+        report["stage"] = "launcher_crash"
+        try:
+            report["lifecycle"] = run_lifecycle_check(sandbox)
+        except BaseException as error:
+            report["lifecycle"] = getattr(error, "lifecycle_report", {})
+            raise
+        if any(report["lifecycle"].get(key) is not True for key in (
+                "program_started", "launchers_killed", "host_timer_excluded", "container_processes_stopped", "container_removed")):
+            raise AcceptanceError("launcher crash did not prove independent termination and removal")
+        report["checks"].update({"crash_deadline_enforced": True, "crash_removal_confirmed": True})
         report["stage"] = "complete"
         report["status"] = "passed"
     except BaseException as error:

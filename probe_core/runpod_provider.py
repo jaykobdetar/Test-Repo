@@ -281,10 +281,16 @@ class RunPodProvider:
         spec = DeploymentSpec.model_validate_json(intent["configuration"])
         launch = RunPodLaunchConfig.model_validate_json(intent["launch_configuration"])
         mounts = pod.get("mounts", {}).get("network", [])
+        if spec.storage_mode == "ephemeral_preflight":
+            persistent = pod.get("mounts", {}).get("persistent")
+            storage_matches = not mounts and (persistent is None or persistent == {} or
+                                              (type(persistent) is dict and persistent.get("size") == 0))
+        else:
+            storage_matches = any(v.get("volumeId") == spec.volume_id and v.get("path") == "/workspace" for v in mounts)
         if (pod.get("image") != spec.image_repository + "@" + spec.image_digest or
                 pod.get("gpu", {}).get("id") != spec.gpu_model or pod.get("gpu", {}).get("count") != 1 or
                 pod.get("dataCenterId") not in (None, spec.region) or
-                not any(v.get("volumeId") == spec.volume_id and v.get("path") == "/workspace" for v in mounts) or
+                not storage_matches or
                 pod.get("locked") is not False or pod.get("disk") != launch.container_disk_gb or
                 pod.get("args") != launch.args or set(pod.get("ports", [])) != set(launch.ports) or
                 any(pod.get("env", {}).get(key) != value for key, value in launch.environment.items())):
@@ -348,9 +354,10 @@ class RunPodProvider:
         if type(body) is not dict or type(body.get("networkVolumes")) is not list:
             raise ProviderResponseError("invalid network volume inventory")
         volumes = body["networkVolumes"]
-        target = [v for v in volumes if v.get("id") == deployment.volume_id]
-        if len(target) != 1 or target[0].get("size") != deployment.volume_gb or target[0].get("dataCenter") != deployment.region:
-            raise ProviderCapabilityError("approved persistent volume must already exist in the exact size and data center")
+        if deployment.storage_mode != "ephemeral_preflight":
+            target = [v for v in volumes if v.get("id") == deployment.volume_id]
+            if len(target) != 1 or target[0].get("size") != deployment.volume_gb or target[0].get("dataCenter") != deployment.region:
+                raise ProviderCapabilityError("approved persistent volume must already exist in the exact size and data center")
         total = Decimal(0)
         for volume in volumes:
             if volume.get("type") != "STANDARD":
@@ -407,12 +414,14 @@ class RunPodProvider:
         body = {"cloudType": "SECURE", "name": "probe-" + worker_id,
                 "imageName": deployment.image_repository + "@" + deployment.image_digest,
                 "gpuTypeId": deployment.gpu_model, "gpuCount": 1, "dataCenterId": deployment.region,
-                "networkVolumeId": deployment.volume_id, "volumeInGb": 0, "volumeMountPath": "/workspace",
+                "volumeInGb": 0,
                 "containerDiskInGb": launch.container_disk_gb, "dockerArgs": launch.args,
                 "minCudaVersion": launch.min_cuda_version, "deployCost": float(ceiling - disk_hourly),
                 "startSsh": launch.start_ssh, "startJupyter": False, "ports": ",".join(launch.ports),
                 "stopAfter": absolute_deadline.astimezone(UTC).isoformat(),
                 "env": [{"key": key, "value": value} for key, value in env.items()]}
+        if deployment.storage_mode != "ephemeral_preflight":
+            body.update(networkVolumeId=deployment.volume_id, volumeMountPath="/workspace")
         validate_audit_payload(body)
         if self.clock() >= absolute_deadline:
             raise ProviderCapabilityError("approval expired during provider preflight")

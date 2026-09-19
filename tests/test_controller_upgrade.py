@@ -1,0 +1,355 @@
+"""Offline upgrade refusals and fail-closed ordering; no host services are used."""
+import base64
+import csv
+from datetime import datetime, timedelta, timezone
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import stat
+from types import SimpleNamespace
+import zipfile
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parents[1] / "deploy/upgrade-controller.py"
+spec = importlib.util.spec_from_file_location("controller_upgrade", SCRIPT)
+upgrade = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(upgrade)
+OWNER = os.geteuid()
+DIST = "probe_core-0.2.0.dist-info"
+NAME = "probe_core-0.2.0-py3-none-any.whl"
+IMAGE = "sha256:" + "a" * 64
+
+
+def write(path, raw, mode=0o600):
+    missing = []
+    parent = path.parent
+    while not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    for parent in missing:
+        parent.chmod(0o755)
+    path.write_bytes(raw)
+    path.chmod(mode)
+
+
+def wheel_bytes(code=b"VERSION = 'old'\n", dependency="pydantic==2.13.5", extras=None):
+    members = {"probe_core/__init__.py": code, "probe_core/resources/seccomp.json": b"{}",
+               DIST + "/METADATA": f"Metadata-Version: 2.4\nName: probe-core\nVersion: 0.2.0\nRequires-Python: >=3.13,<3.14\nRequires-Dist: {dependency}\n\n".encode(),
+               DIST + "/WHEEL": b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"}
+    members.update(extras or {})
+    rows = [[name, "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).decode().rstrip("="), str(len(raw))]
+            for name, raw in members.items()]
+    rows.append([DIST + "/RECORD", "", ""])
+    csvfile = io.StringIO()
+    csv.writer(csvfile, lineterminator="\n").writerows(rows)
+    members[DIST + "/RECORD"] = csvfile.getvalue().encode()
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        for name, raw in members.items():
+            archive.writestr(name, raw)
+    return output.getvalue()
+
+
+def install_members(raw, site):
+    for name, content in upgrade.inspect_wheel(raw)["members"].items():
+        write(site / name, content, 0o644)
+
+
+def make_original(root):
+    old = wheel_bytes()
+    write(root / NAME, old)
+    write(root / "python/bin/python3.13", b"fixture interpreter\n", 0o755)
+    write(root / "python/lib/module.py", b"SOURCE = 1\n")
+    write(root / "python/lib/__pycache__/module.cpython-313.pyc", b"original cache")
+    root.chmod(0o755)
+    files = [{"path": str(p.relative_to(root)), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+             for p in root.rglob("*") if p.is_file()]
+    manifest = json.dumps({"schema_version": 1, "files": files}).encode()
+    write(root / "release-manifest.json", manifest)
+    site = root / "venv/lib/python3.13/site-packages"
+    install_members(old, site)
+    (root / "venv/bin").mkdir(mode=0o755)
+    (root / "venv/bin/python").symlink_to(root / "python/bin/python3.13")
+    (root / "venv/lib64").symlink_to("lib")
+    return old, hashlib.sha256(manifest).hexdigest(), site
+
+
+def make_release(directory, raw=None):
+    raw = raw or wheel_bytes(b"VERSION = 'new'\n")
+    wheel, checker, manifest = (directory / name for name in (NAME, "identity.py", "upgrade-release.json"))
+    write(wheel, raw)
+    write(checker, b"# pinned synthetic checker\n")
+    body = {"schema_version": 1, "source_commit": "b" * 40, "wheel_filename": NAME,
+            "wheel_sha256": hashlib.sha256(raw).hexdigest(), "identity_checker_sha256": hashlib.sha256(checker.read_bytes()).hexdigest()}
+    write(manifest, json.dumps(body).encode())
+    return SimpleNamespace(wheel=wheel, identity_checker=checker, release_manifest=manifest,
+                           release_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(), human="human"), body
+
+
+def test_original_accepts_internal_links_and_root_generated_cache(tmp_path):
+    root = tmp_path / "root"
+    _, digest, _ = make_original(root)
+    write(root / "python/lib/__pycache__/module.cpython-313.pyc", b"regenerated cache")
+    assert upgrade.verify_original(root, digest, owner=OWNER)[0] == NAME
+    (root / "venv/bin/python").unlink()
+    (root / "venv/bin/python").symlink_to("/usr/bin/python3")
+    with pytest.raises(upgrade.UpgradeError, match="RUNTIME_LINK_ESCAPES"):
+        upgrade.verify_original(root, digest, owner=OWNER)
+
+
+@pytest.mark.parametrize("change", ["manifest", "source", "installed", "extra", "writable"])
+def test_original_refuses_changed_bytes_inventory_and_permissions(tmp_path, change):
+    root = tmp_path / "root"
+    _, digest, site = make_original(root)
+    path = {"manifest": root / "release-manifest.json", "source": root / "python/lib/module.py",
+            "installed": site / "probe_core/__init__.py", "extra": site / "probe_core/unreviewed.py"}.get(change)
+    if path:
+        write(path, b"changed")
+    else:
+        (site / "probe_core/__init__.py").chmod(0o666)
+    with pytest.raises(upgrade.UpgradeError):
+        upgrade.verify_original(root, digest, owner=OWNER)
+
+
+@pytest.mark.parametrize("path", ["../outside", "/absolute", "other_package/code.py", "probe_core/../escape.py"])
+def test_wheel_cannot_write_outside_project(path):
+    with pytest.raises(upgrade.UpgradeError):
+        upgrade.inspect_wheel(wheel_bytes(extras={path: b"unexpected"}))
+
+
+def test_wheel_record_tampering_and_replaced_offered_input(tmp_path):
+    raw = wheel_bytes()
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(raw)) as source, zipfile.ZipFile(output, "w") as target:
+        for name in source.namelist():
+            target.writestr(name, b"tampered" if name == "probe_core/__init__.py" else source.read(name))
+    with pytest.raises(upgrade.UpgradeError, match="WHEEL_RECORD_HASH"):
+        upgrade.inspect_wheel(output.getvalue())
+    path = tmp_path / NAME
+    write(path, raw)
+    captured = upgrade.pin_bytes(path, hashlib.sha256(raw).hexdigest())
+    write(path, b"replaced after verification")
+    assert captured == raw
+    with pytest.raises(upgrade.UpgradeError, match="TARGET_INPUT_HASH"):
+        upgrade.pin_bytes(path, hashlib.sha256(raw).hexdigest())
+
+
+def counts():
+    return dict(jobs=0, attempts=0, approvals=0, compute_requests=0, runpod_intents=0, audit_events=17, pods=0, network_volumes=0, local_containers=0)
+
+
+@pytest.mark.parametrize("key", ["jobs", "attempts", "approvals", "compute_requests", "runpod_intents", "pods", "network_volumes", "local_containers"])
+def test_pre_first_job_scope_allows_audit_but_refuses_work_and_resources(key):
+    value = counts()
+    upgrade.check_idle_counts(value)
+    value[key] = 1
+    with pytest.raises(upgrade.UpgradeError, match="PRE_FIRST_JOB_STATE_REQUIRED"):
+        upgrade.check_idle_counts(value)
+
+
+def acceptance():
+    now = datetime.now(timezone.utc).isoformat()
+    return {"status": "passed", "stage": "complete", "image": IMAGE, "service_uid": OWNER, "started_at": now, "finished_at": now,
+            "checks": {name: True for name in upgrade.SANDBOX_CHECKS},
+            "lifecycle": {key: True for key in ("program_started", "host_timer_excluded", "launchers_killed", "container_processes_stopped", "container_removed")}}
+
+
+@pytest.mark.parametrize("change", ["old14", "stale", "launchers_alive", "host_timer", "wrong_image"])
+def test_new_gate_requires_fresh_independent_crash_cleanup(change):
+    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+    report = acceptance()
+    if change == "old14":
+        report["checks"].pop("crash_deadline_enforced")
+        report["checks"].pop("crash_removal_confirmed")
+    elif change == "stale":
+        report["started_at"] = (before - timedelta(seconds=1)).isoformat()
+    elif change == "launchers_alive":
+        report["lifecycle"]["launchers_killed"] = False
+    elif change == "host_timer":
+        report["lifecycle"]["host_timer_excluded"] = False
+    else:
+        report["image"] = "sha256:" + "c" * 64
+    with pytest.raises(upgrade.UpgradeError):
+        upgrade.validate_acceptance(report, IMAGE, OWNER, before)
+
+
+def test_readiness_waits_for_listener_and_times_out_without_retrying_identity_gate():
+    clock, attempts = [0.0], []
+    def sleep(seconds):
+        clock[0] += seconds
+    def check():
+        attempts.append(True)
+        return len(attempts) >= 3
+    upgrade.wait_ready(check, monotonic=lambda: clock[0], sleep=sleep, timeout=1)
+    assert len(attempts) == 3
+    with pytest.raises(upgrade.UpgradeError, match="LISTENER_NOT_READY"):
+        upgrade.wait_ready(lambda: False, monotonic=lambda: clock[0], sleep=sleep, timeout=1)
+
+
+class FakeHost:
+    def __init__(self, root, units, site, report):
+        self.root, self.units, self.site, self.report = root, units, site, report
+        self.commands, self.counts, self.fail, self.race = [], counts(), None, False
+        self.state = {n: ("active" if n in upgrade.SERVICES or n.endswith(".timer") else "inactive") for n in (*upgrade.SERVICES, *upgrade.OTHER_UNITS)}
+
+    def __call__(self, command, **options):
+        self.commands.append(command)
+        assert options["cwd"] == self.root and options["env"] == upgrade.ENV and options["umask"] == 0o022
+        output = b""
+        if self.fail == "pip" and "pip" in command:
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"private install diagnostic")
+        if command[0] == "/usr/bin/systemctl":
+            action = command[1]
+            if action == "show":
+                name = command[2]
+                output = ((self.state[name] + "\n") if "--value" in command else f"LoadState=loaded\nFragmentPath={self.units / name}\nDropInPaths=\nActiveState={self.state[name]}\nUnitFileState=enabled\n").encode()
+            elif action in {"stop", "start", "restart"}:
+                if action == "restart" and self.fail == "final_restart":
+                    assert json.loads((self.root.parent / "etc/research.json").read_bytes())["sandbox_image"] == IMAGE
+                    return SimpleNamespace(returncode=1, stdout=b"", stderr=b"late restart failed")
+                for name in command[2:]:
+                    if name in upgrade.SERVICES or name.endswith(".timer"):
+                        self.state[name] = "inactive" if action == "stop" else "active"
+                if action == "stop" and "probe-controller.service" in command and self.race:
+                    self.counts["compute_requests"] = 1
+                if action == "start" and "probe-sandbox-acceptance.service" in command:
+                    assert self.state["probe-research.service"] == "inactive"
+                    if self.fail == "sandbox":
+                        return SimpleNamespace(returncode=1, stdout=b"", stderr=b"sandbox failed")
+                    write(self.report, json.dumps(acceptance()).encode())
+        elif command[0] == "/usr/sbin/runuser":
+            assert command[1:6] == ["-u", "probe-trusted", "-g", "probe-trusted", "--"]
+            if "/usr/bin/podman" in command:
+                assert "HOME=/var/lib/probe-sandbox" in command and command[-4:] == ["ps", "--all", "--quiet", "--no-trunc"]
+                output = (("0" * 64 + "\n") * self.counts["local_containers"]).encode()
+            else:
+                assert command[-1] == upgrade.READ_IDLE
+                output = json.dumps(self.counts).encode()
+        elif command[-1] == upgrade.DEPENDENCIES:
+            output = b'[["pydantic", "2.13.5"]]\n'
+        elif "pip" in command:
+            assert command[-4:-1] == ["--no-index", "--no-deps", "--force-reinstall"]
+            install_members(Path(command[-1]).read_bytes(), self.site)
+        elif command[0] == "/usr/bin/python3":
+            assert not (self.units / "probe-research.service.d").exists()
+            assert json.loads((self.root.parent / "etc/research.json").read_bytes())["sandbox_image"] is None
+            if self.fail == "identity":
+                return SimpleNamespace(returncode=1, stdout=b"", stderr=b"identity failed")
+            self.counts["audit_events"] += 2
+            write(Path(command[-1]), json.dumps({"passed": True, "paid_actions_performed": False, "check_count": 27, "passed_count": 27}).encode())
+        return SimpleNamespace(returncode=0, stdout=output, stderr=b"")
+
+
+@pytest.fixture
+def host(tmp_path, monkeypatch):
+    root, config, units = (tmp_path / name for name in ("root", "etc", "units"))
+    old, digest, site = make_original(root)
+    args, release = make_release(tmp_path / "offered")
+    args.original_manifest_sha256 = digest
+    for name in (*upgrade.SERVICES, *upgrade.OTHER_UNITS):
+        write(units / name, b"[Unit]\nDescription=fixture\n", 0o644)
+    users = {name: OWNER + offset for offset, name in enumerate(("probe-trusted", "probe-research", "probe-watchdog", "probe-backup", "human"))}
+    monkeypatch.setattr(upgrade, "discover_users", lambda _: users)
+    original_config = json.dumps({"sandbox_image": IMAGE, "service_uid": OWNER, "research_uid": OWNER + 1,
+                                  "admin_uid": OWNER + 4, "private_setting": "preserve exactly"}, indent=2).encode()
+    write(config / "research.json", original_config, 0o640)
+    provenance = b"SOURCE_COMMIT=" + b"a" * 40 + b"\nDRIVE_FOLDER_ID=unchanged-public-folder\n"
+    write(config / "backup.env", provenance, 0o640)
+    backup_copy = tmp_path / "backup/backup.env"
+    write(backup_copy, provenance)
+    original_read = upgrade.read_file
+    def read(path, **kwargs):
+        if Path(path) == backup_copy:
+            kwargs["owner"] = OWNER
+        return original_read(path, **kwargs)
+    monkeypatch.setattr(upgrade, "read_file", read)
+    report = tmp_path / "sandbox/acceptance-report.json"
+    fake = FakeHost(root, units, site, report)
+    operation = upgrade.Upgrade(root=root, config=config, units=units, owner=OWNER, run=fake, backup_copy=backup_copy, sandbox_report=report)
+    readiness = []
+    operation.ready = lambda _: readiness.append(operation.stage)
+    return SimpleNamespace(root=root, config=config, units=units, old=old, args=args, release=release, original_config=original_config,
+                           provenance=provenance, fake=fake, operation=operation, backup_copy=backup_copy, site=site, readiness=readiness)
+
+
+def test_success_preserves_dependencies_and_enables_only_after_both_gates(host):
+    result = host.operation.execute(host.args)
+    assert result["status"] == "passed" and result["sandbox_checks"] == 16
+    assert (host.config / "research.json").read_bytes() == host.original_config
+    assert not (host.config / "upgrade-blocked").exists() and not (host.units / "probe-controller.service.d").exists()
+    assert (host.operation.work / "rollback" / NAME).read_bytes() == host.old == (host.root / NAME).read_bytes()
+    for path in (host.config / "backup.env", host.backup_copy):
+        assert path.read_bytes() == host.provenance.replace(b"a" * 40, b"b" * 40)
+    commands = host.fake.commands
+    first_stop = next(i for i, c in enumerate(commands) if c[:2] == ["/usr/bin/systemctl", "stop"])
+    assert sum(c[0] == "/usr/sbin/runuser" for c in commands[:first_stop]) == 4
+    assert ["/usr/bin/systemctl", "start", "probe-backup.service"] in commands[:first_stop]
+    gate = commands.index(["/usr/bin/systemctl", "start", "probe-sandbox-acceptance.service"])
+    identity = next(i for i, c in enumerate(commands) if c[0] == "/usr/bin/python3")
+    assert first_stop < gate < identity < commands.index(["/usr/bin/systemctl", "restart", "probe-research.service"])
+    assert host.readiness == ["identity_acceptance", "restore_research"]
+    assert stat.S_IMODE(host.operation.work.stat().st_mode) == 0o700
+    assert stat.S_IMODE((host.operation.work / NAME).stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("failure", ["pip", "sandbox", "identity", "final_restart"])
+def test_failures_leave_persistent_guard_and_disabled_config(host, failure):
+    host.fake.fail = failure
+    with pytest.raises(upgrade.UpgradeError):
+        host.operation.execute(host.args)
+    assert host.operation.closed_after_failure and json.loads((host.config / "research.json").read_bytes())["sandbox_image"] is None
+    assert (host.config / "upgrade-blocked").is_file()
+    for name in upgrade.GUARDED:
+        assert (host.units / (name + ".d") / upgrade.GUARD_NAME).read_bytes() == upgrade.GUARD
+        assert host.fake.state[name] == "inactive"
+    expected = host.provenance.replace(b"a" * 40, b"b" * 40) if failure == "final_restart" else host.provenance
+    assert (host.config / "backup.env").read_bytes() == expected
+    assert (host.operation.work / "rollback" / NAME).read_bytes() == host.old
+    assert not (host.operation.work / "upgrade-report.json").exists()
+
+
+@pytest.mark.parametrize("failure", ["jobs", "pods", "network_volumes", "local_containers", "manifest", "dependencies"])
+def test_preflight_refusal_does_not_stop_services_or_change_config(host, failure):
+    if failure in host.fake.counts:
+        host.fake.counts[failure] = 1
+    elif failure == "manifest":
+        write(host.args.release_manifest, b"{}")
+    else:
+        args, _ = make_release(host.args.release_manifest.parent, wheel_bytes(b"new", dependency="pydantic==999"))
+        args.original_manifest_sha256 = host.args.original_manifest_sha256
+        host.args = args
+    with pytest.raises(upgrade.UpgradeError):
+        host.operation.execute(host.args)
+    assert (host.config / "research.json").read_bytes() == host.original_config and not host.operation.changed
+    assert not any(c[:2] == ["/usr/bin/systemctl", "stop"] for c in host.fake.commands)
+
+
+def test_racing_work_keeps_old_watchdog_and_broker_alive(host):
+    host.fake.race = True
+    with pytest.raises(upgrade.UpgradeError, match="PRE_FIRST_JOB_STATE_REQUIRED"):
+        host.operation.execute(host.args)
+    assert all(host.fake.state[n] == "active" for n in ("probe-watchdog.service", "probe-provider-stop.service"))
+    assert not any("pip" in c for c in host.fake.commands)
+
+
+def test_failed_persistence_cannot_prevent_both_guard_and_stop_attempts(host):
+    calls = []
+    host.operation.write_config = lambda _: (_ for _ in ()).throw(OSError("disk full"))
+    host.operation.disabled_config = b"{}"
+    host.operation.guard = lambda enabled: calls.append(("guard", enabled))
+    host.operation.systemctl = lambda *args, **kwargs: calls.append(args)
+    with pytest.raises(upgrade.UpgradeError, match="UNCONFIRMED"):
+        host.operation.fail_closed()
+    assert calls == [("guard", True), ("stop", "probe-research.service", "probe-controller.service")]
+    assert host.operation.closed_after_failure is False
+
+
+def test_main_uses_actual_administrator_check():
+    if os.geteuid() == 0:
+        pytest.skip("actual non-administrator identity required")
+    assert upgrade.main([]) == 1
