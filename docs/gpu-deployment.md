@@ -123,7 +123,9 @@ Use separate bounded allowances for Base and posttrained workers; `WorkerConfig`
 The offline suite covers locked asset preparation, hash/size/path rejection, diagnostic failure modes, real tiny-Qwen parity, budget contracts, timeout classification and actual supervisor adoption:
 
 ```sh
-python -m pytest -q tests/test_model_assets.py tests/test_gpu_diagnostic.py tests/test_backend_parity.py tests/test_gpu_acceptance.py tests/test_worker_timeouts.py
+python -m pytest -q tests/test_model_assets.py tests/test_gpu_diagnostic.py tests/test_backend_parity.py tests/test_gpu_acceptance.py tests/test_worker_timeouts.py tests/test_worker_process_restart.py
 ```
+
+The process-restart test kills a real supervisor subprocess while a bounded CPU fixture runs through the production child entry point. Its replacement adopts the same live PID/start/boot identity, persisted request, attempt, approval and deadlines without submitting again, then stops the original child at its original deadline. It verifies supervision and recovery; the numerical payload is deliberately synthetic.
 
 These tests use synthetic CPU fixtures where appropriate and cannot certify live CUDA execution. The live report must name the real checkpoint revisions, source commit, image digest, device/driver, approved allowance and observed artifact hashes.
