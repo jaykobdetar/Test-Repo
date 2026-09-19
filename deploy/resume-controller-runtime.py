@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Repair only the known runc pre-attestation failure, then retry installation.
+"""Recover the reviewed pre-attestation installation failures, as administrator.
 
 Run as administrator with /usr/bin/python3 -I. The original release, generated
 state, service restrictions and credentials remain intact. An unchanged real
@@ -8,6 +8,7 @@ acceptance gate must pass before the original installer enables any service.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ ROOT = Path("/opt/probe-core")
 ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
 RUNTIME_CONFIG = (b"# Installed only under the trusted Probe account's dedicated HOME.\n"
                   b'[engine]\nruntime = "crun"\n\n[engine.runtimes]\ncrun = ["/usr/bin/crun"]\n')
+STORAGE_ANCESTORS = (".local", ".local/share", ".local/share/containers", ".local/share/containers/storage")
 
 
 def require(condition, message):
@@ -113,6 +115,80 @@ def verify_selected_runtime(uid: int, *, run=subprocess.run):
             "The actual Probe Podman store did not select /usr/bin/crun; observed " + repr(runtime[:256]))
 
 
+def verify_installed_runtime_config(home: Path, gid: int, *, owner=0):
+    """Accept only the exact configuration written by the previous repair."""
+    for relative in (".config", ".config/containers"):
+        path = home / relative
+        info = path.lstat()
+        require(path.resolve() == path.absolute() and stat.S_ISDIR(info.st_mode)
+                and (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (owner, gid, 0o750),
+                "Unexpected installed runtime configuration directory: " + str(path))
+    path = home / ".config/containers/containers.conf"
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (owner, gid, 0o640)
+            and path.read_bytes() == RUNTIME_CONFIG, "Installed runtime configuration differs from the prior repair")
+
+
+def verify_storage_runtime(uid: int, gid: int, stale_gid: int, *, run=subprocess.run):
+    require(gid != stale_gid, "The old and current storage groups must differ")
+    mapping = runtime_output(uid, "unshare", "/usr/bin/cat", "/proc/self/gid_map",
+                             operation="Podman group mapping inspection", run=run)
+    rows = [line.split() for line in mapping.splitlines()]
+    require(rows and all(len(row) == 3 and all(item.isdecimal() for item in row) for row in rows),
+            "Unexpected rootless group mapping")
+    ranges = [(int(row[1]), int(row[2])) for row in rows]
+    require(all(count > 0 for start, count in ranges), "Empty rootless group mapping")
+    mapped = lambda group: any(start <= group < start + count for start, count in ranges)
+    require(mapped(gid) and not mapped(stale_gid), "Observed group mapping does not match the known storage failure")
+    containers = runtime_output(uid, "ps", "--all", "--quiet", operation="Podman container inspection", run=run)
+    require(not containers, "Existing containers must not be modified by installation recovery")
+
+
+def repair_storage_groups(home: Path, uid: int, gid: int, stale_gid: int) -> int:
+    """Correct four known ancestors only; retain owner, 0700 mode and contents.
+
+    Validate every directory before the first mutation and retain no-follow
+    descriptors so fchown cannot follow a replaced path. An interrupted repair
+    may have corrected a prefix already; both exact group states are accepted.
+    """
+    require(gid != stale_gid, "The old and current storage groups must differ")
+    with ExitStack() as stack:
+        require(home.resolve() == home.absolute(), "Sandbox home must not contain symlinks")
+        descriptor = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        stack.callback(os.close, descriptor)
+        info = os.fstat(descriptor)
+        require((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (uid, gid, 0o700),
+                "Sandbox home ownership or private permissions changed")
+        pending = []
+        for relative in STORAGE_ANCESTORS:
+            descriptor = os.open(Path(relative).name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            stack.callback(os.close, descriptor)
+            info = os.fstat(descriptor)
+            require(info.st_uid == uid and info.st_gid in {gid, stale_gid} and stat.S_IMODE(info.st_mode) == 0o700,
+                    "Unexpected storage ancestor ownership or mode: " + relative)
+            pending.append((descriptor, info, relative))
+        overlay = os.open("overlay", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+        stack.callback(os.close, overlay)
+        info = os.fstat(overlay)
+        require((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (uid, gid, 0o700),
+                "Overlay directory does not match the successfully imported store")
+        changed = 0
+        for descriptor, original, relative in pending:
+            info = os.fstat(descriptor)
+            require((info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode)
+                    == (original.st_dev, original.st_ino, original.st_uid, original.st_gid, original.st_mode),
+                    "Storage ancestor changed during validation: " + relative)
+            if info.st_gid == stale_gid:
+                os.fchown(descriptor, -1, gid)
+                os.fsync(descriptor)
+                changed += 1
+            info = os.fstat(descriptor)
+            require((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (uid, gid, 0o700),
+                    "Storage group repair did not preserve its private permissions")
+        return changed
+
+
 def continuation(installer: bytes, trusted_uid: int) -> str:
     require(type(trusted_uid) is int and trusted_uid > 0, "Trusted service UID required")
     text = installer.decode()
@@ -143,6 +219,8 @@ def main(argv=None) -> int:
     parser.add_argument("--verification-sha256", required=True)
     parser.add_argument("--manifest-sha256", required=True)
     parser.add_argument("--human", required=True)
+    parser.add_argument("--repair-stale-storage-groups", action="store_true",
+                        help="Correct only the four stale storage groups after the reviewed crun retry")
     args = parser.parse_args(argv)
     try:
         verifier = load_verifier(args.verification_helper, args.verification_sha256)
@@ -153,7 +231,12 @@ def main(argv=None) -> int:
         verifier.verify_state(ROOT, users, groups, args.human, allow_failed_acceptance=True)
         uid, gid = users["probe-trusted"], groups["probe-trusted"]
         home = Path("/var/lib/probe-sandbox")
-        verify_config_location(home, uid)
+        if args.repair_stale_storage_groups:
+            verify_installed_runtime_config(home, gid)
+            verify_selected_runtime(uid)
+            verify_storage_runtime(uid, gid, groups["probe-research"])
+        else:
+            verify_config_location(home, uid)
         verify_image(uid, json.loads((ROOT / "deployment.json").read_bytes())["sandbox_image"])
         script = continuation(installer, uid)
         with tempfile.TemporaryDirectory(prefix=".probe-runtime-resume-", dir="/opt") as temporary:
@@ -161,12 +244,16 @@ def main(argv=None) -> int:
             path.write_text(script)
             path.chmod(0o600)
             subprocess.run(["/bin/bash", "-n", str(path)], cwd=ROOT, check=True, env=ENV)
-            print("Verified the known pre-attestation failure. Installing crun and retrying the unchanged acceptance gate.", flush=True)
-            subprocess.run(["/usr/bin/apt-get", "install", "-y", "--no-install-recommends", "crun"], cwd="/", check=True, env=ENV)
-            verifier.regular(Path("/usr/bin/crun"), 0)
-            require(os.access("/usr/bin/crun", os.X_OK), "Installed crun is not executable")
-            install_runtime_config(home, uid, gid)
-            verify_selected_runtime(uid)
+            if args.repair_stale_storage_groups:
+                changed = repair_storage_groups(home, uid, gid, groups["probe-research"])
+                print(f"Corrected {changed} private storage directory groups; permissions remain 0700. Retrying the unchanged acceptance gate.", flush=True)
+            else:
+                print("Verified the known pre-attestation failure. Installing crun and retrying the unchanged acceptance gate.", flush=True)
+                subprocess.run(["/usr/bin/apt-get", "install", "-y", "--no-install-recommends", "crun"], cwd="/", check=True, env=ENV)
+                verifier.regular(Path("/usr/bin/crun"), 0)
+                require(os.access("/usr/bin/crun", os.X_OK), "Installed crun is not executable")
+                install_runtime_config(home, uid, gid)
+                verify_selected_runtime(uid)
             return subprocess.run(["/bin/bash", str(path)], cwd=ROOT, env=ENV, check=False).returncode
     except (RuntimeError, OSError, ValueError, TypeError, KeyError, sqlite3.Error, subprocess.SubprocessError) as error:
         print("Runtime recovery stopped; existing data and credentials preserved: " + str(error), file=sys.stderr)

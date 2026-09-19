@@ -187,7 +187,7 @@ gate before enabling CPU execution. Run it through the separately reviewed,
 checksum-pinned administrator launcher for this exact failure, not the first
 interpreter repair command.
 
-## Recovery from the known runc filesystem setup failure
+## Recovery from container filesystem setup failure
 
 On the first installed service attempt, runc 1.3.4 with the rootless overlay
 store failed before runtime attestation: `remount-private ... MS_PRIVATE:
@@ -207,7 +207,35 @@ service. The image and storage driver stay the same. A successful service gate
 is required before enabling CPU execution and continuing service/backup startup.
 If it fails, the helper reports the bounded runtime journal evidence and stops.
 
-This is a compatibility repair that still needs verification on the installed
-service. It does not change AppArmor policy, service filesystem restrictions,
+The installed crun retry failed at the same mount operation. Changing runtimes
+did not resolve the underlying problem. Inspection found that the initial import
+with the wrong primary group had already created four `0700` directories owned
+by `probe-trusted:probe-research`: `.local`, `.local/share`,
+`.local/share/containers`, and `.local/share/containers/storage`, all under
+`/var/lib/probe-sandbox`. The home and `storage/overlay` directories had the
+correct `probe-trusted:probe-trusted` ownership.
+
+The old group is outside the rootless group mapping. Podman can inspect the store
+as its owner, but container setup with `keep-id` cannot traverse these private
+directories: [Linux's permission override requires both inode IDs to be
+mapped](https://github.com/torvalds/linux/blob/v6.8/kernel/capability.c#L475-L500),
+while [Podman's traversal preparation checks the mapped
+UID](https://github.com/containers/podman/blob/v4.9.3/libpod/oci_conmon_common.go#L170-L203).
+A separate real-container test reproduced the exact error by changing only a
+private store directory's group; restoring that group restored successful startup.
+
+For this observed later state, use the reviewed runtime recovery helper with
+`--repair-stale-storage-groups`. It requires the exact prior crun configuration,
+the known failed receipt, unchanged units, empty work state, the original image,
+the expected group mapping and no existing containers. It validates all four
+ancestors and the home/overlay directories before changing anything, then changes
+only the stale group on those four ancestors using no-follow directory descriptors.
+It preserves their owners, `0700` modes and contents, including the image layers'
+subordinate ownership. Already-corrected ancestors are accepted to allow recovery
+from an interruption. It does not recursively change ownership, import an image,
+reinstall a package or reset storage.
+
+The unchanged installed-service acceptance gate still controls activation. This
+repair does not change AppArmor policy, service filesystem restrictions,
 container capabilities or resource limits. The original release manifest and
 credential handoffs remain unchanged.
