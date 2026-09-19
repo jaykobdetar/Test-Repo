@@ -1,0 +1,14 @@
+# Pass an official Python base pinned by digest; all installation is offline.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS dependencies
+COPY wheels/ /wheels/
+COPY requirements-cpu.lock /requirements-cpu.lock
+RUN python -m pip install --prefix=/opt/scientific --ignore-installed --no-compile --no-cache-dir --no-index --find-links=/wheels --require-hashes -r /requirements-cpu.lock
+
+FROM ${BASE_IMAGE}
+COPY --from=dependencies /opt/scientific/ /usr/local/
+COPY --chmod=0444 sandbox_entry.py /opt/probe/sandbox_entry.py
+RUN mkdir -p /input /output && chmod 0755 /input /output
+USER 1000:1000
+WORKDIR /output
+ENTRYPOINT ["/usr/local/bin/python", "-I", "-B", "/opt/probe/sandbox_entry.py"]

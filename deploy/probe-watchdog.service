@@ -1,0 +1,25 @@
+[Unit]
+Description=Probe independently supervised stop watchdog (simulator)
+# Deliberately no PartOf/BindsTo relationship with the starter.
+
+[Service]
+Type=simple
+User=probe-watchdog
+Group=probe-watch-read
+SupplementaryGroups=probe-ledger-read probe-simulator
+ExecStart=/opt/probe-core/venv/bin/python -m probe_core.controller watchdog --ledger /var/lib/probe-core/research.sqlite --provider-state /var/lib/probe-simulator/provider.sqlite --watchdog-health /var/lib/probe-watchdog/health.json --state /var/lib/probe-watchdog/state.sqlite
+StateDirectory=probe-watchdog
+StateDirectoryMode=0750
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/probe-core
+ReadWritePaths=/var/lib/probe-simulator /var/lib/probe-watchdog
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

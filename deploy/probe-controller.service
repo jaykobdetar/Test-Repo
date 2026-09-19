@@ -1,0 +1,26 @@
+[Unit]
+Description=Probe trusted compute approval controller (simulator)
+After=probe-watchdog.service
+Requires=probe-watchdog.service
+
+[Service]
+Type=simple
+User=probe-trusted
+Group=probe-ipc
+SupplementaryGroups=probe-trusted probe-watch-read probe-simulator
+EnvironmentFile=/etc/probe-core/controller.env
+ExecStart=/opt/probe-core/venv/bin/python -m probe_core.controller serve --ledger /var/lib/probe-core/research.sqlite --provider-state /var/lib/probe-simulator/provider.sqlite --watchdog-health /var/lib/probe-watchdog/health.json --research-socket /run/probe-controller/research.sock --admin-socket /run/probe-controller/admin.sock --research-uid ${TRUSTED_UID} --admin-uid ${HUMAN_UID} --agent-uid ${AGENT_UID} --watchdog-uid ${WATCHDOG_UID} --socket-gid ${IPC_GID} --idle-overhead ${IDLE_OVERHEAD_USD_PER_DAY}
+RuntimeDirectory=probe-controller
+RuntimeDirectoryMode=0750
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/probe-core /var/lib/probe-simulator /run/probe-controller
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

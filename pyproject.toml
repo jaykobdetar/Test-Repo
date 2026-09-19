@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "probe-core"
-version = "0.1.0"
-description = "Typed scientific manifests, a durable single-GPU queue, and tamper-evident audit records."
+version = "0.2.0"
+description = "Durable research control plane, trusted execution, and isolated MCP tools."
 readme = "README.md"
-requires-python = ">=3.11"
-dependencies = ["pydantic>=2.12,<3"]
+requires-python = ">=3.13,<3.14"
+dependencies = ["pydantic==2.13.5"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Operating System :: POSIX :: Linux",
@@ -16,16 +16,22 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<10"]
+test = ["pytest==9.1.1", "pytest-asyncio==1.4.0"]
+mcp = ["mcp==2.2.0"]
+worker = ["torch==2.14.0", "transformers==5.17.0", "nnsight==0.7.0", "safetensors==0.8.0", "scikit-learn==1.9.1", "scipy==1.18.1", "httpx==0.28.1", "uvicorn==0.53.0"]
+
+[project.scripts]
+probe-mcp = "probe_core.mcp_server:main"
+probe-research-service = "probe_core.research_service:main"
+probe-controller = "probe_core.controller:main"
 
 [tool.setuptools.packages.find]
 include = ["probe_core*"]
 
 [tool.setuptools.package-data]
-probe_core = ["py.typed"]
+probe_core = ["py.typed", "resources/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 filterwarnings = ["error"]
-

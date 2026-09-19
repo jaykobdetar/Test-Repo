@@ -1,0 +1,16 @@
+{
+  "ledger_path": "/var/lib/probe-core/research.sqlite",
+  "socket_path": "/run/probe-research/research.sock",
+  "service_uid": 2001,
+  "research_uid": 2004,
+  "admin_uid": 1000,
+  "socket_gid": 2004,
+  "policy": {"discovery_datasets": [], "allow_calibration": false},
+  "controller_socket": "/run/probe-controller/research.sock",
+  "controller_uid": 2001,
+  "input_artifact_root": "/var/lib/probe-core/inputs",
+  "sandbox_image": null,
+  "sandbox_workspace": "/var/lib/probe-sandbox/runs",
+  "sandbox_seccomp_profile": "/opt/probe-core/venv/lib/python3.13/site-packages/probe_core/resources/seccomp.json",
+  "podman_path": "/usr/bin/podman"
+}

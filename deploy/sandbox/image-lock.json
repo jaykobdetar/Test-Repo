@@ -1,0 +1,12 @@
+{
+  "base_image": "docker.io/library/python@sha256:37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332",
+  "local_image_id": "sha256:9d0457022d2d7334a13341e9948a8691e6551bc8655876d8e37233ebd6dce34e",
+  "platform": "linux/amd64",
+  "python": "3.13.15",
+  "requirements_lock_sha256": "1da29f426cca7cbea13f020f11e3267d404d7c67615bb8a2e94996673fcfc4fe",
+  "seccomp_profile_sha256": "712f0778e86ba4e2ee3831577a7b56242f51abad99dffc78f52e19b491592d0d",
+  "entrypoint_sha256": "437695d836e726c6a2b0349a9929bd551069fbfcb1c75ed8c6b1d590cd9bab1e",
+  "built_on": "2026-09-19",
+  "build_network": "none",
+  "gpu_devices": false
+}

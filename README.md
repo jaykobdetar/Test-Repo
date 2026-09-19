@@ -1,23 +1,28 @@
 # probe_core
 
-Phase 2 of the Probe interpretability lab: immutable Pydantic v2 contracts, a local
-SQLite research ledger and single-GPU queue, and a tamper-evident JSONL audit
-projection. This package performs no GPU execution or cloud-management calls.
+Probe's durable research foundation and the Phase 3–5 implementation: controller
+and independent watchdog, trusted experiment execution, local stdio MCP, and a
+rootless CPU sandbox. The provider supplied here is a persistent simulator;
+real RunPod provisioning belongs to Phase 6. See [IMPLEMENTATION.md](IMPLEMENTATION.md)
+for service boundaries and verification status. The Phase 2 core remains usable
+without loading the worker or MCP modules.
 
 ## Install and test
 
-Requires Linux, Python 3.11+, Pydantic 2.12–2.x, and local persistent storage.
+Requires Linux, Python 3.13, and local persistent storage. Direct dependencies and
+the complete transitive environment are pinned in `pyproject.toml` and `uv.lock`.
 Use a maintained SQLite build with the WAL-reset fix (3.51.3 or later, or an
 officially fixed backport). The supplied verification was performed with Python
-3.13.13, Pydantic 2.13.2, and SQLite 3.53.1.
+3.13.13, Pydantic 2.13.5, and SQLite 3.53.1.
 
 ```sh
-python -m pip install '.[test]'
-python -m pytest
+uv sync --locked --all-extras
+uv run --locked python -m pytest
 ```
 
 `pyproject.toml` defines the installable `probe-core` distribution; imports use
-`probe_core`. There are no dependencies on PyTorch, RunPod, a broker, or a GPU.
+`probe_core`. The core has no dependency on PyTorch, RunPod, a broker, or a GPU;
+the `worker` and `mcp` extras install their respective runtimes.
 The synthetic fixture in `tests/fixtures/manifest.json` demonstrates the complete
 manifest shape; its hashes are examples, not real model or container revisions.
 
@@ -28,6 +33,10 @@ manifest shape; its hashes are examples, not real model or container revisions.
 | `schemas.py` | Complete run manifest; bounded discriminated GPU operations; hypothesis/preregistration and approval contracts |
 | `ledger.py` | Transactions, queue/attempt lifecycle, approvals, hypotheses, immutable accepted runs, sealed artifacts, backup |
 | `audit.py` | Strict canonical JSON, secret-field rejection, SHA-256 chain, process-safe JSONL append/verification/reconciliation |
+| `controller.py`, `provider.py` | Human-authorized compute requests, simulated provider, independent shutdown watchdog |
+| `worker.py`, `dispatcher.py` | Real bounded model operations, authenticated execution, retained results and recovery |
+| `research_api.py`, `research_service.py`, `mcp_server.py`, `rpc.py` | Research-only tools and authenticated local service boundaries |
+| `sandbox.py`, `artifact_store.py` | Rootless CPU experiments and durable tensor inputs |
 
 All models forbid unknown fields. Nested collections use tuples to avoid mutable
 state inside otherwise frozen models. Validators reject non-finite numbers,
@@ -40,16 +49,20 @@ model, software, hardware, inputs, experiment, controls, results, cost, artifact
 and security. Full Git/Hugging Face revisions are 40 or 64 lowercase hex
 characters. Content hashes have a `sha256:` prefix except `artifacts[].sha256`,
 which is the raw 64-character digest specified in the design. The two canonical
-Qwen3-1.7B repositories are the model allowlist.
+Qwen3-1.7B repositories are the scientific model allowlist. The explicit
+`probe/testing-tiny-qwen3` fixture is restricted to calibration; it cannot be
+submitted as a canonical confirmatory finding.
 
 `JobSpec.operation` is a discriminated union on `kind`: `capture`, `patch`,
-`ablate`, `steer`, or `fit_probe`. Module references constrain Qwen's 28 layers
+`ablate`, `steer`, `fit_probe`, `generate`, `weight_stats`, `tensor_slice`, or
+`module_manifest`. Module references constrain Qwen's 28 layers
 and 16 query heads; `positions` accepts bounded token indices or `"last"`.
 Tensor inputs reference `.safetensors` artifacts. File format, hash, tensor
 shape/dtype, and actual GPU memory checks belong to the trusted executor when it
 loads inputs; schema validation alone does not open tensors. Runtime/output
 limits are mandatory, and generation requests cannot exceed the declared token
-budget. Declared resource limits must be enforced by the later execution layer.
+budget. The worker enforces execution limits; schema validation alone does not
+establish runtime containment.
 
 ## Queue use
 
@@ -89,7 +102,7 @@ Always close a ledger, preferably with its context manager.
 
 1. Submit jobs and compute `ledger.batch_hash(job_ids)`.
 2. The human-only approval service creates an `ApprovalNonce` with a
-   cryptographically random `token` (use `secrets.token_urlsafe(32)`), exact Pod,
+   cryptographically random `token` (use `secrets.token_urlsafe(32)`), exact worker,
    batch hash, runtime, price ceiling, and expiration within 15 minutes.
 3. `register_approval(nonce)` stores a SHA-256 digest of the secret, never its raw
    value. `ApprovalNonce` excludes the token from repr and all ordinary dumps.
@@ -98,9 +111,10 @@ Always close a ledger, preferably with its context manager.
    a single-use start intent and absolute deadline. The price must be below
    $1.50/hour and at or below the nonce's tighter ceiling. Denied decisions are
    audited without submitted credentials.
-5. A later controller may request the cloud start only after this durable grant.
+5. The controller may request the cloud start only after this durable grant.
    It must run the independent watchdog and enforce actual Pod shutdown. This
-   library never starts, stops, or schedules cloud resources.
+   ledger module never starts, stops, or schedules cloud resources. The supplied
+   controller uses a simulated provider; real provider integration is Phase 6.
 6. `dispatch_next(worker_id, approval_id=..., lease_seconds=30)` claims the oldest
    eligible pending job that fits the remaining approved interval. It returns
    `None` while another execution/finalization is unresolved or no job fits.
@@ -109,6 +123,9 @@ Expired approvals cannot authorize dispatch. A deadline is **not** evidence of
 Pod shutdown: before consuming any subsequent approval, the trusted controller
 must positively confirm the previous Pod is off and call `end_approval(id)`.
 Worker-stop acknowledgement and Pod-stop acknowledgement are separate facts.
+For initial provisioning the Phase 3 controller reserves a logical worker ID
+before the physical Pod exists, and binds it to an immutable deployment request.
+The core's `pod_id` field carries this stable logical ID; provider IDs are separate.
 Human authentication, live provider-price lookup, idle-cost accounting, the
 five-minute idle watchdog, and protected OS identities are integration concerns;
 the core trusts the controller that calls these methods.

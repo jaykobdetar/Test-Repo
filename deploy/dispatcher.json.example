@@ -1,0 +1,10 @@
+{
+  "ledger_path": "/var/lib/probe-core/research.sqlite",
+  "worker_id": "REPLACE_WITH_APPROVED_LOGICAL_WORKER_ID",
+  "transfer_directory": "/var/lib/probe-core/worker-transfers",
+  "input_artifact_root": "/var/lib/probe-core/input-artifacts",
+  "bearer_secret_file": "/etc/probe-core/worker-token",
+  "base_url": "http://127.0.0.1:8080",
+  "lease_seconds": 30,
+  "poll_seconds": 0.25
+}

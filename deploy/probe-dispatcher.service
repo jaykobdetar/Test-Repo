@@ -1,0 +1,24 @@
+[Unit]
+Description=Probe trusted approved-job dispatcher
+After=network-online.target probe-controller.service
+Wants=network-online.target
+Requires=probe-controller.service
+
+[Service]
+Type=simple
+User=probe-trusted
+Group=probe-trusted
+ExecStart=/opt/probe-core/venv/bin/python -m probe_core.dispatcher --config /etc/probe-core/dispatcher.json
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/probe-core
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

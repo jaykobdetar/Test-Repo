@@ -1,0 +1,36 @@
+[Unit]
+Description=Probe trusted research facade
+After=probe-controller.service
+
+[Service]
+Type=simple
+User=probe-trusted
+Group=probe-research
+SupplementaryGroups=probe-trusted probe-ipc probe-ledger-read
+WorkingDirectory=/opt/probe-core
+ExecStartPre=/usr/bin/chmod 0700 /run/probe-sandbox
+ExecStart=/opt/probe-core/venv/bin/python -m probe_core.research_service --config /etc/probe-core/research.json
+RuntimeDirectory=probe-research probe-sandbox
+RuntimeDirectoryMode=0750
+StateDirectory=probe-sandbox
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=2
+UMask=0077
+Environment=HOME=/var/lib/probe-sandbox
+EnvironmentFile=/etc/probe-core/research-runtime.env
+Environment=PYTHONNOUSERSITE=1
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/probe-core /var/lib/probe-sandbox /run/probe-research /run/probe-sandbox
+# Replace 2001 with the actual probe-trusted UID, matching research-runtime.env.
+ReadWritePaths=/run/user/2001
+PrivateTmp=yes
+# Rootless Podman's mapping helpers need their normal setuid behavior.
+# The experiment container itself uses no-new-privileges and drops all caps.
+NoNewPrivileges=no
+KillMode=control-group
+Delegate=yes
+
+[Install]
+WantedBy=multi-user.target

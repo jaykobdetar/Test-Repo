@@ -152,12 +152,19 @@ Version = Annotated[str, StringConstraints(strict=True, min_length=1, max_length
 
 class SoftwareIdentity(FrozenModel):
     probe_mcp_git_commit: GitSHA
-    container_image_digest: SHA256
+    container_image_digest: SHA256 | None
+    environment_lock_hash: SHA256 | None = Field(default=None, exclude_if=lambda value: value is None)
     python_version: Version
     torch_version: Version
     transformers_version: Version
     nnsight_version: Version
     cuda_version: Version
+
+    @model_validator(mode="after")
+    def environment_is_identified(self) -> Self:
+        if self.container_image_digest is None and self.environment_lock_hash is None:
+            raise ValueError("native execution requires an environment lock hash")
+        return self
 
 
 class HardwareIdentity(FrozenModel):

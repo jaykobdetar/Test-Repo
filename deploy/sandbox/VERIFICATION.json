@@ -1,0 +1,58 @@
+{
+  "verified_on": "2026-09-19",
+  "local_image_id": "sha256:9d0457022d2d7334a13341e9948a8691e6551bc8655876d8e37233ebd6dce34e",
+  "real_containment_gate": "passed",
+  "actual_container_tests": 8,
+  "combined_gate_tests_passed": 35,
+  "combined_gate_seconds": 108.2,
+  "subsequent_unit_tests_passed": 28,
+  "runtime": {
+    "podman": "4.9.3",
+    "crun": "1.14.1",
+    "conmon": "2.1.10",
+    "rootless": true,
+    "cgroup_version": "v2",
+    "delegated_controllers": [
+      "cpu",
+      "memory",
+      "pids"
+    ],
+    "seccomp": true,
+    "execution_context": "temporary user systemd service, existing Ubuntu podman AppArmor profile"
+  },
+  "checks": [
+    "network and socket denial",
+    "credential/management-socket/GPU absence",
+    "readonly root and explicit inputs",
+    "hard memory cgroup",
+    "hard PID cgroup",
+    "hard output tmpfs bound",
+    "wall-time termination and removal",
+    "cancellation and removal",
+    "exact approved-job broker",
+    "CPU PyTorch/Transformers/NNsight imports",
+    "NumPy/SciPy/sklearn statistical analysis",
+    "safetensors roundtrip"
+  ],
+  "cloud_resources_created": false,
+  "host_security_policy_changed": false,
+  "user_bus_cleanup_fix": {
+    "result": "passed",
+    "verified_at": "2026-09-19T10:45:11Z",
+    "tests_passed": 1,
+    "seconds": 8.45,
+    "xdg_runtime_dir": "/run/user/1000",
+    "separate_podman_runroot": "/tmp/probe-podman-01a0",
+    "new_polkit_journal_entries": 0,
+    "remaining_containers": 0,
+    "polkit_policy_changed": false
+  },
+  "facade_artifact_reuse_integration": {
+    "result": "passed",
+    "tests_passed": 1,
+    "seconds": 26.9,
+    "actual_containers": 2,
+    "flow": "ResearchService -> CPU safetensors -> ArtifactStore ID/TensorArtifact refs -> original output removed -> second CPU sandbox input -> derived result retained",
+    "gpu_jobs_created": 0
+  }
+}

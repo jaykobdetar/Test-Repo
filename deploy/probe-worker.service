@@ -1,0 +1,22 @@
+[Unit]
+Description=Probe trusted native CPU calibration worker
+After=network.target
+
+[Service]
+Type=simple
+User=probe-worker
+Group=probe-worker
+ExecStart=/opt/probe-core/venv/bin/python -m probe_core.worker --config /etc/probe-core/worker.json --token-file /etc/probe-core/worker-token --port 8080
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/probe-worker
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
