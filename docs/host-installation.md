@@ -91,6 +91,10 @@ An administrator-owned `containers.conf` under the dedicated
 `/var/lib/probe-sandbox/.config/containers` selects `/usr/bin/crun` explicitly.
 Image import and service execution share that HOME and the same rootless image
 store. No system-wide container configuration is rewritten.
+After resolving caller-supplied paths, the installer changes to `/` so the
+service account never inherits a working directory inside a private human home.
+Recovery image and runtime inspections explicitly start in `/opt/probe-core`;
+process failures include bounded stderr rather than being labeled missing images.
 
 If the release includes a CPU image, the installer loads it into the trusted
 account's rootless store, verifies its exact image ID, and runs

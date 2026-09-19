@@ -18,6 +18,9 @@ PROBE_MANIFEST_SHA=$2
 PROBE_HUMAN=$3
 PROBE_RCLONE_SOURCE=$(realpath -- "$4")
 PROBE_PROVIDER_SOURCE=$(realpath -- "$5")
+# All caller paths are now absolute. A service account cannot necessarily
+# traverse the caller's private home when Podman re-enters its saved cwd.
+cd /
 PROBE_HUMAN_UID=$(id -u "$PROBE_HUMAN")
 if [ "$PROBE_HUMAN_UID" -eq 0 ] || [ ! -f "$PROBE_RCLONE_SOURCE" ] || [ ! -f "$PROBE_PROVIDER_SOURCE/runpod.json" ] || [ ! -f "$PROBE_PROVIDER_SOURCE/runpod-api-key" ]; then
   echo "A non-root human identity and prepared private Drive/provider configuration are required." >&2

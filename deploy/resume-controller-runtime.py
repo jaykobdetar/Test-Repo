@@ -51,12 +51,25 @@ def runtime_command(uid: int, *arguments: str) -> list[str]:
             f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus", "/usr/bin/podman", "--remote=false", *arguments]
 
 
+def runtime_output(uid: int, *arguments: str, operation: str, run=subprocess.run) -> str:
+    # runuser retains cwd. The human's terminal may be inside a private home
+    # that the service account cannot traverse after dropping privileges.
+    result = run(runtime_command(uid, *arguments), cwd=ROOT, stdin=subprocess.DEVNULL,
+                 capture_output=True, env=ENV, timeout=30, check=False)
+    if result.returncode:
+        diagnostic = result.stderr[-4096:].decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"{operation} failed (exit {result.returncode}) from {ROOT}: "
+                           + (diagnostic or "Podman returned no stderr diagnostic"))
+    return result.stdout.decode("utf-8", errors="replace").strip()
+
+
 def verify_image(uid: int, image: str, *, run=subprocess.run):
     require(re.fullmatch(r"sha256:[0-9a-f]{64}", image), "Immutable sandbox image required")
-    result = run(runtime_command(uid, "image", "inspect", "--format", "{{.Id}}", image),
-                 capture_output=True, env=ENV, timeout=30, check=False)
-    require(result.returncode == 0 and result.stdout.decode("ascii").strip().removeprefix("sha256:") == image[7:],
-            "The previously imported exact CPU image is unavailable; refusing any import or reset")
+    identity = runtime_output(uid, "image", "inspect", "--format", "{{.Id}}", image,
+                              operation="Podman image inspection", run=run)
+    require(identity.removeprefix("sha256:") == image[7:],
+            "Podman returned an unexpected CPU image identity: " + repr(identity[:256])
+            + "; refusing any import or reset")
 
 
 def verify_config_location(home: Path, uid: int, *, owner=0):
@@ -94,10 +107,10 @@ def install_runtime_config(home: Path, uid: int, gid: int, *, owner=0):
 
 
 def verify_selected_runtime(uid: int, *, run=subprocess.run):
-    result = run(runtime_command(uid, "info", "--format", "{{.Host.OCIRuntime.Path}}"),
-                 capture_output=True, env=ENV, timeout=30, check=False)
-    require(result.returncode == 0 and result.stdout.decode("ascii").strip() == "/usr/bin/crun",
-            "The actual Probe Podman store did not select /usr/bin/crun")
+    runtime = runtime_output(uid, "info", "--format", "{{.Host.OCIRuntime.Path}}",
+                             operation="Podman runtime inspection", run=run)
+    require(runtime == "/usr/bin/crun",
+            "The actual Probe Podman store did not select /usr/bin/crun; observed " + repr(runtime[:256]))
 
 
 def continuation(installer: bytes, trusted_uid: int) -> str:
@@ -147,9 +160,9 @@ def main(argv=None) -> int:
             path = Path(temporary) / "continue.sh"
             path.write_text(script)
             path.chmod(0o600)
-            subprocess.run(["/bin/bash", "-n", str(path)], check=True, env=ENV)
+            subprocess.run(["/bin/bash", "-n", str(path)], cwd=ROOT, check=True, env=ENV)
             print("Verified the known pre-attestation failure. Installing crun and retrying the unchanged acceptance gate.", flush=True)
-            subprocess.run(["/usr/bin/apt-get", "install", "-y", "--no-install-recommends", "crun"], check=True, env=ENV)
+            subprocess.run(["/usr/bin/apt-get", "install", "-y", "--no-install-recommends", "crun"], cwd="/", check=True, env=ENV)
             verifier.regular(Path("/usr/bin/crun"), 0)
             require(os.access("/usr/bin/crun", os.X_OK), "Installed crun is not executable")
             install_runtime_config(home, uid, gid)

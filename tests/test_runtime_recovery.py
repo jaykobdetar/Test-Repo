@@ -182,12 +182,82 @@ def test_actual_runtime_selection_uses_trusted_identity_store_and_bus(path, code
         assert "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/994/bus" in command
         assert command[-5:] == ["/usr/bin/podman", "--remote=false", "info", "--format", "{{.Host.OCIRuntime.Path}}"]
         assert kwargs["env"] == recovery.ENV and kwargs["timeout"] == 30
+        assert kwargs["cwd"] == recovery.ROOT and kwargs["stdin"] == subprocess.DEVNULL
         return subprocess.CompletedProcess(command, code, path, b"")
     if passes:
         recovery.verify_selected_runtime(994, run=run)
     else:
-        with pytest.raises(RuntimeError, match="did not select"):
+        with pytest.raises(RuntimeError, match="did not select" if code == 0 else "runtime inspection failed"):
             recovery.verify_selected_runtime(994, run=run)
+
+
+@pytest.mark.parametrize("operation", ["image", "runtime"])
+def test_preflights_start_outside_an_inaccessible_inherited_directory(tmp_path, monkeypatch, operation):
+    if os.geteuid() == 0:
+        pytest.skip("requires an unprivileged process to demonstrate directory traversal denial")
+    safe = tmp_path / "installed"
+    safe.mkdir(mode=0o755)
+    parent = tmp_path / "private"
+    inherited = parent / "terminal"
+    inherited.mkdir(parents=True)
+    monkeypatch.setattr(recovery, "ROOT", safe)
+    image = "sha256:" + "a" * 64
+    expected = image if operation == "image" else "/usr/bin/crun"
+    child = ["/usr/bin/python3", "-I", "-c",
+             "import os; os.chdir(os.getcwd()); print(" + repr(expected) + ")"]
+    previous = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.chdir(inherited)
+        parent.chmod(0o000)
+        # A real child fails when asked to traverse its inherited private cwd.
+        baseline = subprocess.run(child, capture_output=True, env=recovery.ENV)
+        assert baseline.returncode != 0 and b"PermissionError" in baseline.stderr
+
+        def run(command, **kwargs):
+            assert command[:7] == ["/usr/sbin/runuser", "-u", "probe-trusted", "-g", "probe-trusted", "--", "env"]
+            # Replace the privileged identity switch, retaining every actual
+            # subprocess setting so the child's working directory is exercised.
+            return subprocess.run(child, **kwargs)
+
+        if operation == "image":
+            recovery.verify_image(994, image, run=run)
+        else:
+            recovery.verify_selected_runtime(994, run=run)
+    finally:
+        parent.chmod(0o700)
+        os.fchdir(previous)
+        os.close(previous)
+
+
+@pytest.mark.parametrize("operation", ["image", "runtime"])
+def test_preflight_failure_retains_bounded_real_process_diagnostics(tmp_path, monkeypatch, operation):
+    monkeypatch.setattr(recovery, "ROOT", tmp_path)
+
+    def run(command, **kwargs):
+        return subprocess.run(["/usr/bin/python3", "-I", "-c",
+            "import os; os.write(2, b'x' * 8000 + b' permission denied in private cwd'); raise SystemExit(125)"], **kwargs)
+
+    with pytest.raises(RuntimeError) as failure:
+        if operation == "image":
+            recovery.verify_image(994, "sha256:" + "a" * 64, run=run)
+        else:
+            recovery.verify_selected_runtime(994, run=run)
+    assert "exit 125" in str(failure.value)
+    assert "permission denied in private cwd" in str(failure.value)
+    assert "image is unavailable" not in str(failure.value)
+    assert len(str(failure.value)) < 4600
+
+
+@pytest.mark.parametrize("actual,accepted", [("a" * 64, True), ("sha256:" + "a" * 64, True),
+                                           ("sha256:" + "b" * 64, False)])
+def test_image_identity_comparison_is_separate_from_command_failure(actual, accepted):
+    def run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, (actual + "\n").encode(), b"")
+    if accepted:
+        recovery.verify_image(994, "sha256:" + "a" * 64, run=run)
+    else:
+        with pytest.raises(RuntimeError, match="unexpected CPU image identity"):
+            recovery.verify_image(994, "sha256:" + "a" * 64, run=run)
 
 
 @pytest.mark.parametrize("gate_succeeds", [False, True])
