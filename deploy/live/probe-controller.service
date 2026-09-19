@@ -1,0 +1,27 @@
+[Unit]
+Description=Probe human-authorized live compute controller
+After=network-online.target probe-watchdog.service probe-provider-stop.service
+Wants=network-online.target
+Requires=probe-watchdog.service probe-provider-stop.service
+
+[Service]
+Type=simple
+User=probe-trusted
+Group=probe-ipc
+SupplementaryGroups=probe-trusted probe-ledger-read probe-watch-read
+ExecStartPre=/usr/bin/setfacl --modify u:@HUMAN_UID@:r-x,d:u:@HUMAN_UID@:rw- /run/probe-controller
+ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.controller serve --ledger /var/lib/probe-core/research.sqlite --provider-config /etc/probe-core/runpod.json --watchdog-health /var/lib/probe-watchdog/health.json --research-socket /run/probe-controller/research.sock --admin-socket /run/probe-controller/admin.sock --research-uid @TRUSTED_UID@ --admin-uid @HUMAN_UID@ --agent-uid @AGENT_UID@ --watchdog-uid @WATCHDOG_UID@ --socket-gid @IPC_GID@ --idle-overhead 0.0
+RuntimeDirectory=probe-controller
+RuntimeDirectoryMode=0750
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/probe-core /var/lib/probe-provider /run/probe-controller
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

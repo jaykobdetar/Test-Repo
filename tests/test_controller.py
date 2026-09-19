@@ -15,9 +15,11 @@ from probe_core.controller import (
     StopWatchdog, WatchdogUnavailable, serve_controller,
 )
 from probe_core.ledger import Ledger
+from probe_core.ledger import ApprovalError
 from probe_core.provider import DeploymentSpec, PriceQuote, SimulatedProvider, StopOnlyBackend, WorkerState
 from probe_core.rpc import RPCError, UnixRPCClient
 from probe_core.schemas import JobSpec
+from probe_core.schemas import ApprovalNonce
 
 
 class Clock:
@@ -72,6 +74,54 @@ def provision(harness, runtime=900):
     request = harness["controller"].request_provision(deployment(), [harness["job"].job_id], runtime)
     started = harness["controller"].approve_and_start(request["request_id"])
     return request, started
+
+
+def test_human_infrastructure_allowance_creates_no_dispatchable_research_jobs(harness):
+    controller = harness["controller"]
+    params = {"deployment": deployment().model_dump(), "script_sha256": "sha256:" + "c" * 64,
+              "max_runtime_seconds": 300}
+    with pytest.raises(PermissionError):
+        controller.research_dispatch("request_preflight", params)
+    request = controller.admin_dispatch("request_preflight", params)
+    assert request["job_ids"] == []
+    assert request["infrastructure"] == {"kind": "gpu_preflight", "script_sha256": "sha256:" + "c" * 64}
+    started = controller.approve_and_start(request["request_id"])
+    assert started["state"] == "RUNNING"
+    with harness["ledger"].read_connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM approval_jobs WHERE approval_id=?", (request["approval_id"],)).fetchone()[0] == 0
+        body = json.loads(connection.execute("SELECT document FROM approvals WHERE approval_id=?", (request["approval_id"],)).fetchone()[0])
+    assert body["purpose"] == "infrastructure_preflight"
+    assert harness["ledger"].dispatch_next(request["worker_id"], approval_id=request["approval_id"]) is None
+    harness["clock"].advance(300)
+    assert harness["watcher"].tick()[0]["reason"] == "absolute_deadline"
+    controller.reconcile()
+    assert controller.status()[0]["state"] == "STOPPED"
+
+
+@pytest.mark.parametrize("purpose", ["research", "infrastructure_preflight"])
+def test_research_and_infrastructure_approval_scopes_cannot_cross(harness, purpose):
+    ledger, clock = harness["ledger"], harness["clock"]
+    digest = ledger.batch_hash([harness["job"].job_id])
+    approval = ApprovalNonce(approval_id="scope-test", token="s" * 48, pod_id="worker-scope", batch_hash=digest,
+                             purpose=purpose, max_runtime_seconds=300, price_ceiling_usd_per_hour=1.0,
+                             issued_at=clock(), expires_at=clock() + timedelta(seconds=300))
+    ledger.register_approval(approval)
+    common = dict(pod_id="worker-scope", live_price_usd_per_hour=0.50, requested_runtime_seconds=300)
+    with pytest.raises(ApprovalError, match="different purpose"):
+        if purpose == "research":
+            ledger.consume_infrastructure_approval("scope-test", "s" * 48, infrastructure_hash=digest, **common)
+        else:
+            ledger.consume_approval("scope-test", "s" * 48, job_ids=[harness["job"].job_id], **common)
+    with ledger.read_connection() as connection:
+        assert connection.execute("SELECT consumed_at FROM approvals WHERE approval_id='scope-test'").fetchone()[0] is None
+
+
+def test_infrastructure_cannot_overlap_an_unclosed_research_allowance(harness):
+    provision(harness, runtime=300)
+    request = harness["controller"].request_infrastructure_preflight(deployment(), "sha256:" + "d" * 64, 300)
+    with pytest.raises(ApprovalError, match="shutdown"):
+        harness["controller"].approve_and_start(request["request_id"])
+    assert len(calls(harness, "create")) == 1
 
 
 def calls(harness, operation):

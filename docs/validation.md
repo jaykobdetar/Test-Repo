@@ -1,5 +1,27 @@
 # Local implementation verification
 
+The deployment preparation gate on September 19, 2026 passed **544 tests with
+0 failures and 0 skips** in 175.30 seconds. It includes the earlier checks below,
+the guarded RunPod adapter, pinned model preparation, backend parity operation,
+backup/restore, service configuration, timeout classification, concurrent SQLite
+startup, and the production CPU acceptance command. The real container gate uses
+an exact local image ID and exercises scientific CPU execution, network/GPU/host
+isolation, process pressure, memory refusal, output limits and wall-time cleanup.
+
+A separate offline controller installation imported all production entry points
+using Python 3.13.15 and SQLite 3.53.1 with the controller/MCP dependencies and no
+host PyTorch dependency. Both canonical model inventories were downloaded and
+fully rehashed. A synthetic calibration snapshot was uploaded to a private Google
+Drive folder, downloaded in full, verified, and restored with its accepted
+artifact, retained input, audit chain and empty provider-intents database intact.
+No credentials were included in that archive.
+
+These checks do not establish installed service-account isolation, provider
+shutdown, or canonical BF16/CUDA acceptance. No paid cloud resources were created.
+The permanent Ubuntu installation and live GPU gates remain separate.
+
+## Earlier local milestone
+
 The full local acceptance run on September 19, 2026 completed with **429 passed,
 0 failed, 0 errors, and 0 skipped** in 157.41 seconds. It tested source commit
 `a639716cec57ecc5c4afd82a4baf25ebb74ce4e9`, before the public README and MIT license

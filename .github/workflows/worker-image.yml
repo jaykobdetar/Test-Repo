@@ -1,0 +1,80 @@
+name: Build pinned GPU worker image
+
+on:
+  push:
+    branches: [main, feat/live-deployment]
+    paths:
+      - deploy/gpu/Dockerfile.worker
+      - deploy/gpu/bootstrap-requirements.txt
+      - .github/workflows/worker-image.yml
+  workflow_dispatch:
+    inputs:
+      diagnostic_image:
+        description: Reviewed diagnostic image, including @sha256 digest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DIAGNOSTIC_IMAGE: ${{ inputs.diagnostic_image || 'ghcr.io/jaykobdetar/probe-mcp-diagnostic@sha256:40df386b544b4cd5a3576d2323db774f6a22e90a6a2428f4302c28af6ce3009c' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require an immutable diagnostic image
+        run: |
+          python3 - <<'PY'
+          import os, re
+          if not re.fullmatch(r"ghcr.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}", os.environ["DIAGNOSTIC_IMAGE"]):
+              raise SystemExit("diagnostic_image must be a reviewed GHCR image pinned by full digest")
+          PY
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish locked worker without model weights
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/gpu/Dockerfile.worker
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            DIAGNOSTIC_IMAGE=${{ env.DIAGNOSTIC_IMAGE }}
+            SOURCE_COMMIT=${{ github.sha }}
+          tags: ghcr.io/${{ github.repository_owner }}/probe-mcp-worker:git-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+      - name: Record build identity separately from runtime acceptance
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/probe-mcp-worker
+          DIGEST: ${{ steps.image.outputs.digest }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          record = {key.lower(): os.environ[key] for key in ("IMAGE", "DIGEST", "SOURCE_COMMIT", "DIAGNOSTIC_IMAGE")}
+          record.update(environment_lock_hash="sha256:"+hashlib.sha256(Path("uv.lock").read_bytes()).hexdigest(), gpu_acceptance_passed=False)
+          Path("worker-image.json").write_text(json.dumps(record, indent=2)+"\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write(f"Built `{record['image']}@{record['digest']}`. GPU acceptance has not run.\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: worker-image-reference
+          path: worker-image.json

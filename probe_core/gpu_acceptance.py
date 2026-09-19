@@ -1,0 +1,169 @@
+"""Prepare exact approved GPU calibration batches and collect actual receipts.
+
+This CLI never consumes an approval, provisions compute, or runs an unqueued GPU
+operation. Controller/dispatcher services execute the prepared typed jobs.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+from typing import Literal
+
+from .dispatcher import WorkerClient
+from .ledger import Ledger
+from .schemas import FrozenModel, Identifier, JobSpec, ModelIdentity
+from .worker import prompt_set_hash, sha256_file
+from .worker_contracts import PromptDataset, WorkerConfig
+
+
+class AcceptanceCase(FrozenModel):
+    name: Identifier
+    action: Literal["wait", "cancel_after_running", "restart_supervisor_after_running"]
+    expected_state: Literal["COMPLETED", "FAILED"]
+    expected_failure_kind: Literal["timeout", "cancelled", "policy", "oom"] | None = None
+    spec: JobSpec
+
+
+class AcceptancePlan(FrozenModel):
+    schema_version: Literal[1] = 1
+    kind: Literal["gpu_runtime_acceptance"] = "gpu_runtime_acceptance"
+    label: Identifier
+    model: ModelIdentity
+    cases: tuple[AcceptanceCase, ...]
+    scientific_evidence: Literal[False] = False
+
+
+def make_plan(config: WorkerConfig, label: str) -> AcceptancePlan:
+    if config.device != "cuda:0" or config.model.dtype != "bfloat16" or config.model.repo == "probe/testing-tiny-qwen3":
+        raise ValueError("live acceptance requires a canonical unquantized BF16/CUDA worker configuration")
+    asset = config.datasets[0]
+    path = Path(asset.path)
+    if path.is_symlink() or sha256_file(path) != asset.sha256:
+        raise ValueError("acceptance dataset must match the registered immutable bytes")
+    dataset = PromptDataset.model_validate_json(path.read_text())
+    prompt_ids = tuple(prompt.prompt_id for prompt in dataset.prompts[:2])
+    if len(prompt_ids) < 2:
+        raise ValueError("acceptance requires two distinct prompts to exercise padding")
+    base = {"experiment_stage": "calibration", "model": config.model.model_dump(mode="json"),
+            "inputs": {"dataset_revision": asset.sha256, "prompt_set_hash": prompt_set_hash(dataset, prompt_ids),
+                       "prompt_ids": prompt_ids, "random_seed": 123, "generation": {"temperature": 0.0, "max_new_tokens": 4}},
+            "operation": {"kind": "capture", "modules": [{"layer": 14, "component": "residual"}], "positions": ["last"]},
+            "limits": {"max_runtime_seconds": 120, "max_output_bytes": 32*1024**2, "max_cpu_cores": 4,
+                       "max_ram_bytes": 24*1024**3, "max_vram_bytes": 20*1024**3, "max_generated_tokens": 32}}
+    definitions = [
+        ("backend-parity", "wait", "COMPLETED", None, {"kind": "backend_parity"}, {"max_runtime_seconds": 240}),
+        ("capture-retention", "wait", "COMPLETED", None, None, {}),
+        ("cancel-running", "cancel_after_running", "FAILED", "cancelled", None, {}),
+        ("hard-deadline", "wait", "FAILED", "timeout", None, {"max_runtime_seconds": 1}),
+        ("output-limit", "wait", "FAILED", "policy", None, {"max_output_bytes": 1}),
+        ("vram-limit", "wait", "FAILED", "oom", None, {"max_vram_bytes": 1024**3}),
+        ("supervisor-restart", "restart_supervisor_after_running", "COMPLETED", None, None, {}),
+    ]
+    cases = []
+    for name, action, state, kind, operation, limits in definitions:
+        values = dict(base, idempotency_key=label+"-"+name,
+                      operation=operation or base["operation"], limits=dict(base["limits"], **limits))
+        cases.append(AcceptanceCase(name=name, action=action, expected_state=state,
+                                    expected_failure_kind=kind, spec=JobSpec.model_validate(values)))
+    return AcceptancePlan(label=label, model=config.model, cases=cases)
+
+
+def submit(ledger: Ledger, plan: AcceptancePlan):
+    jobs = [ledger.submit_job(case.spec) for case in plan.cases]
+    return {"job_ids": [job.job_id for job in jobs], "batch_hash": ledger.batch_hash([job.job_id for job in jobs]),
+            "approval_consumed": False, "compute_started": False,
+            "operator_actions": [{"job_id": job.job_id, "action": case.action} for case, job in zip(plan.cases, jobs)]}
+
+
+def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = None):
+    jobs = {job.spec.idempotency_key: job for job in ledger.list_jobs()}
+    reports = []
+    for case in plan.cases:
+        job = jobs.get(case.spec.idempotency_key)
+        row = {"case": case.name, "passed": False, "action": case.action}
+        reports.append(row)
+        if job is None or job.spec != case.spec:
+            row["reason"] = "exact approved job is missing"
+            continue
+        row.update(job_id=job.job_id, attempt_id=job.attempt_id, state=job.state.value, failure_kind=job.failure_kind)
+        if job.attempt_id is None:
+            row["reason"] = "no execution attempt exists"
+            continue
+        with ledger.read_connection() as connection:
+            stopped = connection.execute("SELECT stopped_at FROM attempts WHERE attempt_id=?", (job.attempt_id,)).fetchone()[0]
+        row["process_stopped_at"] = stopped
+        if job.state.value != case.expected_state or job.failure_kind != case.expected_failure_kind or stopped is None:
+            row["reason"] = "expected terminal state and positive stop evidence are absent"
+            continue
+        if client is not None:
+            receipt = client.status(job.attempt_id)
+            if receipt.job_id != job.job_id or not receipt.process_stopped:
+                row["reason"] = "worker receipt identity or stop evidence mismatches"
+                continue
+            row["observed_receipt"] = receipt.model_dump(mode="json")
+        if job.state.value == "COMPLETED":
+            manifest = ledger.get_manifest(job.job_id)
+            if manifest.model != plan.model or manifest.hardware.provider_backend != "runpod" or manifest.hardware.gpu_count != 1 or manifest.software.container_image_digest is None:
+                row["reason"] = "canonical GPU/container provenance is absent"
+                continue
+            directory = ledger.get_artifact_root(job.job_id)
+            row["retained_artifacts"] = [{"path": item.path, "sha256": sha256_file(directory/item.path)} for item in manifest.artifacts]
+            if any(item["sha256"] != "sha256:"+expected.sha256 for item, expected in zip(row["retained_artifacts"], manifest.artifacts)):
+                row["reason"] = "retained artifact bytes changed"
+                continue
+            row["manifest"] = manifest.model_dump(mode="json")
+            if case.name == "backend-parity":
+                summary = json.loads((directory/"summary.json").read_text())
+                if summary.get("suite") != "backend_parity_v1" or summary.get("passed") is not True or summary.get("scientific_evidence") is not False:
+                    row["reason"] = "the real fixed backend suite did not pass"
+                    continue
+                row["calibration"] = summary
+        row["passed"] = True
+    # The ledger proves accepted attempts and retained bytes. It cannot by itself
+    # prove that an operator actually restarted a supervisor/replaced a Pod.
+    return {"schema_version": 1, "kind": "gpu_runtime_acceptance_observations", "model": plan.model.model_dump(mode="json"),
+            "case_results_passed": all(row["passed"] for row in reports), "cases": reports,
+            "scientific_evidence": False, "lifecycle_acceptance_complete": False,
+            "remaining_evidence": ["supervisor PID changed while the same attempt remained fenced",
+                                   "provider-confirmed stop and separately approved restart/replacement",
+                                   "model and retained-artifact hash readback after replacement"]}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=["plan", "submit", "collect"])
+    parser.add_argument("--plan", type=Path)
+    parser.add_argument("--worker-config", type=Path)
+    parser.add_argument("--label")
+    parser.add_argument("--ledger", type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--worker-url")
+    parser.add_argument("--token-file", type=Path)
+    args = parser.parse_args()
+    if args.command == "plan":
+        if args.worker_config is None or args.label is None:
+            parser.error("plan requires --worker-config and --label")
+        result = make_plan(WorkerConfig.model_validate_json(args.worker_config.read_text()), args.label).model_dump(mode="json")
+    else:
+        if args.plan is None or args.ledger is None:
+            parser.error("submit/collect requires --plan and --ledger")
+        plan = AcceptancePlan.model_validate_json(args.plan.read_text())
+        client = None
+        if args.worker_url:
+            if args.token_file is None:
+                parser.error("--worker-url requires --token-file")
+            info = args.token_file.stat()
+            if args.token_file.is_symlink() or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                parser.error("token file must be owned and mode0600")
+            client = WorkerClient(args.worker_url, args.token_file.read_text().strip())
+        with Ledger(args.ledger) as ledger:
+            result = submit(ledger, plan) if args.command == "submit" else collect(ledger, plan, client)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with args.output.open("x") as stream:
+        stream.write(json.dumps(result, indent=2)+"\n")
+    print(json.dumps({"output": str(args.output), "compute_started": False}))
+
+
+if __name__ == "__main__":
+    main()

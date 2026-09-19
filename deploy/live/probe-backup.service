@@ -1,0 +1,21 @@
+[Unit]
+Description=Probe independent verified Google Drive backup
+After=network-online.target probe-snapshot.service
+Wants=network-online.target
+Requires=probe-snapshot.service
+OnSuccess=probe-backup-prune.service
+
+[Service]
+Type=oneshot
+User=probe-backup
+Group=probe-backup-read
+SupplementaryGroups=probe-backup-read
+EnvironmentFile=/etc/probe-core/backup.env
+ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.backup upload-pending --outbox /var/lib/probe-backups/outbox --config /var/lib/probe-backup/rclone.conf --drive-folder-id ${DRIVE_FOLDER_ID} --receipts /var/lib/probe-backups/receipts
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/probe-backups/outbox
+ReadWritePaths=/var/lib/probe-backup /var/lib/probe-backups/receipts
+UMask=0077

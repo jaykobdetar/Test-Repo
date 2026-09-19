@@ -1,18 +1,31 @@
 # Trusted controller and independent stop service
 
-The included implementation is a persistent provider simulator. It performs no cloud requests and reads no cloud credentials. Initial creation, replacement, and restart all require the human administrative socket. Research clients can submit a request, inspect its status, or stop compute.
+The development backend is a persistent provider simulator. A separate guarded
+[RunPod adapter](runpod-provider.md) supports short supervised acceptance runs.
+Initial creation, replacement, and any supported restart require the human
+administrative socket. Research clients can submit a request, inspect its
+status, or stop compute. RunPod resumes and unattended launches remain disabled.
 
 ## Process and identity boundaries
 
 Run the controller and trusted research facade as `probe-trusted`, because both own the authoritative ledger and its audit projection. Run the untrusted MCP client and research agent under a different account. The controller's `--research-uid` identifies the **trusted facade**, not the untrusted agent. It may equal the controller UID. The facade exposes its narrower research API to the untrusted account.
 
-Run the independent watchdog as `probe-watchdog`. It reads the ledger with SQLite `mode=ro` and owns its own schedule database and health file. It cannot register or consume core approvals. Its provider interface exposes only status and stop. A future live adapter must additionally use provider-enforced stop-only credentials; Python interface restriction alone is not a credential boundary.
+Run the independent watchdog as `probe-watchdog`. It reads the ledger with SQLite
+`mode=ro` and owns its own schedule database and health file. It cannot register
+or consume core approvals. Its provider interface exposes only status and stop.
+The RunPod deployment uses a separate Unix broker because the provider has no
+documented Pod-specific stop-only key. Only the trusted broker holds that key;
+Python interface restriction alone is not a credential boundary.
 
 The administrative Unix socket checks the peer's kernel-supplied UID. Its configured human UID must differ from the controller service, trusted facade, and untrusted agent identities. The controller requires `--agent-uid` and rejects configurations that reuse that UID for any trusted role. Set `AGENT_UID` to the research facade configuration's `research_uid`, and set `HUMAN_UID` to its `admin_uid`. The trusted facade may share the controller UID. The normal CLI does not offer the testing-only same-service-UID escape hatch. The RPC client also verifies the server UID.
 
 ## Local service installation contract
 
-The systemd units are configuration artifacts; no unit is installed or started automatically. Install the package in `/opt/probe-core/venv`, create the named accounts/groups, copy the units, and fill `/etc/probe-core/controller.env` with the actual account IDs. Keep that configuration owned by the administrator and unwritable by the research identities.
+The original systemd examples use the simulator. The reviewed manual
+[host installer](host-installation.md) renders the separate live templates using
+actual account IDs, installs `/opt/probe-core/venv`, and starts the control and
+backup services without purchasing compute. Keep configuration owned by the
+administrator and unwritable by research identities.
 
 Provision these directories before enabling the units:
 

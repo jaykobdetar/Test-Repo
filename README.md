@@ -8,7 +8,7 @@ and a separate human approval path for compute.
 The intended research subjects are **Qwen3-1.7B-Base** and **Qwen3-1.7B**. The
 current implementation has been tested locally with a small, randomly initialized
 Qwen3 model on CPU. It is an early research infrastructure project: live RunPod
-deployment, hidden evaluation, and the independent scientific workflow remain
+acceptance, hidden evaluation, and the independent scientific workflow remain
 unfinished. No scientific discovery is claimed.
 
 ## What works today
@@ -25,8 +25,12 @@ unfinished. No scientific discovery is claimed.
   CPU experiments, and compute requests. Submitting a job does not approve a GPU start.
 - **CPU Python sandbox:** rootless Podman with restricted mounts, no network or GPU,
   and enforced time, memory, process, CPU, and output limits.
-- **Compute-control foundation:** one-time human approvals, price/runtime checks,
-  and an independent watchdog, currently connected to a persistent provider simulator.
+- **Compute control:** one-time human approvals, price/runtime checks, and an
+  independent watchdog. A persistent simulator supports development; a RunPod
+  adapter permits explicitly configured, short supervised acceptance runs.
+- **Deployment preparation:** pinned model inventories, a no-model GPU diagnostic,
+  a worker image recipe, separate service identities, and Drive backup tooling
+  that downloads and restores each new upload before reporting success.
 
 The repository is named `probe-mcp`; the Python distribution and import package
 are `probe-core` and `probe_core`, respectively.
@@ -35,7 +39,7 @@ are `probe-core` and `probe_core`, respectively.
 
 | Area | Status |
 | --- | --- |
-| Cloud provider | Simulator only; no live RunPod adapter is included |
+| Cloud provider | RunPod adapter uses price-capped creation and separate stop authority; unattended starts and direct resumes are disabled pending provider guarantees |
 | GPU execution | CUDA paths exist; real GPU limits, SSH deployment, and canonical checkpoint parity still require validation |
 | Flexible experiments | Arbitrary CPU Python plus fixed worker operations; no arbitrary agent-written GPU Python |
 | Interventions | Apply to the prompt's prefill pass; generation is a separate, unmodified operation |
@@ -43,8 +47,9 @@ are `probe-core` and `probe_core`, respectively.
 | Research workflow | Hypothesis storage and freezing exist; Explorer/Skeptic/Replicator orchestration and blind calibration remain pending |
 | Advanced methods | SAE/Qwen-Scope, circuit tracing, and automated novelty adjudication are not implemented |
 
-Model weights, credentials, research datasets, and built container images are not
-included. Deployment files are examples and do not install or start services.
+Model weights, credentials, and research datasets are not included. Image recipes
+and service installation tooling are provided; reading or installing the Python
+package does not create a running lab or approve paid compute.
 
 ## Architecture
 
@@ -55,7 +60,7 @@ Research agent
 Research facade ──────────► local ledger and retained artifacts
     │ compute request
     ▼
-Human approval ───────────► trusted controller ──► provider simulator
+Human approval ───────────► trusted controller ──► provider adapter
                                   │                   ▲
                          approved job batch      watchdog stop
                                   ▼
@@ -90,10 +95,10 @@ uv run --locked python -m pytest -q
 
 These tests create their small model locally and need no cloud credentials or
 downloaded model checkpoint. Tests involving services bind local sockets. The
-nine real sandbox integration tests skip unless a suitable Podman environment
+ten real sandbox integration tests skip unless a suitable Podman environment
 and image are configured; a default test run does not validate containment.
 
-The full local acceptance run on September 19, 2026 passed **429 tests with no
+The full local acceptance run on September 19, 2026 passed **544 tests with no
 skips**, including the real sandbox gate. This verifies the tested engineering
 paths, not scientific calibration or production readiness. See
 [verification details](docs/validation.md).
@@ -121,6 +126,13 @@ private configuration, service accounts, sockets, worker assets, and directories
 - [CPU sandbox and containment verification](deploy/sandbox/README.md)
 - [Implementation scope and service boundaries](IMPLEMENTATION.md)
 - [Core API, queue, manifests, audit, and backups](docs/core-guide.md)
+- [First live deployment and outstanding acceptance conditions](docs/live-deployment-plan.md)
+- [Host installation](docs/host-installation.md) and [verified backup/restore](docs/backup-restore.md)
+
+The controller can be installed with the `controller` and `mcp` extras; it does
+not need the GPU worker's PyTorch installation. The manual host installer expects
+a reviewed release bundle with a pinned manifest, its own Python runtime, and
+locked offline dependencies.
 
 After the research service is configured, an MCP client can launch `probe-mcp`
 with `--socket` pointing to its research socket and `--service-uid` set to the
@@ -129,8 +141,8 @@ human account, not the research agent's MCP configuration.
 
 ## Next milestones
 
-1. Implement the live RunPod adapter and deploy separate trusted services,
-   pinned model assets, storage, backups, and verified shutdown.
+1. Complete live RunPod acceptance and deploy separate trusted services,
+   pinned model assets, storage, verified backups, and verified shutdown.
 2. Validate canonical BF16/CUDA execution, resource limits, and remote recovery.
 3. Implement scientific metrics, matched controls, private held-out evaluation,
    and trusted promotion rules.

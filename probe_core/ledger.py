@@ -18,6 +18,7 @@ import sqlite3
 import stat
 import tempfile
 import threading
+import time
 import uuid
 from concurrent.futures import Future
 from contextlib import contextmanager
@@ -139,6 +140,35 @@ def _text(value: str, label: str, maximum: int = 1024) -> str:
 
 def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    """Bound initial journal-mode contention before any ledger transaction.
+
+    SQLite may bypass its busy handler when concurrent initializers both try to
+    promote their journal locks. Retry this idempotent setup step explicitly;
+    disabling the handler here keeps its own wait from extending our deadline.
+    """
+    deadline = time.monotonic() + 5.0
+    conn.execute("PRAGMA busy_timeout=0;")
+    try:
+        while True:
+            try:
+                mode = conn.execute("PRAGMA journal_mode=WAL;").fetchone()[0]
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+                if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(0.01, remaining))
+            else:
+                if mode.lower() != "wal":
+                    raise LedgerError("SQLite failed to enable WAL mode")
+                return
+    finally:
+        conn.execute("PRAGMA busy_timeout=5000;")
 
 
 def _require_local_path(path: Path) -> Path:
@@ -281,9 +311,7 @@ class Ledger:
             conn = sqlite3.connect(self.path, isolation_level=None, timeout=5.0)
             conn.row_factory = sqlite3.Row
             # Connection configuration precedes transactions (WAL cannot be set in one).
-            conn.execute("PRAGMA busy_timeout=5000;")
-            if conn.execute("PRAGMA journal_mode=WAL;").fetchone()[0].lower() != "wal":
-                raise LedgerError("SQLite failed to enable WAL mode")
+            _enable_wal(conn)
             conn.execute("PRAGMA synchronous=FULL;")
             conn.execute("PRAGMA foreign_keys=ON;")
             conn.execute("BEGIN IMMEDIATE;")
@@ -487,7 +515,10 @@ class Ledger:
 
     def register_approval(self, nonce: ApprovalNonce) -> None:
         nonce = ApprovalNonce.model_validate({**nonce.model_dump(), "token": nonce.token})
-        public = canonical_json(nonce.model_dump(mode="json", exclude={"token"}))
+        # Existing research approvals predate the purpose field. Keep their
+        # canonical documents stable while giving infrastructure a disjoint scope.
+        public = canonical_json(nonce.model_dump(mode="json", exclude={"token", "purpose"}
+                                                if nonce.purpose == "research" else {"token"}))
         token_hash = hashlib.sha256(nonce.token.get_secret_value().encode()).hexdigest()
 
         def register(conn: sqlite3.Connection, now: datetime) -> None:
@@ -511,6 +542,26 @@ class Ledger:
     def consume_approval(self, approval_id: str, token: str, *, pod_id: str,
                          job_ids: Sequence[str], live_price_usd_per_hour: float,
                          requested_runtime_seconds: int) -> ApprovalGrant:
+        return self._consume_approval(approval_id, token, pod_id=pod_id, job_ids=job_ids,
+                                     live_price_usd_per_hour=live_price_usd_per_hour,
+                                     requested_runtime_seconds=requested_runtime_seconds)
+
+    def consume_infrastructure_approval(self, approval_id: str, token: str, *, pod_id: str,
+                                        infrastructure_hash: str, live_price_usd_per_hour: float,
+                                        requested_runtime_seconds: int) -> ApprovalGrant:
+        """Consume a human infrastructure allowance with no dispatchable jobs."""
+        if (not isinstance(infrastructure_hash, str) or len(infrastructure_hash) != 71 or
+                not infrastructure_hash.startswith("sha256:") or
+                any(character not in "0123456789abcdef" for character in infrastructure_hash[7:])):
+            raise ApprovalError("infrastructure scope must be an immutable SHA256 hash")
+        return self._consume_approval(approval_id, token, pod_id=pod_id, job_ids=(),
+                                     infrastructure_hash=infrastructure_hash,
+                                     live_price_usd_per_hour=live_price_usd_per_hour,
+                                     requested_runtime_seconds=requested_runtime_seconds)
+
+    def _consume_approval(self, approval_id: str, token: str, *, pod_id: str,
+                          job_ids: Sequence[str], live_price_usd_per_hour: float,
+                          requested_runtime_seconds: int, infrastructure_hash: str | None = None) -> ApprovalGrant:
         _positive_seconds(requested_runtime_seconds)
         if isinstance(live_price_usd_per_hour, bool) or not isinstance(live_price_usd_per_hour, (int, float)):
             raise ApprovalError("a finite live price is required")
@@ -534,7 +585,11 @@ class Ledger:
                 expires = datetime.fromisoformat(public["expires_at"].replace("Z", "+00:00"))
                 if not issued <= now < expires:
                     raise ApprovalError("approval is expired or not yet valid")
-                if pod_id != public["pod_id"] or self._batch(conn, ids) != public["batch_hash"]:
+                expected_purpose = "infrastructure_preflight" if infrastructure_hash is not None else "research"
+                if public.get("purpose", "research") != expected_purpose:
+                    raise ApprovalError("approval is for a different purpose")
+                actual_hash = infrastructure_hash if infrastructure_hash is not None else self._batch(conn, ids)
+                if pod_id != public["pod_id"] or actual_hash != public["batch_hash"]:
                     raise ApprovalError("approval does not match this Pod and batch")
                 if any(self._row(conn, jid)["state"] != JobState.PENDING for jid in ids):
                     raise ApprovalError("approved jobs must be pending")
@@ -561,6 +616,7 @@ class Ledger:
                              [(approval_id, jid) for jid in ids])
             self._event(conn, now, "policy_evaluation", {"decision": "allow_start",
                         "approval_id": approval_id, "pod_id": pod_id,
+                        "purpose": expected_purpose,
                         "batch_hash": public["batch_hash"], "deadline": deadline.isoformat(),
                         "live_price_usd_per_hour": live_price_usd_per_hour})
             return ApprovalGrant(approval_id, pod_id, public["batch_hash"], now, deadline)
@@ -935,7 +991,7 @@ class Ledger:
                 raise ArtifactError("manifest intervention does not match the dispatched specification")
             tools = {"capture": "capture_activation", "patch": "activation_patch", "ablate": "ablate_component",
                      "steer": "steer_direction", "fit_probe": "fit_probe", "generate": "generate_batch",
-                     "weight_stats": "weight_stats", "tensor_slice": "tensor_slice", "module_manifest": "module_manifest"}
+                     "weight_stats": "weight_stats", "tensor_slice": "tensor_slice", "module_manifest": "module_manifest", "backend_parity": "backend_parity"}
             if manifest.experiment.tool != tools[spec.operation.kind]:
                 raise ArtifactError("manifest tool does not match the dispatched primitive")
             if not attempt["dispatched_at"] <= manifest.run.started_at.timestamp() <= min(now.timestamp(), attempt["execution_deadline"]):

@@ -206,7 +206,7 @@ class WorkerEngine:
             tokens = [list(prompt.token_ids) if prompt.token_ids is not None else self.tokenizer.encode(prompt.text, add_special_tokens=False) for prompt in records]
         model = self._load_model(request.spec)
         cap = min(32768, model.config.max_position_embeddings)
-        generated = request.spec.inputs.generation.max_new_tokens if request.spec.operation.kind == "generate" else 0
+        generated = request.spec.inputs.generation.max_new_tokens if request.spec.operation.kind in {"generate", "backend_parity"} else 0
         if any(not row or len(row) + generated > cap for row in tokens):
             raise WorkerRequestError("prompt plus generation exceeds the model context limit")
         if any(token < 0 or token >= model.config.vocab_size for row in tokens for token in row):
@@ -450,6 +450,9 @@ class WorkerEngine:
         if operation.kind == "fit_probe":
             self._dataset(request)
             tensors, summary = self._fit_probe(request)
+        elif operation.kind == "backend_parity":
+            from .backend_parity import run_parity
+            tensors, summary, generated_tokens = run_parity(self, request)
         else:
             model = self._load_model(request.spec)
             # Loading an uncached model can consume random state. Execution
@@ -533,7 +536,7 @@ class WorkerEngine:
             names = [self._target(operation.target)[0]]
         else:
             names = ["model"]
-        tools = {"capture": "capture_activation", "patch": "activation_patch", "ablate": "ablate_component", "steer": "steer_direction", "fit_probe": "fit_probe", "generate": "generate_batch", "weight_stats": "weight_stats", "tensor_slice": "tensor_slice", "module_manifest": "module_manifest"}
+        tools = {"capture": "capture_activation", "patch": "activation_patch", "ablate": "ablate_component", "steer": "steer_direction", "fit_probe": "fit_probe", "generate": "generate_batch", "weight_stats": "weight_stats", "tensor_slice": "tensor_slice", "module_manifest": "module_manifest", "backend_parity": "backend_parity"}
         science = request.science
         manifest = RunManifest.model_validate({
             "schema_version": 1,
@@ -607,6 +610,10 @@ def _output_size(path: Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file() and not item.is_symlink()) if path.exists() else 0
 
 
+def _cpu_time_exceeded(_signum, _frame):
+    raise TimeoutError("CPU time limit reached")
+
+
 def _child_entry(config_json: str, request_json: str, directory: str, ready, release) -> None:
     os.setsid()
     ready.set()
@@ -620,12 +627,17 @@ def _child_entry(config_json: str, request_json: str, directory: str, ready, rel
         keep = {key: value for key, value in os.environ.items() if key in {"PATH", "HOME", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES"}}
         os.environ.clear()
         os.environ.update(keep)
-        os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", TOKENIZERS_PARALLELISM="false", WANDB_MODE="disabled")
+        os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", TOKENIZERS_PARALLELISM="false", WANDB_MODE="disabled", CUBLAS_WORKSPACE_CONFIG=":4096:8")
         os.environ["OMP_NUM_THREADS"] = str(request.spec.limits.max_cpu_cores)
         os.environ["MKL_NUM_THREADS"] = str(request.spec.limits.max_cpu_cores)
         available = sorted(os.sched_getaffinity(0))
         os.sched_setaffinity(0, available[:request.spec.limits.max_cpu_cores])
-        resource.setrlimit(resource.RLIMIT_CPU, (request.spec.limits.max_runtime_seconds, request.spec.limits.max_runtime_seconds))
+        # RLIMIT_CPU is aggregate CPU time, whereas the independently monitored
+        # execution deadline is wall time. A soft limit gives a truthful SIGXCPU
+        # outcome; equal soft/hard limits can otherwise produce ambiguous SIGKILL.
+        signal.signal(signal.SIGXCPU, _cpu_time_exceeded)
+        cpu_seconds = request.spec.limits.max_runtime_seconds * request.spec.limits.max_cpu_cores
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         resource.setrlimit(resource.RLIMIT_FSIZE, (max(request.spec.limits.max_output_bytes, 65536),) * 2)
         if config.device == "cpu":
@@ -785,13 +797,15 @@ class Supervisor:
         metadata = json.loads(metadata_path.read_text())
         request = self._requests[attempt_id]
         alive = _same_process(metadata)
+        # An output limit remains enforceable even if the child exited between
+        # monitor ticks. Never reclassify an observed over-budget file as science.
+        if _output_size(directory / "artifacts") > request.spec.limits.max_output_bytes:
+            return self._terminate(attempt_id, "policy", "OutputLimitExceeded")
         if alive:
             if time.time() >= metadata["deadline"] or time.monotonic() >= metadata["monotonic_deadline"]:
                 return self._terminate(attempt_id, "timeout", "ExecutionDeadlineExceeded")
             if _rss(metadata["pid"]) > request.spec.limits.max_ram_bytes:
                 return self._terminate(attempt_id, "oom", "RAMLimitExceeded")
-            if _output_size(directory / "artifacts") > request.spec.limits.max_output_bytes:
-                return self._terminate(attempt_id, "policy", "OutputLimitExceeded")
             return receipt
         process = self._processes.get(attempt_id)
         if process:
@@ -803,7 +817,12 @@ class Supervisor:
                 return self._terminate(attempt_id, "infrastructure", "ResultIdentityMismatch")
             result = result.model_copy(update={"process_stopped": True})
         else:
-            result = receipt.model_copy(update={"state": WorkerState.FAILED, "failure_kind": "infrastructure", "error_code": "ProcessExitedWithoutResult", "finished_at": datetime.now(UTC), "process_stopped": True})
+            cpu_expired = process is not None and process.exitcode == -signal.SIGXCPU
+            deadline_expired = time.time() >= metadata["deadline"] or time.monotonic() >= metadata["monotonic_deadline"]
+            result = receipt.model_copy(update={"state": WorkerState.FAILED,
+                "failure_kind": "timeout" if cpu_expired or deadline_expired else "infrastructure",
+                "error_code": "CPUTimeLimitExceeded" if cpu_expired else "ExecutionDeadlineExceeded" if deadline_expired else "ProcessExitedWithoutResult",
+                "finished_at": datetime.now(UTC), "process_stopped": True})
         _json_write(directory / "receipt.json", result.model_dump(mode="json"))
         if metadata.get("cgroup"):
             try:
@@ -1031,6 +1050,7 @@ def main():
     config = WorkerConfig.model_validate_json(Path(args.config).read_text())
     supervisor = Supervisor(config)
     server = WorkerHTTPServer(supervisor, token_path.read_text().strip(), port=args.port)
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     try:
         server.serve_forever()
     finally:

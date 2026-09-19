@@ -1,8 +1,10 @@
-# Phase 3–5 implementation and acceptance
+# Implementation and acceptance boundaries
 
-This is the local implementation milestone, before Phase 6 RunPod deployment.
-The supplied compute backend is explicitly simulated. No paid GPU is provisioned
-by these services. The worker executes real HF/PyTorch models on CPU for acceptance.
+The original Phase 3–5 milestone established local acceptance using a provider
+simulator and a small HF/PyTorch model on CPU. The deployment work adds a guarded
+RunPod adapter, pinned asset preparation, service installation, and backup/restore
+tooling. Actual canonical BF16/CUDA execution and provider shutdown still require
+separate live evidence; a successful build or CPU test does not supply it.
 
 ## Boundaries
 
@@ -53,8 +55,9 @@ do not prove Phase 5 complete.
 - Watchdog operation is independent of the controller process. Stop requests
   remain pending until provider readback confirms shutdown. Expiry alone is not
   a shutdown receipt. Idle work stops after five minutes.
-- Provider credentials belong in the controller's private configuration when
-  Phase 6 adds a real adapter. No credential is needed for this simulator.
+- Provider credentials belong only to the trusted controller and its independent
+  stop broker. The watchdog uses a narrow Unix socket instead of holding a full
+  provider key. No credential is needed for the simulator.
 
 ## Phase 4 requirements
 

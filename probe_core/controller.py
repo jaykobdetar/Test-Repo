@@ -1,8 +1,8 @@
 """Trusted approval controller and independently runnable stop watchdog.
 
 Only the Unix admin endpoint can consume approval. Research clients can propose
-work, read status, or stop it. The supplied provider is a persistent simulator;
-there are no RunPod credentials or live provider actions in this implementation.
+work, read status, or stop it. Simulator and explicitly configured live provider
+backends share the durable deadline and approval boundary.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import argparse
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ import uuid
 
 from .audit import canonical_json
 from .ledger import JobState, Ledger
-from .provider import ComputeBackend, DeploymentSpec, ProviderBudgetRefused, SimulatedProvider, StopBackend, StopOnlyBackend, WorkerState
+from .provider import ComputeBackend, DeploymentSpec, ProviderBudgetRefused, ProviderLaunchRefused, SimulatedProvider, StopBackend, StopOnlyBackend, WorkerState
 from .rpc import UnixRPCClient, UnixRPCServer
 from .schemas import ApprovalNonce
 
@@ -126,14 +127,17 @@ class Controller:
                 configuration TEXT, configuration_hash TEXT, replaces_worker_id TEXT,
                 job_ids TEXT NOT NULL, batch_hash TEXT NOT NULL, max_runtime_seconds INTEGER NOT NULL,
                 state TEXT NOT NULL, approval_id TEXT NOT NULL UNIQUE, created_at REAL NOT NULL,
-                deadline REAL, observed_provider_id TEXT, last_error_code TEXT)
+                deadline REAL, observed_provider_id TEXT, last_error_code TEXT, infrastructure TEXT)
             """)
+            if "infrastructure" not in {row[1] for row in connection.execute("PRAGMA table_info(compute_requests)")}:
+                connection.execute("ALTER TABLE compute_requests ADD COLUMN infrastructure TEXT")
         ledger._submit(initialize)
 
-    def _request(self, action, worker_id, job_ids, runtime, deployment=None, replaces_worker_id=None):
+    def _request(self, action, worker_id, job_ids, runtime, deployment=None, replaces_worker_id=None,
+                 infrastructure=None):
         _identifier(worker_id, "worker ID")
         _runtime(runtime)
-        if type(job_ids) is not list or not job_ids or len(job_ids) > 10000:
+        if type(job_ids) is not list or (not job_ids and infrastructure is None) or len(job_ids) > 10000:
             raise ValueError("job_ids must be a nonempty bounded list")
         for job_id in job_ids:
             _identifier(job_id, "job ID")
@@ -143,16 +147,17 @@ class Controller:
         approval_id = "approval-" + uuid.uuid4().hex
 
         def create(connection, now):
-            batch_hash = Ledger._batch(connection, job_ids)
+            batch_hash = self._infrastructure_hash(infrastructure, deployment.digest) if infrastructure else Ledger._batch(connection, job_ids)
             for job_id in job_ids:
                 if Ledger._row(connection, job_id)["state"] != JobState.PENDING:
                     raise ControllerConflict("only pending jobs may request compute")
-            connection.execute("INSERT INTO compute_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            connection.execute("INSERT INTO compute_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                (request_id, worker_id, action,
                                 canonical_json(deployment.model_dump()) if deployment else None,
                                 deployment.digest if deployment else None, replaces_worker_id,
                                 canonical_json(job_ids), batch_hash, runtime, "PENDING", approval_id,
-                                now.timestamp(), None, None, None))
+                                now.timestamp(), None, None, None,
+                                canonical_json(infrastructure) if infrastructure else None))
             Ledger._event(connection, now, "policy_evaluation", {
                 "decision": "compute_requested", "request_id": request_id,
                 "worker_id": worker_id, "action": action, "batch_hash": batch_hash,
@@ -171,6 +176,24 @@ class Controller:
                              job_ids, max_runtime_seconds, deployment, replaces_worker_id)
 
     @staticmethod
+    def _infrastructure_hash(infrastructure, configuration_hash):
+        return "sha256:" + hashlib.sha256(canonical_json({"infrastructure": infrastructure,
+                "configuration_hash": configuration_hash}).encode()).hexdigest()
+
+    def request_infrastructure_preflight(self, deployment: DeploymentSpec | dict, script_sha256: str,
+                                         max_runtime_seconds: int) -> dict:
+        """Human-only diagnostic allowance; it authorizes no scientific job."""
+        if type(script_sha256) is not str or not re.fullmatch(r"sha256:[0-9a-f]{64}", script_sha256):
+            raise ValueError("the fixed diagnostic script must be bound by SHA256")
+        _runtime(max_runtime_seconds)
+        if max_runtime_seconds > 900:
+            raise ValueError("infrastructure preflight must be at most 15 minutes")
+        deployment = DeploymentSpec.model_validate(deployment)
+        infrastructure = {"kind": "gpu_preflight", "script_sha256": script_sha256}
+        return self._request("CREATE", "worker-" + uuid.uuid4().hex, [], max_runtime_seconds,
+                             deployment, infrastructure=infrastructure)
+
+    @staticmethod
     def _row(connection, request_id):
         row = connection.execute("SELECT * FROM compute_requests WHERE request_id=?", (request_id,)).fetchone()
         if row is None:
@@ -182,11 +205,17 @@ class Controller:
         result = dict(row)
         result["job_ids"] = json.loads(result["job_ids"])
         result["configuration"] = json.loads(result["configuration"]) if result["configuration"] else None
+        result["infrastructure"] = json.loads(result["infrastructure"]) if result["infrastructure"] else None
         return result
 
     def status(self) -> list[dict]:
         with self.ledger.read_connection() as connection:
-            return [self._public(row) for row in connection.execute("SELECT * FROM compute_requests ORDER BY created_at,request_id")]
+            result = [self._public(row) for row in connection.execute("SELECT * FROM compute_requests ORDER BY created_at,request_id")]
+        capabilities = getattr(self.backend, "capabilities", None)
+        if capabilities is not None:
+            for request in result:
+                request["provider_capabilities"] = capabilities()
+        return result
 
     def _state(self, request_id, state, *, deadline=None, provider_id=None, error=None):
         def update(connection, now):
@@ -261,7 +290,9 @@ class Controller:
                 row = self._row(connection, request_id)
                 if row["state"] != "PENDING":
                     raise ControllerConflict("approval request is already consumed")
-                if Ledger._batch(connection, request["job_ids"]) != request["batch_hash"]:
+                actual_hash = (self._infrastructure_hash(request["infrastructure"], request["configuration_hash"])
+                               if request["infrastructure"] else Ledger._batch(connection, request["job_ids"]))
+                if actual_hash != request["batch_hash"]:
                     raise ControllerConflict("approved batch changed")
                 connection.execute("UPDATE compute_requests SET state='PREPARING' WHERE request_id=?", (request_id,))
                 Ledger._event(connection, now, "policy_evaluation", {
@@ -275,16 +306,21 @@ class Controller:
             approval = ApprovalNonce(
                 approval_id=request["approval_id"], token=secrets.token_urlsafe(48),
                 pod_id=request["worker_id"], batch_hash=request["batch_hash"],
+                purpose="infrastructure_preflight" if request["infrastructure"] else "research",
                 max_runtime_seconds=request["max_runtime_seconds"], price_ceiling_usd_per_hour=ceiling,
                 issued_at=now, expires_at=now + timedelta(minutes=5),
             )
             try:
                 self.ledger.register_approval(approval)
-                grant = self.ledger.consume_approval(
-                    approval.approval_id, approval.token.get_secret_value(), pod_id=request["worker_id"],
-                    job_ids=request["job_ids"], live_price_usd_per_hour=price,
-                    requested_runtime_seconds=request["max_runtime_seconds"],
-                )
+                arguments = dict(pod_id=request["worker_id"], live_price_usd_per_hour=price,
+                                 requested_runtime_seconds=request["max_runtime_seconds"])
+                if request["infrastructure"]:
+                    grant = self.ledger.consume_infrastructure_approval(
+                        approval.approval_id, approval.token.get_secret_value(),
+                        infrastructure_hash=request["batch_hash"], **arguments)
+                else:
+                    grant = self.ledger.consume_approval(
+                        approval.approval_id, approval.token.get_secret_value(), job_ids=request["job_ids"], **arguments)
                 self._state(request_id, "STARTING", deadline=grant.deadline.timestamp())
                 self._await_watchdog_ack(request, grant.deadline.timestamp())
             except Exception:
@@ -294,10 +330,12 @@ class Controller:
             try:
                 if deployment is not None:
                     self.backend.create(request["worker_id"], deployment, request_key=request_id,
-                                        price_ceiling_usd_per_hour=ceiling, storage_ceiling_usd_per_day=2 - self.overhead)
+                                        price_ceiling_usd_per_hour=ceiling, storage_ceiling_usd_per_day=2 - self.overhead,
+                                        absolute_deadline=grant.deadline)
                 else:
                     self.backend.start(request["worker_id"], request_key=request_id,
-                                       price_ceiling_usd_per_hour=ceiling, storage_ceiling_usd_per_day=2 - self.overhead)
+                                       price_ceiling_usd_per_hour=ceiling, storage_ceiling_usd_per_day=2 - self.overhead,
+                                       absolute_deadline=grant.deadline)
                 observed = self.backend.status(request["worker_id"])
                 if observed.state != WorkerState.RUNNING or observed.provider_id is None:
                     raise StartUncertain("provider did not confirm the requested running worker")
@@ -308,10 +346,12 @@ class Controller:
                     self.stop_gpu(request["worker_id"])
                 with self.ledger.read_connection() as connection:
                     return self._public(self._row(connection, request_id))
-            except ProviderBudgetRefused as exc:
+            except ProviderLaunchRefused as exc:
                 self._close_core_approval(request)
-                self._state(request_id, "REJECTED", error="ProviderBudgetRefused")
-                raise BudgetError("provider rejected the changed price or storage offer") from exc
+                self._state(request_id, "REJECTED", error=type(exc).__name__)
+                if isinstance(exc, ProviderBudgetRefused):
+                    raise BudgetError("provider rejected the changed price or storage offer") from exc
+                raise ControllerError("provider cannot satisfy the approved launch requirements") from exc
             except Exception as exc:
                 self._state(request_id, "UNCERTAIN", error=type(exc).__name__)
                 # Stop is repeatable; paid starts and creates never are.
@@ -396,7 +436,8 @@ class Controller:
 
     def admin_dispatch(self, method: str, params: dict):
         handlers = {"approve": self.approve_and_start, "status": self.status,
-                    "stop_gpu": self.stop_gpu, "reconcile": self.reconcile}
+                    "stop_gpu": self.stop_gpu, "reconcile": self.reconcile,
+                    "request_preflight": self.request_infrastructure_preflight}
         if method not in handlers:
             raise PermissionError("unknown administrative method")
         return handlers[method](**params)
@@ -554,12 +595,17 @@ def serve_controller(controller, research_socket, admin_socket, *, research_uid,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Probe trusted control services (simulator only)")
+    parser = argparse.ArgumentParser(description="Probe trusted control services")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("serve", "watchdog"):
         command = sub.add_parser(name)
         command.add_argument("--ledger", required=True)
-        command.add_argument("--provider-state", required=True)
+        providers = command.add_mutually_exclusive_group(required=True)
+        providers.add_argument("--provider-state", help="Persistent simulator state")
+        if name == "serve":
+            providers.add_argument("--provider-config", help="Root-owned live RunPod configuration")
+        else:
+            providers.add_argument("--stop-socket", help="Independent OS-authenticated stop broker")
         command.add_argument("--watchdog-health", required=True)
     serve = sub.choices["serve"]
     serve.add_argument("--research-socket", required=True)
@@ -574,22 +620,37 @@ def main():
     serve.add_argument("--idle-overhead", type=float, required=True)
     watchdog = sub.choices["watchdog"]
     watchdog.add_argument("--state", required=True)
+    watchdog.add_argument("--stop-server-uid", type=int)
     admin = sub.add_parser("admin", help="Human-only client for the authenticated administrative socket")
     admin.add_argument("--socket", required=True)
     admin.add_argument("--expected-server-uid", type=int, required=True)
-    admin.add_argument("--method", choices=("status", "approve", "stop_gpu", "reconcile"), required=True)
+    admin.add_argument("--method", choices=("status", "approve", "stop_gpu", "reconcile", "request_preflight"), required=True)
     admin.add_argument("--request-id")
     admin.add_argument("--price-ceiling", type=float, default=1.49)
+    admin.add_argument("--preflight-file", help="JSON containing deployment, script_sha256 and max_runtime_seconds")
     args = parser.parse_args()
     if args.command == "admin":
         params = {}
+        if args.method == "request_preflight":
+            if args.preflight_file is None:
+                parser.error("--preflight-file is required for an infrastructure request")
+            params = json.loads(Path(args.preflight_file).read_text())
         if args.method == "approve":
             if args.request_id is None:
                 parser.error("--request-id is required for approval")
             params = {"request_id": args.request_id, "price_ceiling_usd_per_hour": args.price_ceiling}
         print(canonical_json(UnixRPCClient(args.socket, expected_server_uid=args.expected_server_uid).call(args.method, params)))
         return
-    backend = SimulatedProvider(args.provider_state)
+    if args.provider_state:
+        backend = SimulatedProvider(args.provider_state)
+    elif args.command == "serve":
+        from .runpod_provider import RunPodConfig, RunPodProvider
+        backend = RunPodProvider(RunPodConfig.load(args.provider_config))
+    else:
+        from .runpod_provider import StopBrokerClient
+        if args.stop_server_uid is None:
+            parser.error("--stop-server-uid is required with --stop-socket")
+        backend = StopBrokerClient(args.stop_socket, expected_server_uid=args.stop_server_uid)
     if args.command == "watchdog":
         watcher = StopWatchdog(args.ledger, StopOnlyBackend(backend), state_path=args.state,
                                health_path=args.watchdog_health)

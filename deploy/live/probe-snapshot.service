@@ -1,0 +1,17 @@
+[Unit]
+Description=Probe consistent credential-free research snapshot
+
+[Service]
+Type=oneshot
+User=probe-trusted
+Group=probe-backup-read
+SupplementaryGroups=probe-trusted probe-ledger-read
+EnvironmentFile=/etc/probe-core/backup.env
+ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.backup publish --ledger /var/lib/probe-core/research.sqlite --inputs /var/lib/probe-core/input-artifacts --provider-state /var/lib/probe-provider/runpod.sqlite --outbox /var/lib/probe-backups/outbox --source-commit ${SOURCE_COMMIT} --receipts /var/lib/probe-backups/receipts --drive-folder-id ${DRIVE_FOLDER_ID}
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/probe-core /var/lib/probe-backups/outbox
+ReadOnlyPaths=/var/lib/probe-provider
+UMask=0027

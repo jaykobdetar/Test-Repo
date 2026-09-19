@@ -30,10 +30,14 @@ class DeploymentSpec(BaseModel):
     region: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
     volume_gb: int = Field(ge=1, le=1000)
     gpu_count: int = Field(default=1, ge=1, le=1)
+    image_repository: str | None = Field(default=None, max_length=200,
+                                         pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+    launch_config_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
     @property
     def digest(self) -> str:
-        return "sha256:" + hashlib.sha256(canonical_json(self.model_dump()).encode()).hexdigest()
+        # Preserve hashes of pre-live-adapter persisted approvals.
+        return "sha256:" + hashlib.sha256(canonical_json(self.model_dump(exclude_none=True)).encode()).hexdigest()
 
 
 class WorkerState(StrEnum):
@@ -83,12 +87,18 @@ class ComputeBackend(StopBackend, Protocol):
     stop_confirms_execution: bool
     def quote(self, *, worker_id: str | None = None, deployment: DeploymentSpec | None = None) -> PriceQuote: ...
     def create(self, worker_id: str, deployment: DeploymentSpec, *, request_key: str,
-               price_ceiling_usd_per_hour: float, storage_ceiling_usd_per_day: float) -> WorkerStatus: ...
+               price_ceiling_usd_per_hour: float, storage_ceiling_usd_per_day: float,
+               absolute_deadline: datetime | None = None) -> WorkerStatus: ...
     def start(self, worker_id: str, *, request_key: str,
-              price_ceiling_usd_per_hour: float, storage_ceiling_usd_per_day: float) -> WorkerStatus: ...
+              price_ceiling_usd_per_hour: float, storage_ceiling_usd_per_day: float,
+              absolute_deadline: datetime | None = None) -> WorkerStatus: ...
 
 
-class ProviderBudgetRefused(RuntimeError):
+class ProviderLaunchRefused(RuntimeError):
+    """A definitive local/provider refusal before a paid action was submitted."""
+
+
+class ProviderBudgetRefused(ProviderLaunchRefused):
     """A definitive provider refusal: no paid operation was submitted."""
 
 
@@ -201,7 +211,8 @@ class SimulatedProvider:
             raise ProviderBudgetRefused("provider storage no longer satisfies idle budget")
 
     def create(self, worker_id: str, deployment: DeploymentSpec, *, request_key: str,
-               price_ceiling_usd_per_hour: float = 1.49, storage_ceiling_usd_per_day: float = 2.0) -> WorkerStatus:
+               price_ceiling_usd_per_hour: float = 1.49, storage_ceiling_usd_per_day: float = 2.0,
+               absolute_deadline: datetime | None = None) -> WorkerStatus:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -227,7 +238,8 @@ class SimulatedProvider:
         return self.status(worker_id)
 
     def start(self, worker_id: str, *, request_key: str,
-              price_ceiling_usd_per_hour: float = 1.49, storage_ceiling_usd_per_day: float = 2.0) -> WorkerStatus:
+              price_ceiling_usd_per_hour: float = 1.49, storage_ceiling_usd_per_day: float = 2.0,
+              absolute_deadline: datetime | None = None) -> WorkerStatus:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:

@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -97,6 +98,110 @@ def _daemon_call(fn):
     thread = threading.Thread(target=invoke, daemon=True)
     thread.start()
     return result, thread
+
+
+def test_initialization_retries_real_wal_lock_then_preserves_busy_timeout(tmp_path, monkeypatch):
+    database = tmp_path / "locked-startup.sqlite"
+    original_connect = sqlite3.connect
+    contended = threading.Event()
+    attempts = []
+
+    class ObservedConnection(sqlite3.Connection):
+        def execute(self, statement, *args, **kwargs):
+            if statement == "PRAGMA journal_mode=WAL;":
+                attempts.append(statement)
+                try:
+                    return super().execute(statement, *args, **kwargs)
+                except sqlite3.OperationalError as exc:
+                    if exc.sqlite_errorcode & 0xFF == sqlite3.SQLITE_BUSY:
+                        contended.set()
+                    raise
+            return super().execute(statement, *args, **kwargs)
+
+    def observed_connect(*args, **kwargs):
+        return original_connect(*args, factory=ObservedConnection, **kwargs)
+
+    blocker = original_connect(database, isolation_level=None)
+    try:
+        blocker.execute("BEGIN;")
+        blocker.execute("SELECT name FROM sqlite_schema;").fetchall()
+        with monkeypatch.context() as patch:
+            patch.setattr(ledger_module.sqlite3, "connect", observed_connect)
+            opening, thread = _daemon_call(lambda: Ledger(database))
+            try:
+                assert contended.wait(timeout=5)
+            finally:
+                blocker.execute("ROLLBACK;")
+            with opening.result(timeout=5) as instance:
+                instance.record_event("tool_call", {"after_contention": True})
+                settings = instance._submit(lambda connection, now: (
+                    connection.execute("PRAGMA journal_mode;").fetchone()[0],
+                    connection.execute("PRAGMA busy_timeout;").fetchone()[0],
+                ))
+                assert settings == ("wal", 5000)
+                assert instance.audit_export_error is None
+            thread.join(timeout=1)
+            assert not thread.is_alive()
+        assert len(attempts) >= 2
+    finally:
+        blocker.close()
+
+
+def test_initialization_wal_contention_has_a_five_second_deadline(tmp_path, monkeypatch):
+    database = tmp_path / "permanently-locked-startup.sqlite"
+    elapsed = [0.0]
+    waits = []
+
+    def advance(seconds):
+        waits.append(seconds)
+        elapsed[0] += seconds
+
+    blocker = sqlite3.connect(database, isolation_level=None)
+    try:
+        blocker.execute("BEGIN;")
+        blocker.execute("SELECT name FROM sqlite_schema;").fetchall()
+        monkeypatch.setattr(ledger_module, "time", SimpleNamespace(
+            monotonic=lambda: elapsed[0], sleep=advance,
+        ))
+        with pytest.raises(sqlite3.OperationalError) as rejected:
+            Ledger(database)
+        assert rejected.value.sqlite_errorcode & 0xFF == sqlite3.SQLITE_BUSY
+        assert elapsed[0] == pytest.approx(5.0)
+        assert waits and all(0 < seconds <= 0.01 for seconds in waits)
+    finally:
+        blocker.close()
+    # Failed initialization must close its connection and leave no partial schema.
+    with Ledger(database) as reopened:
+        assert reopened.audit_records() == []
+
+
+@pytest.mark.parametrize("error_code", [None, sqlite3.SQLITE_IOERR])
+def test_initialization_does_not_retry_non_contention_errors(tmp_path, monkeypatch, error_code):
+    original_connect = sqlite3.connect
+    attempts = []
+    failure = sqlite3.OperationalError("database is locked" if error_code is None else "disk I/O error")
+    if error_code is not None:
+        failure.sqlite_errorcode = error_code
+
+    class FailedConnection(sqlite3.Connection):
+        def execute(self, statement, *args, **kwargs):
+            if statement == "PRAGMA journal_mode=WAL;":
+                attempts.append(statement)
+                raise failure
+            return super().execute(statement, *args, **kwargs)
+
+    def failing_connect(*args, **kwargs):
+        return original_connect(*args, factory=FailedConnection, **kwargs)
+
+    def unexpected_wait(seconds):
+        pytest.fail("non-contention failure must propagate without waiting")
+
+    monkeypatch.setattr(ledger_module.sqlite3, "connect", failing_connect)
+    monkeypatch.setattr(ledger_module, "time", SimpleNamespace(monotonic=lambda: 0.0, sleep=unexpected_wait))
+    with pytest.raises(sqlite3.OperationalError) as rejected:
+        Ledger(tmp_path / "failed-startup.sqlite")
+    assert rejected.value is failure
+    assert len(attempts) == 1
 
 
 def test_fatal_rollback_failure_releases_current_and_queued_callers(tmp_path, monkeypatch):
