@@ -4,6 +4,28 @@ This is a deployment plan and acceptance checklist, not a claim that production
 deployment has passed. The local implementation and the live provider must be
 validated separately.
 
+## Verified local deployment
+
+On September 19, 2026, the first Ubuntu controller installation completed:
+
+- The installed CPU acceptance service passed all 14 containment, attestation,
+  resource-limit and normal-cleanup checks under the actual research service
+  profile. No service security restriction was relaxed.
+- Controller, research facade, independent watchdog and provider stop broker
+  were enabled and running. The human administrative socket responded with no
+  compute requests.
+- The installed snapshot and backup identities uploaded the initial local
+  snapshot to Drive, downloaded it, verified its hashes and restored it offline.
+  The first transfer failed; a backup-only retry reused the pending archive and
+  passed without changing code, credentials or permissions. Its specific initial
+  transfer failure was not retained, so its cause remains undetermined.
+- The daily backup timer was enabled. No paid compute was launched.
+
+This initial snapshot contained empty controller/provider state, not scientific
+results. Tests of denial under each installed identity, CPU cleanup after a
+facade crash, and all live GPU/storage/provider acceptance conditions remain
+open. The service installation does not establish unattended readiness.
+
 ## Selected setup
 
 | Decision | Initial choice | Reason |

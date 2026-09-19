@@ -28,9 +28,13 @@ unfinished. No scientific discovery is claimed.
 - **Compute control:** one-time human approvals, price/runtime checks, and an
   independent watchdog. A persistent simulator supports development; a RunPod
   adapter permits explicitly configured, short supervised acceptance runs.
-- **Deployment preparation:** pinned model inventories, a no-model GPU diagnostic,
-  a worker image recipe, separate service identities, and Drive backup tooling
-  that downloads and restores each new upload before reporting success.
+- **Local controller deployment:** separate trusted/research/watchdog/backup
+  identities, an installed CPU containment gate, and daily Drive backups that
+  download and restore each new upload before reporting success. The installed
+  CPU gate and backup cycle passed on one Ubuntu host on September 19, 2026;
+  live GPU acceptance remains pending.
+- **Worker preparation:** pinned model inventories, a no-model GPU diagnostic,
+  and an immutable worker image.
 
 The repository is named `probe-mcp`; the Python distribution and import package
 are `probe-core` and `probe_core`, respectively.
@@ -141,8 +145,8 @@ human account, not the research agent's MCP configuration.
 
 ## Next milestones
 
-1. Complete live RunPod acceptance and deploy separate trusted services,
-   pinned model assets, storage, verified backups, and verified shutdown.
+1. Complete the remaining installed-identity and process-crash checks, then live
+   RunPod acceptance, persistent worker storage, assets, and verified shutdown.
 2. Validate canonical BF16/CUDA execution, resource limits, and remote recovery.
 3. Implement scientific metrics, matched controls, private held-out evaluation,
    and trusted promotion rules.
