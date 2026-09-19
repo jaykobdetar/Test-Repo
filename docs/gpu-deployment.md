@@ -81,7 +81,7 @@ Prepare volume permissions before launch:
 
 Build `worker.json` from the verified inventory's `model` and `assets`, registered dataset hashes, actual live price/region, exact image digest and source commit, `device: "cuda:0"`, `backend: "nnsight"`, and the measured delegated cgroup path. The default config/token paths are shown above; trusted startup variables `PROBE_WORKER_CONFIG` and `PROBE_WORKER_TOKEN_FILE` may override them. The execution API binds only to loopback port 8080. The SSH server permits forwarding to that port; the controller still supplies its separate bearer secret.
 
-The bootstrap restarts a crashed **local supervisor** at most three times while SSH remains available. It neither restarts a Pod nor resubmits a job. The replacement supervisor adopts persisted PID/start-time/boot identity and the same attempt/deadline. Graceful SIGTERM closes the supervisor and terminates its children. `/run/probe-worker-supervisor.pid` records the current supervisor PID for a trusted operator's lifecycle test.
+The bootstrap restarts a crashed **local supervisor** at most three times while SSH remains available. It neither restarts a Pod nor resubmits a job. The replacement supervisor adopts persisted PID/start-time/boot identity and the same attempt/deadline. Graceful SIGTERM closes the supervisor and terminates its children. The trusted lifecycle helper verifies `/run/probe-worker-supervisor.pid` against the actual process, its credentials, command and bootstrap parent before a restart test.
 
 ## Approved numerical and runtime acceptance
 
@@ -104,15 +104,31 @@ Submission queues jobs only. It does not consume approval or start compute. Revi
 6. A one-GiB VRAM budget that must yield a stopped OOM outcome.
 7. A running capture whose supervisor is restarted while preserving the same fenced attempt.
 
-Use two public text prompts of different rendered lengths so the real tokenizer and padding path are exercised. The plan generator selects the first two registered prompts. Keep the cancellation and supervisor-restart actions coordinated with the dispatcher: observe `RUNNING`, perform the named action, and retain the observed status/PID records. For the supervisor restart, a trusted operator can kill only the PID recorded in `/run/probe-worker-supervisor.pid`; the bootstrap should launch a new supervisor, while the child attempt and original absolute deadline remain unchanged. Do not replace a failed execution with a new attempt and call that restart adoption.
+Use two public text prompts of different rendered lengths so the real tokenizer and padding path are exercised. The plan generator selects the first two registered prompts.
+
+### Cancellation and supervisor restart
+
+Run `probe_core.gpu_acceptance_actions` as the trusted ledger owner while the normal dispatcher continues renewing leases and reconciling receipts. This command targets an explicit already-running calibration attempt. It cannot approve compute, submit a job or call the provider.
+
+Copy `deploy/gpu/actions.json.example` into a private, owned `0600` settings file. Replace its placeholders with the existing loopback tunnel endpoint, private bearer-secret path, verified SSH identity and host key, worker config/token paths, and SHA256 of the exact worker config file bytes. The lifecycle helper uses the image's trusted root SSH entry point; the supervisor and job still run as UID/GID10001. The example is for the reviewed GPU image, whose project interpreter is `/opt/probe-core/venv/bin/python`.
+
+For each action case, obtain its case name from the plan and its current job, attempt and approval IDs from the trusted ledger. For example:
+
+```sh
+python -m probe_core.gpu_acceptance_actions --plan base-plan.json --ledger /var/lib/probe-core/research.sqlite --settings /etc/probe-core/gpu-actions.json --action-directory /var/lib/probe-core/gpu-actions --case EXACT_CASE_NAME --job-id EXACT_JOB_ID --attempt-id EXACT_ATTEMPT_ID --approval-id EXACT_APPROVAL_ID
+```
+
+The command checks the active approval, both leases, execution deadline, worker identity and execution-start marker before recording its intent. Cancellation uses the exact attempt's authenticated worker endpoint. Restart uses a fixed SSH helper command that verifies the same supervisor again, then sends SIGKILL through its process descriptor. Only the supervisor is signaled; the child must remain alive with the same request, approval, PID identity and deadlines under the replacement supervisor.
+
+Both hosts write exclusive action records with file and directory synchronization. The worker's restart records are in `/run/probe-lifecycle`: they survive a supervisor restart, but are not promised to survive Pod replacement. The controller's private intent, acknowledgment and result files are the retained acceptance transcript; preserve that directory on durable controller storage. A retry cannot repeat a signal after an intent has been recorded, including when its response was lost. An acknowledged action may be observed again within a bounded interval; an intent without an acknowledgment remains uncertain. A job that completes before cancellation, a missing stop proof, or an unavailable replacement remains inconclusive. Cancellation passes only with a worker-written signal record and positive whole-job termination evidence. None of these outcomes proves provider shutdown or replacement.
 
 While the worker is reachable through the authenticated SSH tunnel, collect actual receipts and sealed artifact checks:
 
 ```sh
-python -m probe_core.gpu_acceptance collect --plan base-plan.json --ledger /var/lib/probe-core/research.sqlite --worker-url http://127.0.0.1:LOCAL_FORWARDED_PORT --token-file /etc/probe-core/worker-token --output base-observations.json
+python -m probe_core.gpu_acceptance collect --plan base-plan.json --ledger /var/lib/probe-core/research.sqlite --worker-url http://127.0.0.1:LOCAL_FORWARDED_PORT --token-file /etc/probe-core/worker-token --action-directory /var/lib/probe-core/gpu-actions --output base-observations.json
 ```
 
-The collector refuses missing/mismatched jobs, missing stop acknowledgments, wrong terminal outcomes, changed artifact bytes, and absent canonical GPU/image provenance. It includes observed usage receipts when the endpoint is supplied. Without that endpoint it can still inspect the authoritative ledger after shutdown, but the cancellation case remains inconclusive: the ledger does not retain the actual worker outcome. Cancellation requires an exact job/attempt receipt showing `CANCELLED`, `failure_kind=cancelled` and positive stop evidence. A job that finished before cancellation arrived cannot pass that check. It deliberately leaves `lifecycle_acceptance_complete: false`: separate evidence must prove cancellation followed an observed running attempt, the supervisor changed while preserving the attempt, and the provider replaced a Pod.
+The collector refuses missing/mismatched jobs, missing stop acknowledgments, wrong terminal outcomes, changed artifact bytes, and absent canonical GPU/image provenance. It includes observed usage receipts when the endpoint is supplied. Without that endpoint it can still inspect the authoritative ledger after shutdown, but the receipt-level cancellation case remains inconclusive: the ledger does not retain the actual worker outcome. Cancellation requires an exact job/attempt receipt showing `CANCELLED`, `failure_kind=cancelled` and positive stop evidence. A job that finished before cancellation arrived cannot pass that check. When an action directory is supplied, the collector separately revalidates its retained cancellation and restart transcripts without issuing any action. Missing or malformed transcripts do not pass. It deliberately leaves `lifecycle_acceptance_complete: false` until separate provider replacement and storage readback evidence is available.
 
 Complete the lifecycle gate with actual before/after supervisor PID and same-attempt records, provider-confirmed stopped state, and a separately approved restart/replacement. Keep the same network volume. Re-read all pinned model hashes and retained artifact hashes after the new worker starts, and rerun its bounded parity job under the new allowance. Preserve the previous accepted manifests and cloud identity readbacks. A simulated provider result or a copied success JSON is not replacement evidence.
 
@@ -123,9 +139,11 @@ Use separate bounded allowances for Base and posttrained workers; `WorkerConfig`
 The offline suite covers locked asset preparation, hash/size/path rejection, diagnostic failure modes, real tiny-Qwen parity, budget contracts, timeout classification and actual supervisor adoption:
 
 ```sh
-python -m pytest -q tests/test_model_assets.py tests/test_gpu_diagnostic.py tests/test_backend_parity.py tests/test_gpu_acceptance.py tests/test_worker_timeouts.py tests/test_worker_process_restart.py
+python -m pytest -q tests/test_model_assets.py tests/test_gpu_diagnostic.py tests/test_backend_parity.py tests/test_gpu_acceptance.py tests/test_gpu_acceptance_actions.py tests/test_gpu_lifecycle.py tests/test_worker_cancellation.py tests/test_worker_execution_started.py tests/test_worker_timeouts.py tests/test_worker_process_restart.py
 ```
 
 The process-restart test kills a real supervisor subprocess while a bounded CPU fixture runs through the production child entry point. Its replacement adopts the same live PID/start/boot identity, persisted request, attempt, approval and deadlines without submitting again, then stops the original child at its original deadline. It verifies supervision and recovery; the numerical payload is deliberately synthetic.
+
+The helper tests exercise owned local processes and inject malformed identity, file, deadline and replay states. The controller action tests use a real ledger with simulated remote observations. Cancellation tests include actual CPU process cleanup and simulated GPU cgroup failures. These checks do not substitute for running the helper over the deployed SSH connection or enforcing limits on a real GPU host.
 
 These tests use synthetic CPU fixtures where appropriate and cannot certify live CUDA execution. The live report must name the real checkpoint revisions, source commit, image digest, device/driver, approved allowance and observed artifact hashes.

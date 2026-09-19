@@ -7,7 +7,7 @@ and a separate human approval path for compute.
 
 The intended research subjects are **Qwen3-1.7B-Base** and **Qwen3-1.7B**. The
 current implementation has been tested locally with a small, randomly initialized
-Qwen3 model on CPU. It is an early research infrastructure project: live RunPod
+Qwen3 model on CPU. It is an early research infrastructure project: live GPU
 acceptance, hidden evaluation, and the independent scientific workflow remain
 unfinished. No scientific discovery is claimed.
 
@@ -36,7 +36,7 @@ unfinished. No scientific discovery is claimed.
 - **Worker preparation:** pinned model inventories, a no-model GPU diagnostic,
   and an immutable worker image.
 
-An initial cloud diagnostic confirmed the expected hardware but did not pass
+Cloud diagnostics confirmed the expected hardware but did not pass
 the worker resource-control prerequisite. The test resources were removed;
 canonical GPU execution remains blocked. See the [deployment status](docs/live-deployment-plan.md#first-gpu-diagnostic).
 
@@ -92,6 +92,9 @@ controller storage, with external backups, rather than a network filesystem.
 Requirements: Linux, Git, [uv](https://docs.astral.sh/uv/), and Python 3.13.
 The worker dependencies include PyTorch and require several gigabytes of disk.
 Use a maintained SQLite build; see the [core guide](docs/core-guide.md).
+Live cancellation in a CPU model worker without delegated cgroups requires the
+Linux 6.9+ process-descriptor group-signaling capability; see the
+[worker runtime requirements](docs/worker-dispatcher.md#runtime-enforcement-and-acceptance-gate).
 
 ```sh
 git clone https://github.com/jaykobdetar/probe-mcp.git
@@ -149,8 +152,8 @@ human account, not the research agent's MCP configuration.
 
 ## Next milestones
 
-1. Complete the remaining installed-identity and process-crash checks, then live
-   RunPod acceptance, persistent worker storage, assets, and verified shutdown.
+1. Establish a repeatable GPU host configuration, then complete live provider
+   acceptance, persistent worker storage, assets, and verified shutdown.
 2. Validate canonical BF16/CUDA execution, resource limits, and remote recovery.
 3. Implement scientific metrics, matched controls, private held-out evaluation,
    and trusted promotion rules.

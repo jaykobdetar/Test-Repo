@@ -14,7 +14,7 @@ Install from the reviewed source commit and locked environment. Before an accept
 {
   "ssh": {
     "host": "reviewed-worker-host.example",
-    "user": "probe-worker",
+    "user": "root",
     "identity_file": "/etc/probe-core/worker-ssh-key",
     "known_hosts_file": "/etc/probe-core/worker-known-hosts",
     "ssh_port": 22,
@@ -23,7 +23,7 @@ Install from the reviewed source commit and locked environment. Before an accept
 }
 ```
 
-The host key must be verified through a trusted channel before it is added. SSH uses an explicit key, explicit known-hosts file, strict host-key checks, no interactive authentication, and a loopback-only forward. The HTTP client ignores proxy environment variables and refuses redirects. Only a literal `http://127.0.0.1:<port>` URL is accepted. If connectivity fails, attempts remain unresolved until the worker can be queried or its termination is positively established; restarting the dispatcher never blindly resubmits them. When its owned SSH process exits, the dispatcher exits with an error so the supplied systemd unit restarts it and opens a new pinned-key tunnel. It then queries the existing attempt with the original approval and deadline. An HTTP outage while SSH remains alive is retried within the existing dispatcher process.
+The example uses the reviewed GPU image's root SSH entry point; its model worker still runs as UID/GID10001. A separately configured native host can use its dedicated SSH account. The host key must be verified through a trusted channel before it is added. SSH uses an explicit key, explicit known-hosts file, strict host-key checks, no interactive authentication, and a loopback-only forward. The HTTP client ignores proxy environment variables and refuses redirects. Only a literal `http://127.0.0.1:<port>` URL is accepted. If connectivity fails, attempts remain unresolved until the worker can be queried or its termination is positively established; restarting the dispatcher never blindly resubmits them. When its owned SSH process exits, the dispatcher exits with an error so the supplied systemd unit restarts it and opens a new pinned-key tunnel. It then queries the existing attempt with the original approval and deadline. An HTTP outage while SSH remains alive is retried within the existing dispatcher process.
 
 The worker configuration is a `WorkerConfig` JSON document with these fields:
 
@@ -77,6 +77,12 @@ The versioned endpoints are `POST /v1/jobs`, `GET /v1/jobs/{attempt_id}`, `POST 
 The supervisor launches each job in a separate process, clears inherited secrets, blocks creation/use of network sockets with seccomp, applies CPU/RAM/file limits, and monitors wall time, resident memory and output bytes. CUDA configuration additionally requires delegated cgroup-v2 memory, CPU and PID enforcement and applies the requested PyTorch VRAM allocation ceiling. On timeout or cancellation it kills the process group (and delegated cgroup where configured) and confirms termination before issuing a stopped receipt. Restart reconciliation fences persisted process identity with boot ID and process start ticks. A terminal state without a positive stop receipt cannot free a ledger execution slot.
 
 Controller cancellation is polled even when issued through a separate research process. The provider simulator cannot prove that a real CPU child exited: its stop leaves the interval pending until the dispatcher obtains the worker's stopped receipt. Successful results also require stopped execution, bounded hash-checked downloads, full ledger manifest validation, and sealing into the authoritative artifact directory.
+
+Cancellation first reconciles completion and deadline outcomes under the supervisor lock. A completed result keeps its original outcome. A live cancellation signals through a descriptor for the original process, then requires the entire job scope to be empty before acknowledging stop. For a CPU worker without a delegated cgroup, descriptor-based process-group signaling requires the Linux 6.9+ `PIDFD_SIGNAL_PROCESS_GROUP` capability. An older kernel explicitly refuses live cancellation; it does not fall back to a potentially reused numeric PID. CUDA workers require the validated attempt cgroup's kill and empty-state checks. These are model-worker requirements, separate from the rootless Podman sandbox.
+
+The child writes `execution-started.json` only after release and runtime setup, before loading the numerical engine. It binds the attempt, process identity and canonical request/config hashes. A successful live cancellation writes `cancellation.json` after its stopped receipt, binding the signal and whole-job cleanup to that execution. Completion races and ordinary timeout results never manufacture cancellation proof. If a crash prevents proof publication, acceptance remains inconclusive even when the stop receipt exists. These records sit outside the scientific artifact tree. The [GPU acceptance guide](gpu-deployment.md#cancellation-and-supervisor-restart) describes the trusted action runner and retained evidence collector.
+
+If a leader exits while descendants remain, the supervisor cleans the validated attempt cgroup independently of the leader. A CPU worker without a cgroup retains a process descriptor captured while the leader's identity matched, so it can stop that original group after the leader exits. A newly started CPU supervisor that first encounters an already-dead leader has no such retained identity. It leaves that orphaned scope unresolved rather than signaling a potentially reused numeric process group. Deployments needing recovery across that combined failure require delegated cgroups.
 
 Run the offline acceptance gate from the committed project with:
 

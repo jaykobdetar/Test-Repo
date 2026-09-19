@@ -76,7 +76,7 @@ def submit(ledger: Ledger, plan: AcceptancePlan):
             "operator_actions": [{"job_id": job.job_id, "action": case.action} for case, job in zip(plan.cases, jobs)]}
 
 
-def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = None):
+def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = None, *, action_directory: Path | None = None):
     jobs = {job.spec.idempotency_key: job for job in ledger.list_jobs()}
     reports = []
     for case in plan.cases:
@@ -137,15 +137,24 @@ def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = 
                     continue
                 row["calibration"] = summary
         row["passed"] = True
-    # The ledger proves accepted attempts and retained bytes. It cannot by itself
-    # prove that an operator actually restarted a supervisor/replaced a Pod.
+    actions = {"complete": False, "cases": []}
+    if action_directory is not None:
+        from .gpu_acceptance_actions import collect_action_evidence
+        actions = collect_action_evidence(ledger, plan, action_directory)
+    proven_actions = {row["action"] for row in actions["cases"] if row["passed"]}
+    remaining = []
+    if "cancel_after_running" not in proven_actions:
+        remaining.append("cancellation requested after the exact attempt was observed running")
+    if "restart_supervisor_after_running" not in proven_actions:
+        remaining.append("supervisor PID changed while the same attempt remained fenced")
+    remaining.extend(["provider-confirmed stop and separately approved restart/replacement",
+                      "model and retained-artifact hash readback after replacement"])
+    # Action transcripts can prove a local cancellation or supervisor restart.
+    # They cannot prove provider shutdown, asset persistence or Pod replacement.
     return {"schema_version": 1, "kind": "gpu_runtime_acceptance_observations", "model": plan.model.model_dump(mode="json"),
             "case_results_passed": all(row["passed"] for row in reports), "cases": reports,
             "scientific_evidence": False, "lifecycle_acceptance_complete": False,
-            "remaining_evidence": ["cancellation requested after the exact attempt was observed running",
-                                   "supervisor PID changed while the same attempt remained fenced",
-                                   "provider-confirmed stop and separately approved restart/replacement",
-                                   "model and retained-artifact hash readback after replacement"]}
+            "action_evidence": actions, "remaining_evidence": remaining}
 
 
 def main():
@@ -158,6 +167,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--worker-url")
     parser.add_argument("--token-file", type=Path)
+    parser.add_argument("--action-directory", type=Path)
     args = parser.parse_args()
     if args.command == "plan":
         if args.worker_config is None or args.label is None:
@@ -176,7 +186,7 @@ def main():
                 parser.error("token file must be owned and mode0600")
             client = WorkerClient(args.worker_url, args.token_file.read_text().strip())
         with Ledger(args.ledger) as ledger:
-            result = submit(ledger, plan) if args.command == "submit" else collect(ledger, plan, client)
+            result = submit(ledger, plan) if args.command == "submit" else collect(ledger, plan, client, action_directory=args.action_directory)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as stream:
         stream.write(json.dumps(result, indent=2)+"\n")

@@ -1,0 +1,14 @@
+{
+  "worker_url": "http://127.0.0.1:18080",
+  "bearer_secret_file": "/etc/probe-core/worker-token",
+  "ssh": {
+    "host": "reviewed-worker-host.example",
+    "user": "root",
+    "identity_file": "/etc/probe-core/worker-ssh-key",
+    "known_hosts_file": "/etc/probe-core/worker-known-hosts",
+    "ssh_port": 22,
+    "config_path": "/workspace/probe/config/worker.json",
+    "config_sha256": "sha256:REPLACE_WITH_EXACT_CONFIG_FILE_SHA256",
+    "token_path": "/workspace/probe/config/worker-token"
+  }
+}

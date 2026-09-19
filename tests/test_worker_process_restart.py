@@ -5,6 +5,7 @@ and termination code run unchanged. This does not claim numerical or GPU parity.
 """
 from datetime import datetime, timezone
 import ctypes
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import time
 import pytest
 
 from probe_core.dispatcher import Dispatcher
+from probe_core.audit import canonical_json
 from probe_core.ledger import Ledger
 from probe_core.worker import _process_identity, _same_process
 from probe_core.worker_contracts import ExecutionReceipt, ExecutionRequest
@@ -236,6 +238,20 @@ def test_sigkill_supervisor_adopts_same_child_and_original_deadline(tiny_bundle,
             assert json.loads(ready.read_text()) == {
                 "pid": metadata["pid"], "attempt_id": job.attempt_id, "approval_id": grant.approval_id,
             }
+            execution_start_bytes = (directory / "execution-started.json").read_bytes()
+            execution_start = json.loads(execution_start_bytes)
+            assert execution_start == {
+                "schema_version": 1, "job_id": job.job_id, "attempt_id": job.attempt_id,
+                "worker_id": job.worker_id, "approval_id": grant.approval_id,
+                "pid": metadata["pid"], "identity": metadata["identity"], "boot_id": metadata["boot_id"],
+                "request_sha256": "sha256:" + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
+                "config_sha256": "sha256:" + hashlib.sha256(canonical_json(config.model_dump(mode="json")).encode()).hexdigest(),
+                "started_at": execution_start["started_at"],
+            }
+            assert datetime.fromisoformat(execution_start["started_at"]).utcoffset().total_seconds() == 0
+            assert datetime.fromisoformat(execution_start["started_at"]) < request.deadline
+            assert not (directory / "artifacts" / "execution-started.json").exists()
+            assert _same_process(execution_start)
             before = initial.snapshot(job.attempt_id)
             assert before["submissions"] == 1 and before["receipt"]["state"] == "RUNNING"
             assert before["owned_child_processes"] == [job.attempt_id]
@@ -261,6 +277,7 @@ def test_sigkill_supervisor_adopts_same_child_and_original_deadline(tiny_bundle,
             assert _same_process(metadata)
             assert (directory / "request.json").read_bytes() == request_bytes
             assert (directory / "process.json").read_bytes() == process_bytes
+            assert (directory / "execution-started.json").read_bytes() == execution_start_bytes
             assert list(Path(config.output_directory).iterdir()) == [directory]
 
             # The replacement has no multiprocessing.Process handle for this
@@ -282,6 +299,7 @@ def test_sigkill_supervisor_adopts_same_child_and_original_deadline(tiny_bundle,
             assert observed["submissions"] == 0 and observed["request"] == adopted["request"]
             assert (directory / "request.json").read_bytes() == request_bytes
             assert (directory / "process.json").read_bytes() == process_bytes
+            assert (directory / "execution-started.json").read_bytes() == execution_start_bytes
             assert authority_snapshot(ledger) == authority and ledger.audit_records() == audit
     finally:
         # A failed assertion must not leave the orphan payload running. pidfd
