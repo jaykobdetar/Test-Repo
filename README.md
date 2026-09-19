@@ -36,6 +36,10 @@ unfinished. No scientific discovery is claimed.
 - **Worker preparation:** pinned model inventories, a no-model GPU diagnostic,
   and an immutable worker image.
 
+An initial cloud diagnostic confirmed the expected hardware but did not pass
+the worker resource-control prerequisite. The test resources were removed;
+canonical GPU execution remains blocked. See the [deployment status](docs/live-deployment-plan.md#first-gpu-diagnostic).
+
 The repository is named `probe-mcp`; the Python distribution and import package
 are `probe-core` and `probe_core`, respectively.
 

@@ -25,8 +25,8 @@ On September 19, 2026, the Ubuntu controller installation completed local accept
 The accepted application wheel is from `e6bfc71`, with the reviewed research
 startup command correction. Later dispatcher tunnel recovery and deployment
 renderer changes are committed but still need packaging for GPU service setup.
-No paid compute or persistent volume has been created. The verified snapshots
-contain initial controller/provider state rather than scientific results. These
+The verified pre-upgrade snapshots contain initial controller/provider state
+rather than scientific results. The subsequent paid diagnostic is recorded below. These
 local checks do not establish live CUDA, provider shutdown or unattended readiness.
 
 The packaged application passed 758 local regression tests and all 16 CPU
@@ -35,6 +35,18 @@ Subsequent dispatcher tests passed 19 cases, and service-template/recovery tests
 passed 81 cases. These are separate, overlapping validation sets, not a summed
 full-suite result for the latest commit.
 
+## First GPU diagnostic
+
+An initial supervised cloud diagnostic confirmed the expected hardware but
+failed the worker resource-control prerequisite. The report was retained
+privately, the test resources were removed, and the controller closed the run.
+No persistent storage was purchased and no model inference ran.
+
+Next, establish supported resource-control delegation for the worker identity
+and repeat the bounded prerequisite test before buying persistent storage or
+running model acceptance. This diagnostic does not establish shutdown during
+controller host loss or unattended readiness.
+
 ## Selected setup
 
 | Decision | Initial choice | Reason |
@@ -42,7 +54,7 @@ full-suite result for the latest commit.
 | Controller | The operator's Ubuntu machine; local SQLite and retained artifacts | Avoid another server and hosting bill for the first deployment. The machine must stay on during supervised GPU runs. |
 | Transport | Authenticated HTTP bound to loopback through an SSH tunnel with a pinned host key | Fits a single controller and worker without exposing a research API publicly. |
 | GPU | One Secure Cloud RTX 4090, subject to a fresh price and capacity check | 24 GB is sufficient for the two 1.7B models loaded separately and short, bounded calibration jobs. |
-| Data center | US-IL-1, subject to revalidation before storage creation | The September 19, 2026 catalog showed both the GPU class and Standard network volumes. |
+| Data center | Revalidate before storage creation | Availability changes; no persistent location has been purchased. |
 | Persistent GPU storage | One 100 GB Standard network volume | Keeps model assets and outputs across replacement Pods without overallocating storage. |
 | Backup | A private Google Drive folder with a separate background uploader identity | A copy remains outside both RunPod and the controller machine. Each upload must be downloaded and verified. |
 | Model inputs | Both canonical Qwen3-1.7B checkpoints, with exact revisions and file hashes | Preserve the distinction between Base and the released post-trained model. |
