@@ -8,6 +8,7 @@ import sys
 import time
 import pytest
 from probe_core.runpod_provider import ProviderHTTPError
+from probe_core.schemas import BackendParity
 
 def load(name):
     path=Path(__file__).resolve().parents[1]/'deploy/gpu'/name
@@ -91,7 +92,7 @@ def copied_results(tmp_path):
     (tmp_path/'process.json').write_text(json.dumps({'returncode':0,'process_stopped':True}))
     manifest={'kind':'standalone_public_calibration','status':'passed','installed_ledger_used':False,
         'heldout_data_used':False,'lifecycle_acceptance':False,'nested_cgroup_limits_enforced':False,
-        'model':config['model'],'operation':{'kind':'backend_parity'},
+        'model':config['model'],'operation':BackendParity(kind='backend_parity').model_dump(mode='json'),
         'config_sha256':'sha256:'+hashlib.sha256(canonical_json(config).encode()).hexdigest(),
         'run_id':'public-calibration','absolute_deadline':datetime.fromtimestamp(record['deadline'],timezone.utc).isoformat(),
         'software':{'container_image_digest':config['container_image_digest'],'probe_mcp_git_commit':config['code_git_commit']},
@@ -104,6 +105,29 @@ def copied_results(tmp_path):
 def test_valid_producer_timestamp_roundtrip(copied_results):
     directory,record=copied_results
     assert runner.verify_results(directory,record)['checks']==29
+
+def test_producer_operation_dump_retains_suite_version(copied_results):
+    directory,record=copied_results
+    # public-calibration.py serializes the actual operation with defaults included.
+    operation=BackendParity(kind='backend_parity').model_dump(mode='json')
+    assert operation=={'kind':'backend_parity','suite_version':1}
+    manifest=json.loads((directory/'standalone-manifest.json').read_text())
+    assert manifest['operation']==operation
+    assert runner.verify_results(directory,record)['manifest']['operation']==operation
+
+@pytest.mark.parametrize('operation',[
+    {'kind':'backend_parity'},
+    {'kind':'backend_parity','suite_version':2},
+    {'kind':'backend_parity','suite_version':1,'extra':True},
+    {'kind':'generate','suite_version':1},
+])
+def test_copied_result_operation_contract_rejected(copied_results,operation):
+    directory,record=copied_results
+    path=directory/'standalone-manifest.json'
+    manifest=json.loads(path.read_text());manifest['operation']=operation
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError,match='standalone result provenance mismatch'):
+        runner.verify_results(directory,record)
 
 @pytest.mark.parametrize('mutation',['artifact','image','configuration','deadline'])
 def test_copied_result_mutation_rejected(copied_results,mutation):

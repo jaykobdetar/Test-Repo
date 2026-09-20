@@ -21,8 +21,9 @@ public calibration, with no scientific or held-out evaluation claim.
 The Pod supplies the outer resource boundary. This profile does **not** establish
 per-job CPU/RAM/PID enforcement, network denial, hostile-code containment,
 controller-ledger execution, cancellation/recovery, or replacement acceptance.
-Its 240-second numerical timeout is enforced by a separate root launcher, and
-the host deletes the Pod at the original allowance deadline. Neither the local
+The numerical command has a 240-second timeout; a separate root launcher kills
+its process group after at most 250 seconds, capped by the original Pod deadline.
+The host deletes the Pod at the original allowance deadline. Neither the local
 guard nor RunPod's unverified scheduled stop establishes host-loss safety.
 
 The general research worker and its stricter checks remain available unchanged.
@@ -30,6 +31,11 @@ This profile accepts no arbitrary operation, user-provided dataset, model code,
 or private data. After Base numerical calibration succeeds, the next target is
 the separately pinned posttrained checkpoint. Broader service and sandbox
 acceptance can then proceed as separate milestones.
+
+The derived image includes a C compiler because the pinned PyTorch/Triton stack
+compiles GPU kernels during inference. The build compiles and executes a small C
+program to check that dependency before a paid run. This build check does not
+replace numerical GPU calibration.
 
 Files:
 

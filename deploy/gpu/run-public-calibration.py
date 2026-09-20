@@ -24,6 +24,7 @@ from probe_core.gpu_acceptance_runner import RunnerError, State, verified_endpoi
 from probe_core.audit import canonical_json
 from probe_core.provider import DeploymentSpec
 from probe_core.runpod_provider import RunPodConfig, RunPodProvider, ProviderHTTPError
+from probe_core.schemas import BackendParity
 
 
 def write(directory, name, value):
@@ -82,10 +83,11 @@ def verify_results(directory, record):
     process = json.loads((directory / 'process.json').read_text())
     manifest = json.loads((directory / 'standalone-manifest.json').read_text())
     config = json.loads((directory/'calibration.json').read_text())
+    expected_operation = BackendParity(kind='backend_parity').model_dump(mode='json')
     if not (manifest.get('kind') == 'standalone_public_calibration' and manifest.get('status') == 'passed'
             and manifest.get('installed_ledger_used') is False and manifest.get('heldout_data_used') is False
             and manifest.get('lifecycle_acceptance') is False and manifest.get('nested_cgroup_limits_enforced') is False
-            and manifest.get('model') == config['model'] and manifest.get('operation') == {'kind':'backend_parity'}
+            and manifest.get('model') == config['model'] and manifest.get('operation') == expected_operation
             and manifest.get('config_sha256') == 'sha256:'+hashlib.sha256(canonical_json(config).encode()).hexdigest()
             and manifest.get('run_id') == 'public-calibration'
             and datetime.fromisoformat(manifest['absolute_deadline']) == datetime.fromtimestamp(record['deadline'], timezone.utc)
