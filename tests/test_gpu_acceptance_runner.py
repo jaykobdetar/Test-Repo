@@ -1,6 +1,7 @@
 """No live resources: real Ledger/facade/dispatcher with a simulated endpoint."""
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from email.message import Message
 import base64
 import hashlib
 import io
@@ -271,9 +272,66 @@ def test_endpoint_get_retries_only_transient_http_statuses(setup, monkeypatch, s
     monkeypatch.setattr(s.backend.transport, 'request', response)
     with runner.State(s.config.trusted_state_directory) as state:
         code = 'PROVIDER_ENDPOINT_UNAVAILABLE' if retryable else 'PROVIDER_ENDPOINT_REFUSED'
-        with pytest.raises(runner.RunnerError, match='^'+code+'$'):
+        with pytest.raises(runner.RunnerError, match='^'+code+'$') as caught:
             runner.verified_endpoint(s.config, request, s.backend, state)
+        assert caught.value.provider_diagnostic == {'phase': 'endpoint_lookup', **runner.provider_http_metadata(status)}
     assert calls == [('GET', '/v2/pods/'+request['observed_provider_id'], None)]
+
+
+@pytest.mark.parametrize('status', [408, 429, 500, 503, 401, 403, 404])
+def test_endpoint_http_status_survives_retry_or_final_failure_without_private_output(setup, monkeypatch, status):
+    s = setup
+    request = approve_fixture(s)
+    client = Endpoint(s)
+    calls = []
+    def endpoint(*args):
+        calls.append(1)
+        if len(calls) > 1:
+            return {}
+        def response(*_args, **_kwargs):
+            error = runner.ProviderHTTPError(status)
+            error.private_body = 'PRIVATE_KEY_AND_BODY'
+            raise error
+        with monkeypatch.context() as patch:
+            patch.setattr(s.backend.transport, 'request', response)
+            return runner.verified_endpoint(*args)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = runner.run(s.config, s.plan, s.ledger, s.backend,
+            SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
+            clock=lambda: s.clock().timestamp(), sleep=lambda _: None, endpoint=endpoint,
+            tunnel_factory=Tunnel, client_factory=lambda *_a, **_k: client,
+            readiness=lambda *_a, **_k: None, configure=lambda *_a, **_k: {'configured': True})
+        assert state.read('result.json') == result
+    retryable = status in {408, 429, 500, 503}
+    assert result['status'] == ('passed' if retryable else 'failed')
+    diagnostic = result['startup']['last_provider_error'] if retryable else result['provider']
+    assert diagnostic == {'phase': 'endpoint_lookup', **runner.provider_http_metadata(status)}
+    assert len(calls) == (2 if retryable else 1)
+    assert client.posts == int(retryable) and len(s.http.purchases) == 1
+    assert 'PRIVATE_KEY_AND_BODY' not in canonical_json(result)
+    assert result['teardown']['confirmed'] is True
+    assert s.backend.status(request['worker_id']).state == WorkerState.ABSENT
+
+
+@pytest.mark.parametrize('status', [True, '403', None, 99, 600, 403.0])
+def test_provider_diagnostic_rejects_unvalidated_http_status(status):
+    value = {'phase': 'endpoint_lookup', **runner.provider_http_metadata(403), 'http_status': status}
+    assert runner.safe_provider_diagnostic(value) is None
+
+
+def test_provider_diagnostic_strips_unknown_fields_and_refuses_arbitrary_phases():
+    expected = {'phase': 'endpoint_lookup', **runner.provider_http_metadata(403)}
+    value = {**expected, 'body': 'PRIVATE', 'url': 'PRIVATE', 'token': 'PRIVATE'}
+    assert runner.safe_provider_diagnostic(value) == expected
+    assert runner.safe_provider_diagnostic(dict(value, phase='PRIVATE')) is None
+
+
+@pytest.mark.parametrize('key,value', [('phase', []), ('content_type', []), ('content_type', 'PRIVATE'),
+    ('retry_after_seconds', True), ('retry_after_seconds', -1), ('retry_after_seconds', 86401),
+    ('retry_after_seconds', '5'), ('cf_mitigated_challenge', 'challenge')])
+def test_provider_diagnostic_revalidates_every_header_classification(key, value):
+    metadata = {'phase': 'endpoint_lookup', **runner.provider_http_metadata(403), key: value}
+    assert runner.safe_provider_diagnostic(metadata) is None
 
 
 @pytest.mark.parametrize('network', [True, False])
@@ -556,6 +614,37 @@ def test_provider_log_reader_uses_authenticated_fixed_origin_and_bounds(setup, m
     data = b'data: '+b'x'*(runner.BOUND+1)
     with pytest.raises(runner.RunnerError, match='PROVIDER_LOG_BOUND_EXCEEDED'):
         runner.read_provider_logs(SimpleNamespace(api_key_file=str(secret)), 'owned-pod')
+
+
+def test_provider_logs_and_bounded_observer_retain_safe_http_classification_only(tmp_path, monkeypatch):
+    key = tmp_path/'key'
+    key.write_text('PRIVATE_PROVIDER_KEY')
+    key.chmod(0o600)
+    headers = Message()
+    headers['Content-Type'] = 'text/html'
+    headers['cf-mitigated'] = 'challenge'
+    headers['Retry-After'] = '60'
+    headers['PRIVATE'] = 'PRIVATE_HEADER'
+    bodies = []
+    class UnreadBody(io.BytesIO):
+        def read(self, *_args):
+            raise AssertionError('provider error body must never be read')
+    def open_response(request, *, timeout):
+        body = UnreadBody(b'PRIVATE_BODY')
+        bodies.append(body)
+        raise runner.HTTPError('https://private.invalid/PRIVATE_URL', 403, 'PRIVATE_REASON', headers, body)
+    monkeypatch.setattr(runner, 'build_opener', lambda *_: SimpleNamespace(open=open_response))
+    config = SimpleNamespace(api_key_file=str(key))
+    expected = {'phase': 'provider_logs', 'http_status': 403, 'content_type': 'html',
+                'retry_after_seconds': 60, 'cf_mitigated_challenge': True}
+    with pytest.raises(runner.RunnerError, match='PROVIDER_LOGS_UNAVAILABLE') as caught:
+        runner.read_provider_logs(config, 'owned-pod')
+    assert caught.value.provider_diagnostic == expected
+    observed = runner.provider_bootstrap_diagnostic(config, 'owned-pod')
+    assert observed == {'status': 'unavailable', 'records': [], 'provider': expected}
+    assert runner.safe_bootstrap_diagnostic(dict(observed, raw='PRIVATE_OTHER')) == observed
+    assert len(bodies) == 2 and all(body.closed for body in bodies)
+    assert 'PRIVATE' not in canonical_json(observed) + str(caught.value)
 
 
 def test_unconfirmed_deletion_remains_failure(setup):
@@ -928,8 +1017,9 @@ def run_case(s, client, state):
         readiness=lambda *_a, **_k: None, configure=lambda *_a, **_k: {'configured': True})
 
 
-@pytest.mark.parametrize('name', ['backend-parity', 'capture-retention', 'hard-deadline', 'output-limit', 'vram-limit'])
-def test_runner_accepts_only_one_generated_wait_case_without_more_authority(setup, name):
+@pytest.mark.parametrize('name', ['backend-parity', 'capture-retention', 'hard-deadline', 'output-limit', 'vram-limit',
+                                  'cancel-running', 'supervisor-restart'])
+def test_runner_accepts_one_generated_case_without_more_authority(setup, name):
     s = setup
     select_wait_case(s, name)
     runner.validate_plan(s.config, s.plan)
@@ -941,10 +1031,11 @@ def test_runner_accepts_only_one_generated_wait_case_without_more_authority(setu
 
 
 @pytest.mark.parametrize('name', ['cancel-running', 'supervisor-restart'])
-def test_runner_still_refuses_action_cases(setup, name):
+def test_runner_refuses_mutated_action_cases(setup, name):
     s = setup
-    select_wait_case(s, name)
-    with pytest.raises(runner.RunnerError, match='FIXED_WAIT_CASE_REQUIRED'):
+    case = select_wait_case(s, name)
+    s.plan = s.plan.model_copy(update={'cases': (case.model_copy(update={'action': 'wait'}),)})
+    with pytest.raises(runner.RunnerError, match='FIXED_CALIBRATION_CASE_REQUIRED'):
         queue(s)
     assert s.ledger.list_jobs() == [] and s.http.purchases == []
 
@@ -968,7 +1059,7 @@ def test_mutated_fixed_case_is_refused_before_submission(setup, path, value):
         target = target[key]
     target[path[-1]] = value
     s.plan = AcceptancePlan.model_validate(data)
-    with pytest.raises(runner.RunnerError, match='FIXED_WAIT_CASE_REQUIRED'):
+    with pytest.raises(runner.RunnerError, match='FIXED_CALIBRATION_CASE_REQUIRED'):
         queue(s)
     assert s.ledger.list_jobs() == [] and s.http.purchases == []
 
@@ -980,6 +1071,244 @@ def test_multiple_generated_wait_cases_still_refused(setup):
     with pytest.raises(runner.RunnerError, match='SINGLE_CALIBRATION_CASE_REQUIRED'):
         queue(s)
     assert s.ledger.list_jobs() == [] and s.http.purchases == []
+
+
+class ActionEndpoint(Endpoint):
+    """Real action/collector protocol with synthetic process identities only."""
+    def __init__(self, s, *, missing_markers=0):
+        super().__init__(s)
+        self.config_sha256 = runner.digest(json.loads(Path(s.config.worker_config_path).read_bytes()))
+        self.endpoint_identity = 'sha256:' + 'b' * 64
+        self.missing_markers = missing_markers
+        self.marker_retries = self.queries = 0
+        self.complete = False
+
+    def submit(self, request):
+        from test_gpu_acceptance_actions import ObservedWorker, add_cancel_proof
+        receipt = super().submit(request)
+        self.worker = ObservedWorker(request, self.s.clock)
+        self.worker.snapshot['loaded_config_sha256'] = self.config_sha256
+        self.worker.on_cancel = add_cancel_proof
+        return receipt
+
+    def inspect(self, request):
+        if self.marker_retries < self.missing_markers:
+            self.marker_retries += 1
+            raise TransportError('LIFECYCLE_HELPER_REFUSED_OR_FAILED')
+        return self.worker.inspect(request)
+
+    def restart(self, request, action_id, *, expected_before):
+        return self.worker.restart(request, action_id, expected_before=expected_before)
+
+    def cancel(self, attempt_id):
+        return self.worker.cancel(attempt_id)
+
+    def status(self, attempt_id):
+        self.queries += 1
+        if (self.complete or (self.s.plan.cases[0].name == 'supervisor-restart'
+                and any((self.s.root/'runner/actions').glob('*.result.json')))):
+            return super().status(attempt_id)
+        return self.worker.status(attempt_id)
+
+
+def run_action_case(s, client, state, *, action=runner.run_action, sleep=None, lifecycle_factory=None,
+                    tunnel_factory=Tunnel):
+    settings = {'host': 'fixture.example', 'user': 'root', 'ssh_port': 40125,
+                'identity_file': Path(s.config.ssh_identity_file), 'known_hosts_file': s.root/'known_hosts'}
+    return runner.run(s.config, s.plan, s.ledger, s.backend,
+        SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
+        clock=lambda: s.clock().timestamp(), sleep=sleep or (lambda _: time.sleep(.001)),
+        endpoint=lambda *_: settings, tunnel_factory=tunnel_factory, client_factory=lambda *_a, **_k: client,
+        readiness=lambda *_a, **_k: None,
+        configure=lambda *_a, **_k: {'configured': True, 'worker_config_sha256': client.config_sha256},
+        lifecycle_factory=lifecycle_factory or (lambda _: client), action=action)
+
+
+@pytest.mark.parametrize('name', ['cancel-running', 'supervisor-restart'])
+def test_fixed_action_runs_once_with_real_ledger_action_and_proof_collector(setup, name):
+    s = setup
+    select_wait_case(s, name)
+    request = approve_fixture(s)
+    client = ActionEndpoint(s, missing_markers=2)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_action_case(s, client, state)
+        assert result['status'] == 'passed', result
+        observation = state.read('observations.json')
+        assert observation['action_evidence']['complete'] is True
+        assert result['action_evidence_sha256'] == runner.digest(observation['action_evidence'])
+        assert observation['lifecycle_acceptance_complete'] is False
+        assert run_action_case(s, client, state) == result
+    job = s.ledger.get_job(request['job_ids'][0])
+    assert job.attempt_count == 1 and job.retry_count == 0
+    assert job.attempt_id == client.request.attempt_id and job.approval_id == request['approval_id']
+    assert client.request.deadline.timestamp() < request['deadline']
+    assert client.worker.restart_calls == (name == 'supervisor-restart')
+    assert client.worker.cancel_calls == (name == 'cancel-running')
+    assert client.marker_retries == 2 and client.queries > 2  # Dispatch continues during marker polling.
+    assert client.posts == 1 and len(s.http.purchases) == 1
+    assert result['teardown']['confirmed'] is True and s.http.pods == []
+    assert not any(thread.name == 'probe-acceptance-action' for thread in threading.enumerate())
+
+
+def test_action_wait_renews_same_lease_without_extending_execution_deadline(setup, monkeypatch):
+    from probe_core import dispatcher as dispatch_module
+    s = setup
+    select_wait_case(s, 'supervisor-restart')
+    approve_fixture(s)
+    client = ActionEndpoint(s)
+    waiting, released = threading.Event(), threading.Event()
+    observed = {}
+    original_restart = client.restart
+    def restart(*args, **kwargs):
+        observed['initial_lease'] = s.ledger.get_job(client.request.job_id).lease_expires_at
+        observed['deadline'] = client.request.deadline
+        waiting.set()
+        assert released.wait(2), 'dispatcher stopped pumping while the action awaited its response'
+        return original_restart(*args, **kwargs)
+    client.restart = restart
+    monkeypatch.setattr(dispatch_module, 'datetime', SimpleNamespace(now=lambda *_: s.clock(),
+                                                                    fromtimestamp=datetime.fromtimestamp))
+    def sleep(_):
+        if waiting.is_set() and not observed.get('advanced'):
+            observed['advanced'] = True
+            s.clock.advance(25)
+        if waiting.is_set() and s.ledger.get_job(client.request.job_id).lease_expires_at > observed['initial_lease']:
+            released.set()
+        time.sleep(.001)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_action_case(s, client, state, sleep=sleep)
+    assert result['status'] == 'passed', result
+    assert released.is_set() and client.request.deadline == observed['deadline']
+    assert client.posts == 1 and client.worker.restart_calls == 1
+
+
+def test_successful_case_and_claimed_action_pass_cannot_replace_missing_transcript(setup):
+    s = setup
+    select_wait_case(s, 'supervisor-restart')
+    approve_fixture(s)
+    client = ActionEndpoint(s)
+    def false_proof(*_args, **_kwargs):
+        client.complete = True
+        return {'status': 'passed'}
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_action_case(s, client, state, action=false_proof)
+        observations = state.read('observations.json')
+    assert observations['case_results_passed'] is True
+    assert observations['action_evidence']['complete'] is False
+    assert result['reason'] == 'LIFECYCLE_ACTION_PROOF_MISSING'
+    assert result['status'] == 'failed' and result['teardown']['confirmed'] is True
+    assert client.worker.restart_calls == client.worker.cancel_calls == 0
+
+
+def test_lifecycle_settings_use_configured_canonical_bytes_not_public_file_hash(setup):
+    s = setup
+    select_wait_case(s, 'cancel-running')
+    public = Path(s.config.worker_config_path)
+    public.write_text(json.dumps(json.loads(public.read_text()), indent=4))
+    s.config = s.config.model_copy(update={'worker_config_sha256': 'sha256:'+hashlib.sha256(public.read_bytes()).hexdigest()})
+    approve_fixture(s)
+    client = ActionEndpoint(s)
+    observed = []
+    def lifecycle(settings):
+        observed.append(settings)
+        return client
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_action_case(s, client, state, lifecycle_factory=lifecycle)
+    assert result['status'] == 'passed', result
+    assert observed[0]['config_sha256'] == client.config_sha256 != s.config.worker_config_sha256
+    assert observed[0]['config_path'] == '/workspace/probe/config/worker.json'
+    assert observed[0]['token_path'] == '/workspace/probe/config/worker-token'
+    assert set(observed[0]) == {'host', 'user', 'ssh_port', 'identity_file', 'known_hosts_file',
+                                'config_sha256', 'config_path', 'token_path'}
+
+
+@pytest.mark.parametrize('interruption', ['stop', 'deadline'])
+def test_running_action_gate_refuses_mutation_after_interrupted_inspection(setup, interruption):
+    s = setup
+    select_wait_case(s, 'cancel-running')
+    request = approve_fixture(s)
+    client = ActionEndpoint(s)
+    dispatcher = runner.Dispatcher(s.ledger, client, worker_id=request['worker_id'], transfer_directory=s.root/'transfers')
+    job = dispatcher.dispatch_next(approval_id=request['approval_id'])
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def inspect(_):
+        entered.set()
+        assert release.wait(2)
+        return {}
+    client.inspect = inspect
+    task = runner.RunningAction(s.ledger, s.plan, client.request, client, client, s.root/'actions',
+        deadline=request['deadline'], clock=lambda: s.clock().timestamp(), action=lambda *_a, **_k: calls.append(True))
+    try:
+        task.start()
+        assert entered.wait(2)
+        if interruption == 'stop':
+            task.stop.set()
+        else:
+            s.clock.advance(121)
+        release.set()
+        assert task.done.wait(2)
+    finally:
+        release.set()
+        assert task.close()
+    assert calls == [] and task.passed is False
+    assert not (s.root/'actions').exists()
+    assert s.ledger.get_job(job.job_id).attempt_id == client.request.attempt_id
+
+
+@pytest.mark.parametrize('interruption', ['dispatch_loop', 'thread_start'])
+def test_action_gate_closes_before_tunnel_cleanup_can_release_pending_inspection(setup, monkeypatch, interruption):
+    s = setup
+    select_wait_case(s, 'cancel-running')
+    approve_fixture(s)
+    client = ActionEndpoint(s)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def inspect(_):
+        entered.set()
+        assert release.wait(2)
+        return {}
+    client.inspect = inspect
+    class ClosingTunnel(Tunnel):
+        def __exit__(self, *_):
+            # Simulate a slow SSH cleanup while the independent helper returns.
+            thread = next(item for item in threading.enumerate() if item.name == 'probe-acceptance-action')
+            release.set()
+            thread.join(2)
+            assert not thread.is_alive() and calls == []
+            self.open = False
+    def fail_main(_):
+        assert entered.wait(2)
+        raise runner.RunnerError('TEST_RUN_INTERRUPTED')
+    original_start = threading.Thread.start
+    if interruption == 'thread_start':
+        def interrupted_start(thread):
+            original_start(thread)
+            if thread.name == 'probe-acceptance-action':
+                assert entered.wait(2)
+                raise runner.RunnerError('TEST_RUN_INTERRUPTED')
+        monkeypatch.setattr(threading.Thread, 'start', interrupted_start)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_action_case(s, client, state, sleep=fail_main, tunnel_factory=ClosingTunnel,
+                                action=lambda *_a, **_k: calls.append(True))
+    assert result['reason'] == 'TEST_RUN_INTERRUPTED'
+    assert result['teardown']['confirmed'] is True and calls == []
+
+
+def test_unstarted_action_closes_safely_and_cannot_start_after_its_gate_closes(setup):
+    s = setup
+    select_wait_case(s, 'cancel-running')
+    request = approve_fixture(s)
+    client = ActionEndpoint(s)
+    dispatcher = runner.Dispatcher(s.ledger, client, worker_id=request['worker_id'], transfer_directory=s.root/'transfers')
+    dispatcher.dispatch_next(approval_id=request['approval_id'])
+    task = runner.RunningAction(s.ledger, s.plan, client.request, client, client, s.root/'actions',
+                               deadline=request['deadline'], clock=lambda: s.clock().timestamp())
+    assert task.thread.ident is None and task.start_attempted is False
+    assert task.close() is True
+    with pytest.raises(runner._ActionStopped):
+        task.start()
+    assert task.thread.ident is None and client.worker.inspections == 0
 
 
 class LimitEndpoint(Endpoint):

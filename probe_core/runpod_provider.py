@@ -53,8 +53,27 @@ class ProviderResponseError(RuntimeError):
     pass
 
 
+def provider_http_metadata(status, headers=None):
+    """Fixed HTTP diagnostics only; never retain headers, bodies or addresses."""
+    if type(status) is not int or not 100 <= status <= 599:
+        raise ProviderResponseError("provider HTTP status is invalid")
+
+    def header(name):
+        value = headers.get(name, "") if headers is not None else ""
+        return value.strip() if type(value) is str and len(value) <= 256 else ""
+
+    media = header("Content-Type").split(";", 1)[0].lower()
+    content_type = ("json" if media == "application/json" or media.startswith("application/") and media.endswith("+json")
+                    else "html" if media in {"text/html", "application/xhtml+xml"} else "other")
+    retry = header("Retry-After")
+    retry_seconds = int(retry) if re.fullmatch(r"[0-9]{1,5}", retry) and int(retry) <= 86400 else None
+    return {"http_status": status, "content_type": content_type,
+            "retry_after_seconds": retry_seconds, "cf_mitigated_challenge": header("cf-mitigated") == "challenge"}
+
+
 class ProviderHTTPError(ProviderResponseError):
-    def __init__(self, status: int):
+    def __init__(self, status: int, *, headers=None):
+        self.metadata = provider_http_metadata(status, headers)
         self.status = status
         super().__init__(f"RunPod HTTP status {status}")
 
@@ -167,7 +186,8 @@ class RunPodHTTP:
                     raise ProviderResponseError("provider response exceeds limit")
                 return json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(ValueError())) if raw else None
         except HTTPError as exc:
-            raise ProviderHTTPError(exc.code) from None
+            with exc:
+                raise ProviderHTTPError(exc.code, headers=exc.headers) from None
         except (URLError, OSError, ValueError) as exc:
             raise ProviderResponseError("provider request failed or returned invalid JSON") from None
 

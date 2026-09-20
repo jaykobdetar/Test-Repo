@@ -28,6 +28,8 @@ FILES = {'activate-gpu-calibration.py', 'upgrade-controller.py', 'plan.json', 'a
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 IDENT = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z')
 FAILURES = {'ACCEPTANCE_RUNTIME_UNAVAILABLE', 'WORKER_STARTUP_DEADLINE', 'REQUEST_CHANGED'}
+STARTUP_STAGES = {'verified_worker_startup', 'worker_configuration', 'ssh_tunnel', 'worker_readiness'}
+FAILURE_CODE = re.compile(r'[A-Z][A-Z0-9_]{0,99}\Z')
 
 
 class RetryError(ValueError):
@@ -80,18 +82,24 @@ def inputs(path, pin, *, owner=0):
     body = decoded(raw)
     fields = {'schema_version', 'original_manifest_sha256', 'previous_upgrade', 'target_upgrade',
               'previous_activation_manifest_sha256', 'failed', 'retry_id', 'files'}
-    require(type(body.get('schema_version')) is int and body['schema_version'] in {1, 2, 3, 4}, 'MANIFEST_SCHEMA')
+    require(type(body.get('schema_version')) is int and body['schema_version'] in {1, 2, 3, 4, 5}, 'MANIFEST_SCHEMA')
     if body['schema_version'] >= 2:
         fields |= {'previous_retry_manifest_sha256', 'previous_retry_record_sha256', 'expected_failure_reason'}
         failures = ({'ACCEPTANCE_RUNTIME_UNAVAILABLE'} if body['schema_version'] == 4 else
                     {'REQUEST_CHANGED'} if body['schema_version'] == 3 else FAILURES-{'REQUEST_CHANGED'})
+        reason = body.get('expected_failure_reason')
+        reason_valid = (type(reason) is str and FAILURE_CODE.fullmatch(reason)) if body['schema_version'] == 5 else reason in failures
         require(all(type(body.get(name)) is str and HEX.fullmatch(body[name]) for name in
                     ('previous_retry_manifest_sha256', 'previous_retry_record_sha256'))
-                and body.get('expected_failure_reason') in failures, 'PREVIOUS_RETRY_PIN_INVALID')
+                and reason_valid, 'PREVIOUS_RETRY_PIN_INVALID')
     if body['schema_version'] >= 3:
         fields.add('failed_result_canonical_sha256')
         require(type(body.get('failed_result_canonical_sha256')) is str
                 and HEX.fullmatch(body['failed_result_canonical_sha256']), 'FAILED_RESULT_PIN_INVALID')
+    if body['schema_version'] == 5:
+        fields.add('expected_failure_stage')
+        require(type(body.get('expected_failure_stage')) is str
+                and body['expected_failure_stage'] in STARTUP_STAGES, 'FAILED_STAGE_INVALID')
     require(set(body) == fields, 'MANIFEST_SCHEMA')
     require(HEX.fullmatch(body['original_manifest_sha256']) and HEX.fullmatch(body['previous_activation_manifest_sha256'])
             and re.fullmatch(r'[0-9a-f]{32}', body['retry_id']), 'MANIFEST_IDENTITY')
@@ -118,7 +126,7 @@ def helper(raw, name):
 
 
 def validate_replacement(old, new, retry_id, *, schema_version=1):
-    require(schema_version in {1, 2, 3, 4}, 'MANIFEST_SCHEMA')
+    require(schema_version in {1, 2, 3, 4, 5}, 'MANIFEST_SCHEMA')
     old_plan, plan = decoded(old['plan.json']), decoded(new['plan.json'])
     require(plan['label'] != old_plan['label'] and len(plan['cases']) == len(old_plan['cases']) == 1,
             'FRESH_PLAN_REQUIRED')
@@ -205,7 +213,8 @@ print(json.dumps(result,sort_keys=True))
 
 
 def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, cancelled=False,
-                    expected_failure_reason='ACCEPTANCE_RUNTIME_UNAVAILABLE', schema_version=1):
+                    expected_failure_reason='ACCEPTANCE_RUNTIME_UNAVAILABLE', schema_version=1,
+                    expected_failure_stage=None):
     from probe_core.schemas import JobSpec
     require(all(snapshot.get(name) == 0 for name in ('other_unfinished_jobs', 'unconfirmed_attempts', 'open_approvals')),
             'OTHER_AUTHORITY_OR_WORK_PRESENT')
@@ -230,14 +239,23 @@ def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, can
             and intent['provider_id'] == failed['provider_id'] and intent['provider_seen'] == 1
             and intent['configuration_hash'] == request['configuration_hash']
             and snapshot['provider_absent'] is True and snapshot['pods'] == 0, 'PROVIDER_DELETION_UNCONFIRMED')
-    require(schema_version in {1, 2, 3, 4}, 'MANIFEST_SCHEMA')
+    require(schema_version in {1, 2, 3, 4, 5}, 'MANIFEST_SCHEMA')
     if schema_version == 4:
         require(expected_failure_reason == 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
                 and result.get('configuration') == {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN'}
                 and result.get('diagnostic') == {'exception_type': 'TransportError', 'location': 'gpu_acceptance_runner.py:684'},
                 'FAILED_CONFIGURATION_RESULT_CHANGED')
     expected_stage = 'worker_configuration' if schema_version == 4 else 'verified_worker_startup'
-    require(expected_failure_reason in FAILURES and result.get('status') == 'failed'
+    reason_valid = expected_failure_reason in FAILURES
+    if schema_version == 5:
+        require(type(expected_failure_stage) is str and expected_failure_stage in STARTUP_STAGES,
+                'FAILED_STAGE_INVALID')
+        require(type(result.get('schema_version')) is int and result['schema_version'] == 1
+                and result.get('kind') == 'single_public_gpu_calibration'
+                and result.get('scientific_evidence') is False, 'FAILED_RESULT_CHANGED')
+        expected_stage = expected_failure_stage
+        reason_valid = type(expected_failure_reason) is str and FAILURE_CODE.fullmatch(expected_failure_reason)
+    require(reason_valid and result.get('status') == 'failed'
             and result.get('stage') == expected_stage and result.get('reason') == expected_failure_reason
             and all(result.get(key) == failed[key] for key in ('request_id', 'worker_id', 'provider_id'))
             and result.get('teardown') == {'provider_id': failed['provider_id'], 'state': 'ABSENT', 'confirmed': True}
@@ -312,11 +330,12 @@ class Recovery:
         self.record('manifest.json', encoded(self.m))
         for name, raw in self.files.items(): self.record(name, raw)
 
-    def previous_inputs(self, original, *, manifest=None):
+    def previous_inputs(self, original, *, manifest=None, _seen=()):
         current = self.m if manifest is None else manifest
         if current['schema_version'] == 1:
             return original
         previous_pin = current['previous_retry_manifest_sha256']
+        require(previous_pin not in _seen and len(_seen) < 32, 'PREVIOUS_RETRY_CHAIN_LIMIT')
         capsule = ROOT/'calibration-retries'/previous_pin
         self.a.trusted(capsule)
         raw = read(capsule/'manifest.json')
@@ -325,7 +344,8 @@ class Recovery:
         # original manifest hash used as the capsule's identity.
         require(digest(raw) == current['previous_retry_record_sha256'], 'PREVIOUS_RETRY_RECORD_CHANGED')
         previous = decoded(raw)
-        require(previous.get('schema_version') == current['schema_version']-1
+        versions = {4, 5} if current['schema_version'] == 5 else {current['schema_version']-1}
+        require(type(previous.get('schema_version')) is int and previous['schema_version'] in versions
                 and previous.get('original_manifest_sha256') == current['original_manifest_sha256']
                 and previous.get('previous_activation_manifest_sha256') == current['previous_activation_manifest_sha256']
                 and previous.get('target_upgrade') == current['previous_upgrade']
@@ -353,7 +373,7 @@ class Recovery:
             names += ('worker.json',)
         old = {name: read(capsule/name) for name in names}
         require(all(digest(value) == previous['files'][name] for name, value in old.items()), 'PREVIOUS_RETRY_INPUT_CHANGED')
-        earlier = self.previous_inputs(original, manifest=previous)
+        earlier = self.previous_inputs(original, manifest=previous, _seen=(*_seen, previous_pin))
         validate_replacement(earlier, old, previous['retry_id'], schema_version=previous['schema_version'])
         if previous['schema_version'] != 3:
             old['worker.json'] = earlier['worker.json']
@@ -379,7 +399,7 @@ class Recovery:
         self.verify_result_pin()
         validate_failed(snapshot, self.m['failed'], decoded(self.old['plan.json']), self.result, self.bound, self.submitted,
                         cancelled=cancelled, expected_failure_reason=self.m.get('expected_failure_reason', 'ACCEPTANCE_RUNTIME_UNAVAILABLE'),
-                        schema_version=self.m.get('schema_version', 1))
+                        schema_version=self.m.get('schema_version', 1), expected_failure_stage=self.m.get('expected_failure_stage'))
 
     def close_failed(self):
         self.stage = 'close_failed'

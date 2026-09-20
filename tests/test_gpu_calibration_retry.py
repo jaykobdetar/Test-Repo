@@ -717,3 +717,163 @@ def test_schema4_prepare_does_not_copy_or_replace_existing_worker(prepare_case, 
     assert result['status'] == 'prepared'
     assert worker.read_bytes() == before and not (s.public/'worker.json').exists()
     assert result['approval_issued'] is False and result['cloud_mutations_performed'] is False
+
+
+def completed_retry_then_next(previous_case, retry_id):
+    s = previous_case
+    previous = deepcopy(s.manifest)
+    raw = (json.dumps(previous, indent=2)+'\n').encode()
+    pin = r.digest(raw)
+    capsule = r.ROOT/'calibration-retries'/pin
+    put(capsule/'manifest-original.json', raw)
+    put(capsule/'manifest.json', r.encoded(previous))
+    failed = {name:name+'-'+retry_id for name in ('job_id','request_id','worker_id','provider_id')}
+    put(capsule/'prepare-report.json', r.encoded(dict(schema_version=1,status='prepared',manifest_sha256=pin,
+        target_wheel_sha256=previous['target_upgrade']['wheel_sha256'],old_history_preserved=True,
+        approval_issued=False,cloud_mutations_performed=False,submission={**failed,'approval_consumed_by_runner':False})))
+    put(capsule/'close-report.json', r.encoded(dict(status='closed',manifest_sha256=pin,
+        original_job_cancelled=True,attempts_created=False,approval_issued=False)))
+    for name in previous['files']: put(capsule/name,s.new[name])
+    manifest = dict(previous,schema_version=5,previous_upgrade=previous['target_upgrade'],
+        target_upgrade={'wheel_sha256':retry_id*2,'release_manifest_sha256':r.digest(retry_id.encode())},
+        previous_retry_manifest_sha256=pin,previous_retry_record_sha256=r.digest(r.encoded(previous)),
+        expected_failure_reason='PROVIDER_ENDPOINT_REFUSED',expected_failure_stage='verified_worker_startup',
+        failed_result_canonical_sha256='9'*64,retry_id=retry_id,failed=failed)
+    new = next_inputs(s.new,retry_id)
+    manifest['files'] = {name:r.digest(new[name]) for name in r.FILES if name in new}
+    operation = r.Recovery(s.operation.a,None,manifest,new,'a'*64)
+    return SimpleNamespace(operation=operation,original=s.original,old=s.new,new=new,manifest=manifest,
+                           previous=previous,capsule=capsule,prior_capsules=(*s.prior_capsules,capsule))
+
+
+@pytest.fixture
+def fifth_retry(fourth_retry):
+    return completed_retry_then_next(fourth_retry,'e'*32)
+
+
+def test_schema5_follows_schema4_and_carries_original_schema3_worker(fifth_retry):
+    s = fifth_retry
+    before = {str(p):p.read_bytes() for folder in s.prior_capsules for p in folder.iterdir()}
+    old = s.operation.previous_inputs(s.original)
+    config_before = json.loads(old['acceptance.json'])
+    public, config = r.validate_replacement(old,s.new,s.manifest['retry_id'],schema_version=5)
+    assert old['worker.json'] != s.original['worker.json']
+    assert config['worker_config_path'] == config_before['worker_config_path'] != str(public/'worker.json')
+    assert config['worker_config_sha256'] == 'sha256:'+r.digest(old['worker.json'])
+    assert config['source_commit'] == config_before['source_commit']
+    assert config['deployment'] == config_before['deployment']
+    assert before == {str(p):p.read_bytes() for folder in s.prior_capsules for p in folder.iterdir()}
+
+
+def test_schema5_can_follow_completed_schema5_without_new_incident_schema(fifth_retry):
+    s = completed_retry_then_next(fifth_retry,'f'*32)
+    old = s.operation.previous_inputs(s.original)
+    _, config = r.validate_replacement(old,s.new,s.manifest['retry_id'],schema_version=5)
+    assert s.previous['schema_version'] == s.manifest['schema_version'] == 5
+    assert config['worker_config_sha256'] == 'sha256:'+r.digest(old['worker.json'])
+    assert config['worker_config_path'] == json.loads(fifth_retry.old['acceptance.json'])['worker_config_path']
+
+
+@pytest.mark.parametrize('fault',['repeat','limit','skip_schema4','worker_tamper','missing_original'])
+def test_schema5_chain_refuses_repeated_excessive_or_broken_history(fifth_retry,monkeypatch,fault):
+    s = fifth_retry
+    kwargs = {}
+    if fault in {'repeat','limit'}:
+        kwargs['_seen'] = ((s.manifest['previous_retry_manifest_sha256'],) if fault=='repeat'
+                           else tuple(f'{index:064x}' for index in range(32)))
+        monkeypatch.setattr(r,'read',lambda *_a,**_k:pytest.fail('refuse before reading a repeated/excessive capsule'))
+    elif fault=='skip_schema4':
+        earlier = json.loads((s.prior_capsules[-2]/'manifest.json').read_bytes())
+        s.manifest['previous_retry_manifest_sha256'] = s.prior_capsules[-2].name
+        s.manifest['previous_retry_record_sha256'] = r.digest(r.encoded(earlier))
+    elif fault=='worker_tamper':
+        worker_capsule = next(p for p in s.prior_capsules if (p/'worker.json').exists())
+        put(worker_capsule/'worker.json',s.original['worker.json'])
+    else: (s.capsule/'manifest-original.json').unlink()
+    with pytest.raises((r.RetryError,FileNotFoundError)):
+        s.operation.previous_inputs(s.original,**kwargs)
+
+
+def startup_failure(f, *, stage='verified_worker_startup', reason='PROVIDER_ENDPOINT_REFUSED'):
+    return dict(f.result,schema_version=1,kind='single_public_gpu_calibration',scientific_evidence=False,
+                stage=stage,reason=reason,startup={'endpoint_attempts':201},
+                bootstrap_diagnostic={'status':'unavailable','records':[]})
+
+
+def startup_recovery(f,result):
+    manifest = dict(schema_version=5,failed=f.failed,expected_failure_reason=result['reason'],
+                    expected_failure_stage=result['stage'],failed_result_canonical_sha256=r.digest(r.encoded(result)))
+    operation = r.Recovery(SimpleNamespace(Activation=lambda:None),None,manifest,{},'a'*64)
+    operation.old = {'plan.json':r.encoded(f.plan)}
+    operation.result,operation.bound,operation.submitted = result,f.bound,f.submitted
+    return operation
+
+
+@pytest.mark.parametrize('stage',sorted(r.STARTUP_STAGES))
+def test_schema5_pinned_startup_stages_require_closed_real_zero_attempt_case(real_failed,stage):
+    f = real_failed
+    operation = startup_recovery(f,startup_failure(f,stage=stage))
+    operation.verify_failure(f.snapshot())
+    f.s.rpc.call('cancel_job',{'job_id':f.failed['job_id']})
+    operation.verify_failure(f.snapshot(),cancelled=True)
+    assert f.snapshot()['attempts'] == []
+
+
+@pytest.mark.parametrize('fault',['attempt','attempt_count','attempt_identity','spec','approval','request','absence',
+                                 'scientific','success','result_schema','result_kind','result_job','result_stage','result_reason'])
+def test_schema5_cannot_recover_executed_unclosed_or_reclassified_cases(real_failed,fault):
+    f = real_failed
+    operation = startup_recovery(f,startup_failure(f))
+    snapshot = f.snapshot()
+    if fault=='attempt': snapshot['attempts']=[{'attempt_id':'executed'}]
+    elif fault=='attempt_count': snapshot['jobs'][0]['attempt_count']=1
+    elif fault=='attempt_identity': snapshot['jobs'][0]['attempt_id']='executed'
+    elif fault=='spec':
+        value=json.loads(snapshot['jobs'][0]['spec_json']);value['limits']['max_output_bytes']+=1
+        snapshot['jobs'][0]['spec_json']=json.dumps(value)
+    elif fault=='approval': snapshot['approvals'][0]['ended_at']=None
+    elif fault=='request': snapshot['requests'][0]['state']='RUNNING'
+    elif fault=='absence': snapshot['provider_absent']=False
+    elif fault=='scientific': operation.result['scientific_evidence']=True
+    elif fault=='success': operation.result['status']='passed'
+    elif fault=='result_schema': operation.result['schema_version']=True
+    elif fault=='result_kind': operation.result['kind']='different'
+    elif fault=='result_job': operation.result['request_id']='different'
+    elif fault=='result_stage': operation.result['stage']='approved_dispatch'
+    else: operation.result['reason']='ANOTHER_REASON'
+    # Even a freshly pinned result cannot waive independent stage/identity/job gates.
+    operation.m['failed_result_canonical_sha256']=r.digest(r.encoded(operation.result))
+    with pytest.raises(r.RetryError): operation.verify_failure(snapshot)
+
+
+def test_schema5_rejects_canonical_evidence_drift_before_any_snapshot_gate(real_failed):
+    f = real_failed
+    operation = startup_recovery(f,startup_failure(f))
+    operation.result['startup']['endpoint_attempts']+=1
+    with pytest.raises(r.RetryError,match='FAILED_RESULT_PIN_CHANGED'):
+        operation.verify_failure({})
+
+
+@pytest.mark.parametrize('fault',[None,'stage_missing','stage_execution','reason_private','reason_empty','extra_worker','pin_missing'])
+def test_schema5_manifest_requires_six_files_exact_stage_reason_and_result_pin(tmp_path,monkeypatch,fault):
+    files={name:b'# pinned '+name.encode() for name in r.FILES}
+    for name,raw in files.items():put(tmp_path/name,raw)
+    manifest=dict(schema_version=5,original_manifest_sha256='a'*64,
+        previous_upgrade={'wheel_sha256':'b'*64,'release_manifest_sha256':'c'*64},
+        target_upgrade={'wheel_sha256':'d'*64,'release_manifest_sha256':'e'*64},
+        previous_activation_manifest_sha256='f'*64,previous_retry_manifest_sha256='1'*64,
+        previous_retry_record_sha256='2'*64,expected_failure_reason='PROVIDER_ENDPOINT_REFUSED',
+        expected_failure_stage='verified_worker_startup',failed_result_canonical_sha256='3'*64,retry_id='4'*32,
+        failed={'job_id':'job','request_id':'request','worker_id':'worker','provider_id':'pod'},
+        files={name:r.digest(raw) for name,raw in files.items()})
+    if fault=='stage_missing':del manifest['expected_failure_stage']
+    elif fault=='stage_execution':manifest['expected_failure_stage']='approved_dispatch'
+    elif fault=='reason_private':manifest['expected_failure_reason']='Untrusted message /private/path'
+    elif fault=='reason_empty':manifest['expected_failure_reason']=''
+    elif fault=='extra_worker':manifest['files']['worker.json']='5'*64
+    elif fault=='pin_missing':del manifest['failed_result_canonical_sha256']
+    path=tmp_path/'manifest.json';put(path,r.encoded(manifest))
+    monkeypatch.setattr(r,'read',lambda path,**_:Path(path).read_bytes())
+    if fault:
+        with pytest.raises(r.RetryError):r.inputs(path,r.digest(path.read_bytes()))
+    else:assert r.inputs(path,r.digest(path.read_bytes()))[2]==files

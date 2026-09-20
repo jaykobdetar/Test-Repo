@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import ExitStack
+from datetime import datetime, timezone
 from decimal import Decimal
 import fcntl
 import hashlib
@@ -26,6 +28,7 @@ import stat
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
@@ -35,13 +38,14 @@ from pydantic import Field, model_validator
 from .audit import canonical_json
 from .controller import ControllerClient
 from .dispatcher import (Dispatcher, DispatcherService, SSHTunnel, WorkerClient,
-                         SSH_FAILURE_PATTERNS, ssh_failure_classification)
+                         SSH_FAILURE_PATTERNS, TransportError, ssh_failure_classification)
 from .gpu_acceptance import AcceptancePlan, collect, fixed_plan
+from .gpu_acceptance_actions import SSHActionClient, run_action
 from .ledger import JobState, Ledger
 from .provider import DeploymentSpec, WorkerState
 from .rpc import UnixRPCClient, decode
 from .runpod_provider import (ProviderHTTPError, ProviderResponseError, RunPodConfig,
-                              RunPodProvider, _NoRedirect, _read_owned_file)
+                              RunPodProvider, _NoRedirect, _read_owned_file, provider_http_metadata)
 from .schemas import FrozenModel, GitSHA, SHA256
 from .worker_contracts import WorkerConfig
 
@@ -55,9 +59,10 @@ COLLECTION_DELETION_RESERVE_SECONDS = 120
 class RunnerError(ValueError):
     """Only fixed, non-sensitive reason codes cross the CLI boundary."""
 
-    def __init__(self, message, *, diagnostic=None):
+    def __init__(self, message, *, diagnostic=None, provider_diagnostic=None):
         super().__init__(message)
         self.diagnostic = diagnostic
+        self.provider_diagnostic = provider_diagnostic
 
 
 BOOTSTRAP_EXCEPTION_TYPES = frozenset({
@@ -71,6 +76,19 @@ COMMAND_CLASSIFICATIONS = frozenset({
     'PROCESS_EXITED', 'COMMAND_TIMEOUT', 'OUTPUT_BOUND', 'SPAWN_FAILED',
     'INVALID_OUTPUT', 'COMMAND_FAILED', 'RECEIPT_MISMATCH', 'TUNNEL_EXITED', 'TUNNEL_TIMEOUT',
 }) | frozenset(code for code, _ in SSH_FAILURE_PATTERNS)
+
+
+def safe_provider_diagnostic(value):
+    if (type(value) is not dict or type(value.get('phase')) is not str
+            or value['phase'] not in {'endpoint_lookup', 'provider_logs'}
+            or type(value.get('http_status')) is not int or not 100 <= value['http_status'] <= 599
+            or type(value.get('content_type')) is not str or value['content_type'] not in {'json', 'html', 'other'}
+            or (value.get('retry_after_seconds') is not None
+                and (type(value['retry_after_seconds']) is not int or not 0 <= value['retry_after_seconds'] <= 86400))
+            or type(value.get('cf_mitigated_challenge')) is not bool):
+        return None
+    return {key: value.get(key) for key in ('phase', 'http_status', 'content_type',
+                                           'retry_after_seconds', 'cf_mitigated_challenge')}
 
 
 def bootstrap_record(raw):
@@ -118,6 +136,9 @@ def safe_bootstrap_diagnostic(value):
             or type(value.get('records')) is not list):
         return result
     result['status'] = value['status']
+    provider = safe_provider_diagnostic(value.get('provider'))
+    if provider is not None:
+        result['provider'] = provider
     for item in value['records'][:4]:
         try:
             record = bootstrap_record(canonical_json(item))
@@ -224,20 +245,20 @@ def load_inputs(path, *, mode, owner=0):
 def validate_plan(config, plan):
     require(len(plan.cases) == 1, 'SINGLE_CALIBRATION_CASE_REQUIRED')
     case = plan.cases[0]
-    require(case.action == 'wait' and case.spec.experiment_stage.value == 'calibration'
-            and case.spec.model == plan.model, 'FIXED_WAIT_CASE_REQUIRED')
+    require(case.spec.experiment_stage.value == 'calibration'
+            and case.spec.model == plan.model, 'FIXED_CALIBRATION_CASE_REQUIRED')
     if case.name == 'backend-parity':
         # Preserve the already installed parity plan's exact approval binding;
         # the four additional cases must match the existing generated recipe.
-        require(case.expected_state == 'COMPLETED' and case.expected_failure_kind is None
+        require(case.action == 'wait' and case.expected_state == 'COMPLETED' and case.expected_failure_kind is None
                 and case.spec.operation.kind == 'backend_parity', 'FIXED_BACKEND_PARITY_REQUIRED')
     else:
-        require(case.name in {'capture-retention', 'hard-deadline', 'output-limit', 'vram-limit'},
-                'FIXED_WAIT_CASE_REQUIRED')
+        require(case.name in {'capture-retention', 'hard-deadline', 'output-limit', 'vram-limit',
+                             'cancel-running', 'supervisor-restart'}, 'FIXED_CALIBRATION_CASE_REQUIRED')
         inputs = case.spec.inputs
         expected = next(item for item in fixed_plan(plan.model, plan.label, inputs.dataset_revision,
                         inputs.prompt_set_hash, inputs.prompt_ids).cases if item.name == case.name)
-        require(case == expected, 'FIXED_WAIT_CASE_REQUIRED')
+        require(case == expected, 'FIXED_CALIBRATION_CASE_REQUIRED')
     canonical = json.loads(files('probe_core').joinpath('resources/canonical-models.json').read_text())
     require(any((item['repo'], item['revision']) == (plan.model.repo, plan.model.revision_sha)
                 for item in canonical['models']) and plan.model.dtype == 'bfloat16'
@@ -485,6 +506,11 @@ def read_provider_logs(provider_config, pod_id, *, seconds=3, bootstrap_only=Fal
                     require(isinstance(event, dict) and isinstance(event.get('line'), str), 'PROVIDER_LOG_INVALID')
                     if 'SHA256:' in event['line'] and '(ED25519)' in event['line']:
                         events.append({k: event.get(k) for k in ('source', 'line', 'ts')})
+    except HTTPError as error:
+        with error:
+            diagnostic = safe_provider_diagnostic({'phase': 'provider_logs',
+                **provider_http_metadata(error.code, error.headers)})
+        raise RunnerError('PROVIDER_LOGS_UNAVAILABLE', provider_diagnostic=diagnostic) from None
     except RunnerError:
         raise
     except Exception:
@@ -503,8 +529,12 @@ def provider_bootstrap_diagnostic(provider_config, pod_id, *, timeout_seconds=1)
         try:
             records = read_provider_logs(provider_config, pod_id, seconds=timeout_seconds, bootstrap_only=True)
             results.put({'status': 'observed', 'records': records})
-        except Exception:
-            results.put({'status': 'unavailable', 'records': []})
+        except Exception as error:
+            result = {'status': 'unavailable', 'records': []}
+            diagnostic = safe_provider_diagnostic(getattr(error, 'provider_diagnostic', None))
+            if diagnostic is not None:
+                result['provider'] = diagnostic
+            results.put(result)
     threading.Thread(target=observe, daemon=True, name='probe-bootstrap-log-read').start()
     try:
         return results.get(timeout=timeout_seconds)
@@ -577,9 +607,11 @@ def verified_endpoint(config, request, backend, state, *, logs=read_provider_log
     try:
         pod = backend.transport.request('GET', '/v2/pods/' + quote(intent['provider_id'], safe=''))
     except ProviderHTTPError as error:
+        diagnostic = safe_provider_diagnostic({'phase': 'endpoint_lookup', **error.metadata})
+        require(diagnostic is not None, 'PROVIDER_ENDPOINT_RESPONSE_INVALID')
         if error.status in {408, 429} or 500 <= error.status < 600:
-            raise RunnerError('PROVIDER_ENDPOINT_UNAVAILABLE') from None
-        raise RunnerError('PROVIDER_ENDPOINT_REFUSED') from None
+            raise RunnerError('PROVIDER_ENDPOINT_UNAVAILABLE', provider_diagnostic=diagnostic) from None
+        raise RunnerError('PROVIDER_ENDPOINT_REFUSED', provider_diagnostic=diagnostic) from None
     except ProviderResponseError as error:
         # RunPodHTTP wraps both network failures and malformed JSON. Retry only
         # explicit transport evidence, not an invalid response or provenance.
@@ -777,10 +809,104 @@ def wait_for_worker(client, *, deadline, clock=time.time, sleep=time.sleep):
     raise RunnerError('WORKER_READINESS_DEADLINE')
 
 
+class _ActionStopped(RuntimeError):
+    """Interrupt observation without being mistaken for a retryable SSH failure."""
+
+
+class RunningAction:
+    """Observe/act once while the runner continues renewing the same lease.
+
+    Only read-only helper inspections are polled before the execution-start
+    marker exists. ``run_action`` owns the durable, once-only mutation intent.
+    Closing the gate prevents any later call; deletion need not wait for an
+    in-flight bounded SSH observation to finish.
+    """
+    def __init__(self, ledger, plan, request, client, lifecycle, directory, *,
+                 deadline, clock=time.time, action=run_action):
+        self.stop = threading.Event()
+        self.done = threading.Event()
+        self.entered = threading.Event()
+        self.start_attempted = False
+        self.report = None
+        self.passed = False
+        self.clock = clock
+        self.deadline = min(deadline, request.deadline.timestamp())
+        self.monotonic_deadline = time.monotonic() + max(0, self.deadline - clock())
+
+        def guarded(function):
+            def call(*args, **kwargs):
+                self.check()
+                return function(*args, **kwargs)
+            return call
+
+        remote = SimpleNamespace(status=guarded(client.status), cancel=guarded(client.cancel))
+        helper = SimpleNamespace(config_sha256=lifecycle.config_sha256,
+            endpoint_identity=lifecycle.endpoint_identity, inspect=guarded(lifecycle.inspect),
+            restart=guarded(lifecycle.restart))
+
+        def execute():
+            self.entered.set()
+            try:
+                while True:
+                    self.check()
+                    try:
+                        # The fixed helper requires execution-started.json and
+                        # verifies its exact request and live process identities.
+                        helper.inspect(request)
+                        break
+                    except TransportError:
+                        self.stop.wait(0.1)
+                self.check()
+                self.report = action(ledger, plan, case_name=plan.cases[0].name,
+                    job_id=request.job_id, attempt_id=request.attempt_id, approval_id=request.approval_id,
+                    client=remote, lifecycle=helper, action_directory=directory,
+                    observe_seconds=10, clock=lambda: datetime.fromtimestamp(clock(), timezone.utc))
+                self.passed = isinstance(self.report, dict) and self.report.get('status') == 'passed'
+            except Exception:
+                # No exception text, SSH addresses or private paths leave here.
+                self.passed = False
+            finally:
+                self.done.set()
+
+        self.thread = threading.Thread(target=execute, name='probe-acceptance-action', daemon=True)
+
+    def start(self):
+        self.check()
+        self.start_attempted = True
+        self.thread.start()
+
+    def check(self):
+        if self.stop.is_set() or self.clock() >= self.deadline or time.monotonic() >= self.monotonic_deadline:
+            raise _ActionStopped()
+
+    def close(self):
+        self.stop.set()
+        # Helper SSH has a 15s timeout and at most 5s child cleanup. Do this
+        # join after provider deletion, so slow diagnostics cannot defer it.
+        if not self.start_attempted:
+            return True
+        if not self.entered.wait(timeout=1):
+            return False  # Startup was interrupted; the closed gate still prevents actions.
+        self.thread.join(timeout=20)
+        return not self.thread.is_alive()
+
+
+def lifecycle_settings(settings, configuration):
+    require(configuration.get('configured') is True and isinstance(configuration.get('worker_config_sha256'), str)
+            and re.fullmatch(r'sha256:[0-9a-f]{64}', configuration['worker_config_sha256']),
+            'LIFECYCLE_CONFIGURATION_NOT_CONFIRMED')
+    # gpu_launch writes canonical config bytes, which can differ from the
+    # whitespace in the administrator-owned public WorkerConfig input file.
+    return {**{key: str(settings[key]) for key in ('host', 'user', 'identity_file', 'known_hosts_file')},
+            'ssh_port': settings['ssh_port'], 'config_path': '/workspace/probe/config/worker.json',
+            'config_sha256': configuration['worker_config_sha256'],
+            'token_path': '/workspace/probe/config/worker-token'}
+
+
 def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=time.sleep,
         endpoint=verified_endpoint, tunnel_factory=SSHTunnel, client_factory=WorkerClient,
         readiness=wait_for_worker, configure=configure_worker, progress=lambda _: None,
-        bootstrap_diagnostics=None):
+        bootstrap_diagnostics=None, lifecycle_factory=SSHActionClient, action=run_action):
     validate_plan(config, plan)
     state.publish('binding.json', {'config_sha256': digest(config.model_dump(mode='json')), 'plan_sha256': config.plan_sha256})
     previous = state.read('result.json')
@@ -800,6 +926,9 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
               'request_id': request['request_id'], 'worker_id': request['worker_id'],
               'provider_id': request['observed_provider_id'], 'plan_sha256': config.plan_sha256,
               'approval_consumed_by_runner': False, 'scientific_evidence': False}
+    action_task = None
+    action_directory = state.directory / 'actions'
+    action_case = plan.cases[0].action != 'wait'
     try:
         result['stage'] = 'approval_verification'
         deadline = validate_authority(ledger, config, plan, request, now=clock())
@@ -829,6 +958,9 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                                       'PROVIDER_ENDPOINT_UNAVAILABLE'}:
                     raise
                 result['startup']['last_endpoint_reason'] = str(error)
+                diagnostic = safe_provider_diagnostic(getattr(error, 'provider_diagnostic', None))
+                if diagnostic is not None:
+                    result['startup']['last_provider_error'] = diagnostic
                 sleep(1)
         else:
             raise RunnerError('WORKER_STARTUP_DEADLINE')
@@ -842,7 +974,8 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
         require(32 <= len(secret) <= 512, 'WORKER_SECRET_INVALID')
         result['stage'] = 'ssh_tunnel'
         progress(result['stage'])
-        with tunnel_factory(**settings) as tunnel:
+        with ExitStack() as resources:
+            tunnel = resources.enter_context(tunnel_factory(**settings))
             client = client_factory(f'http://127.0.0.1:{tunnel.local_port}', secret, timeout_seconds=5)
             result['stage'] = 'worker_readiness'
             progress(result['stage'])
@@ -856,6 +989,7 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                                     transfer_directory=state.directory / 'transfers',
                                     input_artifact_root=LEDGER.parent / 'input-artifacts', lease_seconds=30)
             service = DispatcherService(dispatcher, tunnel=tunnel)
+            lifecycle = lifecycle_factory(lifecycle_settings(settings, result['configuration'])) if action_case else None
             while clock() < deadline:
                 current = find_request(ledger, config, plan)
                 validate_authority(ledger, config, plan, current, now=clock())
@@ -863,16 +997,31 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                     require(clock() < startup_deadline, 'WORKER_STARTUP_DEADLINE')
                 service.tick()
                 job = ledger.get_job(request['job_ids'][0])
+                if action_case and action_task is None and job.state == JobState.RUNNING:
+                    execution = dispatcher._request(job)
+                    require(execution.worker_id == request['worker_id']
+                            and execution.approval_id == request['approval_id'], 'LIFECYCLE_ATTEMPT_MISMATCH')
+                    action_client = client_factory(f'http://127.0.0.1:{tunnel.local_port}', secret, timeout_seconds=5)
+                    action_task = RunningAction(ledger, plan, execution, action_client, lifecycle, action_directory,
+                                                deadline=deadline, clock=clock, action=action)
+                    resources.callback(action_task.stop.set)  # Runs before the tunnel's potentially slow close.
+                    action_task.start()  # Ownership and cleanup exist before a thread can run.
+                if action_task is not None and action_task.done.is_set():
+                    require(action_task.passed, 'LIFECYCLE_ACTION_NOT_ESTABLISHED')
                 if job.state in (JobState.COMPLETED, JobState.FAILED):
-                    break
+                    if action_task is None or action_task.done.is_set():
+                        break
                 sleep(0.25)
             else:
                 raise RunnerError('APPROVED_DEADLINE_REACHED')
             result['stage'] = 'artifact_collection'
             progress(result['stage'])
-            observation = collect(ledger, plan, client)
+            observation = collect(ledger, plan, client, action_directory=action_directory if action_case else None)
             state.publish('observations.json', observation)
             require(observation['case_results_passed'] is True, 'CALIBRATION_DID_NOT_PASS')
+            if action_case:
+                require(observation['action_evidence']['complete'] is True, 'LIFECYCLE_ACTION_PROOF_MISSING')
+                result['action_evidence_sha256'] = digest(observation['action_evidence'])
             evidence = observation['cases'][0]
             if plan.cases[0].expected_state == 'COMPLETED':
                 manifest = ledger.get_manifest(request['job_ids'][0])
@@ -891,6 +1040,9 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                           worker_receipt_sha256=digest(evidence['observed_receipt']))
     except RunnerError as error:
         result['reason'] = str(error)
+        diagnostic = safe_provider_diagnostic(getattr(error, 'provider_diagnostic', None))
+        if diagnostic is not None:
+            result['provider'] = diagnostic
         diagnostic = safe_command_diagnostic(getattr(error, 'diagnostic', None))
         if diagnostic is not None:
             result['transport'] = diagnostic
@@ -901,6 +1053,8 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
         if diagnostic is not None:
             result['transport'] = diagnostic
     finally:
+        if action_task is not None:
+            action_task.stop.set()  # Gate all future action calls before provider deletion.
         if result['status'] == 'failed' and result.get('stage') in {
                 'verified_worker_startup', 'worker_configuration', 'ssh_tunnel', 'worker_readiness'}:
             # Diagnostics are best effort and have less priority than deletion.
@@ -916,6 +1070,8 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                 result['bootstrap_diagnostic'] = {'status': 'skipped_deadline', 'records': []}
         progress('provider_deletion')
         result['teardown'] = stop_and_observe(cloud, backend, request, sleep=sleep)
+        if action_task is not None and not action_task.close():
+            result.update(status='failed', reason='LIFECYCLE_ACTION_CLEANUP_UNCONFIRMED')
         if not result['teardown']['confirmed']:
             result.update(status='failed', reason='PROVIDER_DELETION_UNCONFIRMED')
         state.publish('result.json', result)

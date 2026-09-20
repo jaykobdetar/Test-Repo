@@ -47,12 +47,13 @@ No persistent storage was purchased and no model inference ran.
 Subsequent bounded tests established real resource-control enforcement on one
 compatible RunPod host. Every newly assigned host must pass the same worker
 identity and containment gates before inference. This evidence does not establish
-shutdown during controller host loss or unattended readiness. Four full-worker
-calibrations stopped before inference. Image cold-start handling and clean
-environments are installed. The latest Pod loaded its image and its SSH host key
-was verified, but configuration and the authenticated tunnel failed before a
-job was dispatched. Provider deletion was confirmed. Transport diagnostics are
-being improved before another bounded calibration.
+shutdown during controller host loss or unattended readiness. Five full-worker
+calibrations stopped before inference. Image cold-start handling, clean
+environments and SSH diagnostics are installed. The fourth Pod reached verified
+SSH host-key discovery but configuration failed. The fifth stopped on a refused
+provider endpoint lookup before SSH; its HTTP status was not retained. Both
+Pods were deleted. The next controller update retains bounded HTTP metadata to
+identify that refusal while preserving the existing deadlines and cleanup.
 
 ## Selected setup
 

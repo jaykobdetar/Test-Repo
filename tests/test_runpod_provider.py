@@ -3,11 +3,15 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from email.message import Message
 import hashlib
+import io
 import json
 import os
 import sqlite3
 import threading
+from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -16,7 +20,7 @@ from probe_core.provider import DeploymentSpec, ProviderBudgetRefused, WorkerSta
 from probe_core.runpod_provider import (
     ProviderCapabilityError, ProviderHTTPError, ProviderResponseError, ProviderUncertain,
     RunPodConfig, RunPodHTTP, RunPodLaunchConfig, RunPodProvider, StorageRates,
-    serve_stop_broker,
+    provider_http_metadata, serve_stop_broker,
 )
 
 
@@ -550,6 +554,62 @@ def test_config_and_credentials_reject_symlinks_public_permissions_and_wrong_own
     key.chmod(0o644)
     with pytest.raises(PermissionError):
         RunPodHTTP(key).request("GET", "/v2/pods")
+
+
+@pytest.mark.parametrize('media,kind', [('application/json; charset=utf-8', 'json'),
+    ('application/problem+json', 'json'), ('TEXT/HTML; charset=UTF-8', 'html'),
+    ('application/xhtml+xml', 'html'), ('private-unknown', 'other'), ('x'*300, 'other')])
+@pytest.mark.parametrize('retry,seconds', [('0', 0), ('120', 120), ('86400', 86400),
+    ('86401', None), ('-1', None), ('1.5', None), ('Wed, 21 Oct 2015 07:28:00 GMT', None)])
+def test_http_error_headers_reduce_to_bounded_fixed_metadata(media, kind, retry, seconds):
+    headers = Message()
+    headers['Content-Type'] = media
+    headers['Retry-After'] = retry
+    headers['cf-mitigated'] = 'challenge'
+    headers['PRIVATE'] = 'never-retained'
+    result = provider_http_metadata(403, headers)
+    assert result == {'http_status': 403, 'content_type': kind, 'retry_after_seconds': seconds,
+                      'cf_mitigated_challenge': True}
+    assert 'never-retained' not in canonical_json(result)
+
+
+@pytest.mark.parametrize('status', [True, None, '403', 99, 600])
+def test_http_error_status_requires_an_actual_valid_integer(status):
+    with pytest.raises(ProviderResponseError, match='provider HTTP status is invalid'):
+        ProviderHTTPError(status)
+
+
+@pytest.mark.parametrize('mitigated', ['Challenge', 'anything-else', '', 'challenge'+'x'*300])
+def test_challenge_flag_requires_exact_header_value(mitigated):
+    assert provider_http_metadata(403, {'cf-mitigated': mitigated})['cf_mitigated_challenge'] is False
+
+
+@pytest.mark.parametrize('method,path', [('GET', '/v2/pods'), ('POST', '/graphql')])
+def test_transport_http_failure_keeps_safe_metadata_without_reading_body_or_retry(tmp_path, method, path):
+    key = tmp_path/'key'
+    key.write_text('PRIVATE_PROVIDER_KEY')
+    key.chmod(0o600)
+    headers = Message()
+    headers['content-type'] = 'text/html'
+    headers['retry-after'] = '60'
+    headers['cf-mitigated'] = 'challenge'
+    headers['x-private'] = 'PRIVATE_HEADER'
+    class UnreadBody(io.BytesIO):
+        def read(self, *_args):
+            raise AssertionError('provider error body must never be read')
+    body = UnreadBody(b'PRIVATE_BODY')
+    calls = []
+    def open_request(request, *, timeout):
+        calls.append((request.method, timeout))
+        raise HTTPError('https://private.invalid/PRIVATE_URL', 403, 'PRIVATE_MESSAGE', headers, body)
+    transport = RunPodHTTP(key)
+    transport.opener = SimpleNamespace(open=open_request)
+    with pytest.raises(ProviderHTTPError) as caught:
+        transport.request(method, path, {} if method == 'POST' else None)
+    assert caught.value.metadata == {'http_status': 403, 'content_type': 'html',
+                                    'retry_after_seconds': 60, 'cf_mitigated_challenge': True}
+    assert calls == [(method, 15)] and body.closed
+    assert 'PRIVATE' not in str(caught.value) + canonical_json(vars(caught.value))
 
 
 def test_stop_broker_exposes_only_status_and_stop_with_distinct_uid(runpod, tmp_path, monkeypatch):
