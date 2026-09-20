@@ -535,3 +535,185 @@ def test_schema3_prepare_publishes_separate_public_worker_before_submission(prep
     s.operation.operation.ctl=ctl
     s.operation.prepare()
     assert (s.public/'worker.json',expected,{'uid':0,'gid':0,'mode':0o444}) in writes
+
+
+@pytest.fixture
+def fourth_retry(third_retry):
+    s = third_retry
+    previous = deepcopy(s.manifest)
+    original_raw = (json.dumps(previous, indent=2)+'\n').encode()
+    previous_pin = r.digest(original_raw)
+    capsule = r.ROOT/'calibration-retries'/previous_pin
+    put(capsule/'manifest-original.json', original_raw)
+    put(capsule/'manifest.json', r.encoded(previous))
+    failed = dict(job_id='fourth-job', request_id='fourth-request', worker_id='fourth-worker', provider_id='fourth-pod')
+    report = dict(schema_version=1, status='prepared', manifest_sha256=previous_pin,
+                  target_wheel_sha256=previous['target_upgrade']['wheel_sha256'], old_history_preserved=True,
+                  approval_issued=False, cloud_mutations_performed=False,
+                  submission={**failed, 'approval_consumed_by_runner':False})
+    put(capsule/'prepare-report.json', r.encoded(report))
+    put(capsule/'close-report.json', r.encoded(dict(status='closed', manifest_sha256=previous_pin,
+                                                  original_job_cancelled=True, attempts_created=False, approval_issued=False)))
+    for name in previous['files']: put(capsule/name, s.new[name])
+    manifest = dict(previous, schema_version=4, previous_upgrade=previous['target_upgrade'],
+                    target_upgrade={'wheel_sha256':'1'*64, 'release_manifest_sha256':'2'*64},
+                    previous_retry_manifest_sha256=previous_pin, previous_retry_record_sha256=r.digest(r.encoded(previous)),
+                    expected_failure_reason='ACCEPTANCE_RUNTIME_UNAVAILABLE', retry_id='d'*32, failed=failed)
+    new = next_inputs(s.new, manifest['retry_id'])
+    del new['worker.json']
+    manifest['files'] = {name:r.digest(new[name]) for name in r.FILES if name in new}
+    operation = r.Recovery(s.operation.a, None, manifest, new, '3'*64)
+    return SimpleNamespace(operation=operation, original=s.original, old=s.new, new=new,
+                           manifest=manifest, previous=previous, capsule=capsule,
+                           prior_capsules=(s.first, s.capsule, capsule))
+
+
+def test_fourth_retry_retains_schema3_worker_and_revalidates_full_unmodified_chain(fourth_retry):
+    s = fourth_retry
+    before = {str(path):path.read_bytes() for folder in s.prior_capsules for path in folder.iterdir()}
+    old = s.operation.previous_inputs(s.original)
+    assert old['worker.json'] == s.old['worker.json'] != s.original['worker.json']
+    public, config = r.validate_replacement(old, s.new, s.manifest['retry_id'], schema_version=4)
+    previous = json.loads(s.old['acceptance.json'])
+    for field in ('worker_config_path', 'worker_config_sha256', 'source_commit', 'deployment'):
+        assert config[field] == previous[field]
+    assert config['worker_config_path'] != str(public/'worker.json')
+    assert config['worker_config_sha256'] == 'sha256:'+r.digest(old['worker.json'])
+    assert before == {str(path):path.read_bytes() for folder in s.prior_capsules for path in folder.iterdir()}
+
+
+@pytest.mark.parametrize('fault', ['worker_missing', 'worker_bytes', 'original_missing', 'original_bytes',
+                                  'report', 'earlier_worker_binding'])
+def test_fourth_retry_refuses_damaged_schema3_capsule_or_chain(fourth_retry, fault):
+    s = fourth_retry
+    if fault == 'worker_missing': (s.capsule/'worker.json').unlink()
+    elif fault == 'worker_bytes': put(s.capsule/'worker.json', s.original['worker.json'])
+    elif fault == 'original_missing': (s.capsule/'manifest-original.json').unlink()
+    elif fault == 'original_bytes': put(s.capsule/'manifest-original.json', b'{}\n')
+    elif fault == 'report':
+        report = json.loads((s.capsule/'prepare-report.json').read_bytes())
+        report['submission']['job_id'] = 'different'
+        put(s.capsule/'prepare-report.json', r.encoded(report))
+    else:
+        s.original['worker.json'] = s.old['worker.json']
+    with pytest.raises((r.RetryError, FileNotFoundError)):
+        s.operation.previous_inputs(s.original)
+
+
+@pytest.mark.parametrize('field', ['worker_config_path', 'worker_config_sha256', 'source_commit', 'image',
+                                  'price', 'region', 'runtime', 'model'])
+def test_schema4_cannot_change_worker_or_scientific_scope(fourth_retry, field):
+    s = fourth_retry
+    old = s.operation.previous_inputs(s.original)
+    config = json.loads(s.new['acceptance.json'])
+    if field == 'worker_config_path': config[field] = str(r.PUBLIC/'worker.json')
+    elif field == 'worker_config_sha256': config[field] = 'sha256:'+'a'*64
+    elif field == 'source_commit': config[field] = 'a'*40
+    elif field == 'image': config['deployment']['image_digest'] = 'sha256:'+'a'*64
+    elif field == 'price': config['expected_worker_price_usd_per_hour'] = .79
+    elif field == 'region': config['deployment']['region'] = 'unapproved-region'
+    elif field == 'runtime': config['max_runtime_seconds'] -= 1
+    else:
+        plan = json.loads(s.new['plan.json'])
+        plan['model']['revision_sha'] = 'a'*40
+        s.new['plan.json'] = r.encoded(plan)
+        config['plan_sha256'] = 'sha256:'+r.digest(s.new['plan.json'])
+    s.new['acceptance.json'] = r.encoded(config)
+    with pytest.raises(r.RetryError):
+        r.validate_replacement(old, s.new, s.manifest['retry_id'], schema_version=4)
+
+
+def configuration_failure(f):
+    return dict(f.result, stage='worker_configuration',
+                configuration={'configured':None, 'reason':'CONFIGURATION_RESPONSE_UNCERTAIN'},
+                diagnostic={'exception_type':'TransportError', 'location':'gpu_acceptance_runner.py:684'})
+
+
+def test_schema4_real_closed_zero_attempt_configuration_failure_remains_audited(real_failed):
+    f = real_failed
+    result = configuration_failure(f)
+    manifest = {'schema_version':4, 'failed':f.failed, 'expected_failure_reason':'ACCEPTANCE_RUNTIME_UNAVAILABLE',
+                'failed_result_canonical_sha256':r.digest(r.encoded(result))}
+    operation = r.Recovery(SimpleNamespace(Activation=lambda:None), None, manifest, {}, 'a'*64)
+    operation.old = {'plan.json':r.encoded(f.plan)}
+    operation.result, operation.bound, operation.submitted = result, f.bound, f.submitted
+    operation.verify_failure(f.snapshot())
+    operation.result = dict(result, configuration={'configured':False, 'reason':'CONFIGURATION_RESPONSE_UNCERTAIN'})
+    with pytest.raises(r.RetryError, match='FAILED_RESULT_PIN_CHANGED'): operation.verify_failure(f.snapshot())
+    operation.result = result
+    changed = f.snapshot(); changed['attempts'] = [{'attempt_id':'unexpected'}]
+    with pytest.raises(r.RetryError, match='FAILED_CASE_EXECUTED_OR_CHANGED'): operation.verify_failure(changed)
+    changed = f.snapshot(); changed['approvals'][0]['ended_at'] = None
+    with pytest.raises(r.RetryError, match='FAILED_APPROVAL_NOT_CLOSED'): operation.verify_failure(changed)
+    changed = f.snapshot(); changed['provider_absent'] = False
+    with pytest.raises(r.RetryError, match='PROVIDER_DELETION_UNCONFIRMED'): operation.verify_failure(changed)
+    f.s.rpc.call('cancel_job', {'job_id':f.failed['job_id']})
+    operation.verify_failure(f.snapshot(), cancelled=True)
+    assert f.s.ledger.get_job(f.failed['job_id']).failure_kind == 'cancelled'
+    assert f.snapshot()['attempts'] == []
+
+
+@pytest.mark.parametrize('fault', ['stage', 'reason', 'configured', 'configuration_reason', 'exception', 'location'])
+def test_schema4_rejects_other_configuration_failures_even_with_a_new_canonical_pin(real_failed, fault):
+    f = real_failed
+    result = configuration_failure(f)
+    if fault == 'stage': result['stage'] = 'verified_worker_startup'
+    elif fault == 'reason': result['reason'] = 'REQUEST_CHANGED'
+    elif fault == 'configured': result['configuration']['configured'] = False
+    elif fault == 'configuration_reason': result['configuration']['reason'] = 'UNRELATED'
+    elif fault == 'exception': result['diagnostic']['exception_type'] = 'ValueError'
+    else: result['diagnostic']['location'] = 'gpu_acceptance_runner.py:1'
+    manifest = {'schema_version':4, 'failed':f.failed, 'expected_failure_reason':'ACCEPTANCE_RUNTIME_UNAVAILABLE',
+                'failed_result_canonical_sha256':r.digest(r.encoded(result))}
+    operation = r.Recovery(SimpleNamespace(Activation=lambda:None), None, manifest, {}, 'a'*64)
+    operation.old = {'plan.json':r.encoded(f.plan)}
+    operation.result, operation.bound, operation.submitted = result, f.bound, f.submitted
+    with pytest.raises(r.RetryError, match='FAILED_(CONFIGURATION_)?RESULT_CHANGED'):
+        operation.verify_failure(f.snapshot())
+
+
+@pytest.mark.parametrize('schema_version', [1, 2, 3])
+def test_legacy_recovery_does_not_accept_new_configuration_stage(real_failed, schema_version):
+    f = real_failed
+    with pytest.raises(r.RetryError, match='FAILED_RESULT_CHANGED'):
+        r.validate_failed(f.snapshot(), f.failed, f.plan, configuration_failure(f), f.bound, f.submitted,
+                          schema_version=schema_version)
+
+
+@pytest.mark.parametrize('fault', [None, 'extra_worker', 'missing_result_pin', 'missing_record_pin', 'old_reason'])
+def test_schema4_manifest_has_six_pins_and_exact_configuration_reason(tmp_path, monkeypatch, fault):
+    files = {name:b'# pinned '+name.encode() for name in r.FILES}
+    for name, raw in files.items(): put(tmp_path/name, raw)
+    manifest = dict(schema_version=4, original_manifest_sha256='a'*64,
+                    previous_upgrade={'wheel_sha256':'b'*64, 'release_manifest_sha256':'c'*64},
+                    target_upgrade={'wheel_sha256':'d'*64, 'release_manifest_sha256':'e'*64},
+                    previous_activation_manifest_sha256='f'*64, previous_retry_manifest_sha256='1'*64,
+                    previous_retry_record_sha256='2'*64, expected_failure_reason='ACCEPTANCE_RUNTIME_UNAVAILABLE',
+                    failed_result_canonical_sha256='3'*64, retry_id='4'*32,
+                    failed={'job_id':'job', 'request_id':'request', 'worker_id':'worker', 'provider_id':'pod'},
+                    files={name:r.digest(raw) for name, raw in files.items()})
+    if fault == 'extra_worker': manifest['files']['worker.json'] = '5'*64
+    elif fault == 'missing_result_pin': del manifest['failed_result_canonical_sha256']
+    elif fault == 'missing_record_pin': del manifest['previous_retry_record_sha256']
+    elif fault == 'old_reason': manifest['expected_failure_reason'] = 'REQUEST_CHANGED'
+    path = tmp_path/'manifest.json'; put(path, r.encoded(manifest))
+    monkeypatch.setattr(r, 'read', lambda path, **_:Path(path).read_bytes())
+    if fault:
+        with pytest.raises(r.RetryError): r.inputs(path, r.digest(path.read_bytes()))
+    else:
+        assert r.inputs(path, r.digest(path.read_bytes()))[2] == files
+        assert len(files) == 6
+
+
+def test_schema4_prepare_does_not_copy_or_replace_existing_worker(prepare_case, tmp_path):
+    s = prepare_case
+    s.operation.m['schema_version'] = 4
+    worker = tmp_path/'previous-public'/'worker.json'
+    put(worker, s.operation.files.pop('worker.json'))
+    before = worker.read_bytes()
+    s.operation.config['worker_config_path'] = str(worker)
+    s.operation.files['acceptance.json'] = r.encoded(s.operation.config)
+    result = s.operation.prepare()
+    assert result['status'] == 'prepared'
+    assert worker.read_bytes() == before and not (s.public/'worker.json').exists()
+    assert result['approval_issued'] is False and result['cloud_mutations_performed'] is False

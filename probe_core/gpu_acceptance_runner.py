@@ -17,12 +17,14 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import re
 import selectors
 import signal
 import socket
 import stat
 import subprocess
+import threading
 import time
 from urllib.parse import quote, urlencode
 from urllib.error import HTTPError, URLError
@@ -32,8 +34,9 @@ from pydantic import Field, model_validator
 
 from .audit import canonical_json
 from .controller import ControllerClient
-from .dispatcher import Dispatcher, DispatcherService, SSHTunnel, WorkerClient
-from .gpu_acceptance import AcceptancePlan, collect
+from .dispatcher import (Dispatcher, DispatcherService, SSHTunnel, WorkerClient,
+                         SSH_FAILURE_PATTERNS, ssh_failure_classification)
+from .gpu_acceptance import AcceptancePlan, collect, fixed_plan
 from .ledger import JobState, Ledger
 from .provider import DeploymentSpec, WorkerState
 from .rpc import UnixRPCClient, decode
@@ -51,6 +54,78 @@ COLLECTION_DELETION_RESERVE_SECONDS = 120
 
 class RunnerError(ValueError):
     """Only fixed, non-sensitive reason codes cross the CLI boundary."""
+
+    def __init__(self, message, *, diagnostic=None):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+BOOTSTRAP_EXCEPTION_TYPES = frozenset({
+    'ValueError', 'TypeError', 'RuntimeError', 'OSError', 'PermissionError',
+    'FileNotFoundError', 'FileExistsError', 'NotADirectoryError', 'IsADirectoryError',
+    'ProcessLookupError', 'TimeoutError', 'KeyError', 'AttributeError', 'AssertionError',
+    'ImportError', 'ModuleNotFoundError', 'UnicodeDecodeError', 'JSONDecodeError',
+    'ValidationError', 'CalledProcessError', 'BootstrapRefused',
+})
+COMMAND_CLASSIFICATIONS = frozenset({
+    'PROCESS_EXITED', 'COMMAND_TIMEOUT', 'OUTPUT_BOUND', 'SPAWN_FAILED',
+    'INVALID_OUTPUT', 'COMMAND_FAILED', 'RECEIPT_MISMATCH', 'TUNNEL_EXITED', 'TUNNEL_TIMEOUT',
+}) | frozenset(code for code, _ in SSH_FAILURE_PATTERNS)
+
+
+def bootstrap_record(raw):
+    """Accept only the launcher's fixed receipt; never return surrounding text."""
+    try:
+        if not isinstance(raw, (bytes, str)) or len(raw) > 1024:
+            return None
+        record = decode(raw.encode() if isinstance(raw, str) else raw)
+        if (type(record) is not dict or set(record) != {'status', 'code', 'error_type', 'bootstrap_line'}
+                or record['status'] != 'failed' or record['code'] != 'WORKER_BOOTSTRAP_FAILED'
+                or record['error_type'] not in BOOTSTRAP_EXCEPTION_TYPES
+                or type(record['bootstrap_line']) is not int or not 1 <= record['bootstrap_line'] <= 1000000):
+            return None
+        return record
+    except (TypeError, ValueError, UnicodeError):
+        return None
+
+
+def safe_command_diagnostic(value, *, phase=None):
+    """An exception attribute is not permission to publish arbitrary metadata."""
+    if type(value) is not dict:
+        return None
+    phase = phase or value.get('phase')
+    status, timeout, classification = value.get('exit_status'), value.get('timeout'), value.get('classification')
+    if (type(phase) is not str or phase not in {'verification', 'upload', 'configure', 'tunnel'}
+            or (status is not None and (type(status) is not int or not -255 <= status <= 255))
+            or type(timeout) is not bool or type(classification) is not str or classification not in COMMAND_CLASSIFICATIONS):
+        return None
+    result = {'phase': phase, 'exit_status': status, 'timeout': timeout, 'classification': classification}
+    record = value.get('bootstrap')
+    if type(record) is dict:
+        try:
+            record = bootstrap_record(canonical_json(record))
+        except (TypeError, ValueError):
+            record = None
+        if record is not None:
+            result['bootstrap'] = record
+    return result
+
+
+def safe_bootstrap_diagnostic(value):
+    result = {'status': 'unavailable', 'records': []}
+    if (type(value) is not dict or type(value.get('status')) is not str
+            or value['status'] not in {'observed', 'unavailable', 'timeout'}
+            or type(value.get('records')) is not list):
+        return result
+    result['status'] = value['status']
+    for item in value['records'][:4]:
+        try:
+            record = bootstrap_record(canonical_json(item))
+        except (TypeError, ValueError):
+            record = None
+        if record is not None:
+            result['records'].append(record)
+    return result
 
 
 def require(condition, code):
@@ -149,10 +224,20 @@ def load_inputs(path, *, mode, owner=0):
 def validate_plan(config, plan):
     require(len(plan.cases) == 1, 'SINGLE_CALIBRATION_CASE_REQUIRED')
     case = plan.cases[0]
-    require(case.name == 'backend-parity' and case.action == 'wait' and case.expected_state == 'COMPLETED'
-            and case.expected_failure_kind is None and case.spec.operation.kind == 'backend_parity'
-            and case.spec.experiment_stage.value == 'calibration' and case.spec.model == plan.model,
-            'FIXED_BACKEND_PARITY_REQUIRED')
+    require(case.action == 'wait' and case.spec.experiment_stage.value == 'calibration'
+            and case.spec.model == plan.model, 'FIXED_WAIT_CASE_REQUIRED')
+    if case.name == 'backend-parity':
+        # Preserve the already installed parity plan's exact approval binding;
+        # the four additional cases must match the existing generated recipe.
+        require(case.expected_state == 'COMPLETED' and case.expected_failure_kind is None
+                and case.spec.operation.kind == 'backend_parity', 'FIXED_BACKEND_PARITY_REQUIRED')
+    else:
+        require(case.name in {'capture-retention', 'hard-deadline', 'output-limit', 'vram-limit'},
+                'FIXED_WAIT_CASE_REQUIRED')
+        inputs = case.spec.inputs
+        expected = next(item for item in fixed_plan(plan.model, plan.label, inputs.dataset_revision,
+                        inputs.prompt_set_hash, inputs.prompt_ids).cases if item.name == case.name)
+        require(case == expected, 'FIXED_WAIT_CASE_REQUIRED')
     canonical = json.loads(files('probe_core').joinpath('resources/canonical-models.json').read_text())
     require(any((item['repo'], item['revision']) == (plan.model.repo, plan.model.revision_sha)
                 for item in canonical['models']) and plan.model.dtype == 'bfloat16'
@@ -362,8 +447,8 @@ def host_fingerprints(events, *, client_fingerprint):
     return result.pop()
 
 
-def read_provider_logs(provider_config, pod_id, *, seconds=3):
-    """Official v2 authenticated SSE; retain only bounded fingerprint records.
+def read_provider_logs(provider_config, pod_id, *, seconds=3, bootstrap_only=False):
+    """Official v2 SSE; retain only fingerprints or strict bootstrap receipts.
 
     Source: https://api.runpod.io/v2/openapi.json, getPodLogs. A stream timeout
     after a complete record is normal; no raw log or authentication data is
@@ -387,7 +472,15 @@ def read_provider_logs(provider_config, pod_id, *, seconds=3):
                     break
                 total += len(line)
                 require(total <= BOUND, 'PROVIDER_LOG_BOUND_EXCEEDED')
-                if line.startswith(b'data:') and b'SHA256:' in line and b'(ED25519)' in line:
+                if bootstrap_only and line.startswith(b'data:') and b'WORKER_BOOTSTRAP_FAILED' in line:
+                    event = decode(line[5:].strip())
+                    if type(event) is dict and event.get('source') == 'container':
+                        record = bootstrap_record(event.get('line'))
+                        if record is not None:
+                            events.append(record)
+                            if len(events) == 4:
+                                break
+                elif not bootstrap_only and line.startswith(b'data:') and b'SHA256:' in line and b'(ED25519)' in line:
                     event = decode(line[5:].strip())
                     require(isinstance(event, dict) and isinstance(event.get('line'), str), 'PROVIDER_LOG_INVALID')
                     if 'SHA256:' in event['line'] and '(ED25519)' in event['line']:
@@ -399,36 +492,81 @@ def read_provider_logs(provider_config, pod_id, *, seconds=3):
     return events
 
 
+def provider_bootstrap_diagnostic(provider_config, pod_id, *, timeout_seconds=1):
+    """One read with a caller deadline, including DNS/stream stalls.
+
+    A daemon thread can finish its read after the caller deadline, but cannot
+    mutate the result or delay the provider deletion. It only receives logs.
+    """
+    results = queue.Queue(maxsize=1)
+    def observe():
+        try:
+            records = read_provider_logs(provider_config, pod_id, seconds=timeout_seconds, bootstrap_only=True)
+            results.put({'status': 'observed', 'records': records})
+        except Exception:
+            results.put({'status': 'unavailable', 'records': []})
+    threading.Thread(target=observe, daemon=True, name='probe-bootstrap-log-read').start()
+    try:
+        return results.get(timeout=timeout_seconds)
+    except queue.Empty:
+        return {'status': 'timeout', 'records': []}
+
+
 def command_bytes(command, *, timeout=5):
     # Fixed commands produce public keys or a configuration hash receipt.
-    process = None
+    process, failed = None, True
+    body, stderr = bytearray(), bytearray()
+    diagnostic = {'phase': 'verification', 'exit_status': None, 'timeout': False, 'classification': 'SPAWN_FAILED'}
     try:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, close_fds=True, cwd='/',
+                                   stderr=subprocess.PIPE, close_fds=True, cwd='/',
                                    env={'PATH': '/usr/bin:/bin', 'LANG': 'C'}, start_new_session=True)
-        body, deadline = bytearray(), time.monotonic() + timeout
+        deadline = time.monotonic() + timeout
+        diagnostic['classification'] = 'COMMAND_FAILED'
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stderr, selectors.EVENT_READ)
             while selector.get_map():
-                require(time.monotonic() < deadline, 'SSH_VERIFICATION_COMMAND_FAILED')
+                if time.monotonic() >= deadline:
+                    diagnostic.update(timeout=True, classification='COMMAND_TIMEOUT', exit_status=process.poll())
+                    raise RunnerError('SSH_VERIFICATION_COMMAND_FAILED', diagnostic=diagnostic)
                 for key, _ in selector.select(min(0.1, max(0, deadline-time.monotonic()))):
                     chunk = os.read(key.fd, 4096)
                     if not chunk:
                         selector.unregister(key.fileobj)
-                    body.extend(chunk)
-                    require(len(body) <= 65536, 'SSH_VERIFICATION_COMMAND_FAILED')
-        require(process.wait(timeout=max(0.1, deadline-time.monotonic())) == 0, 'SSH_VERIFICATION_COMMAND_FAILED')
-        return body.decode('ascii')
+                    (body if key.fileobj is process.stdout else stderr).extend(chunk)
+                    if len(body) + len(stderr) > 65536:
+                        diagnostic.update(classification='OUTPUT_BOUND', exit_status=process.poll())
+                        raise RunnerError('SSH_VERIFICATION_COMMAND_FAILED', diagnostic=diagnostic)
+        status = process.wait(timeout=max(0.1, deadline-time.monotonic()))
+        diagnostic['exit_status'] = status
+        if status != 0:
+            diagnostic['classification'] = ssh_failure_classification(bytes(stderr)) or 'PROCESS_EXITED'
+            record = bootstrap_record(bytes(body))
+            if record is not None:
+                diagnostic['bootstrap'] = record
+            raise RunnerError('SSH_VERIFICATION_COMMAND_FAILED', diagnostic=diagnostic)
+        diagnostic['classification'] = 'INVALID_OUTPUT'
+        output = body.decode('ascii')
+        failed = False
+        return output
     except RunnerError:
         raise
+    except subprocess.TimeoutExpired:
+        diagnostic.update(timeout=True, classification='COMMAND_TIMEOUT', exit_status=process.poll())
+        raise RunnerError('SSH_VERIFICATION_COMMAND_FAILED', diagnostic=diagnostic) from None
     except Exception:
-        raise RunnerError('SSH_VERIFICATION_COMMAND_FAILED') from None
+        raise RunnerError('SSH_VERIFICATION_COMMAND_FAILED', diagnostic=diagnostic) from None
     finally:
         if process is not None:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
+            if failed or process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 process.wait(timeout=2)
             process.stdout.close()
+            process.stderr.close()
 
 
 def verified_endpoint(config, request, backend, state, *, logs=read_provider_logs, command=command_bytes):
@@ -487,7 +625,10 @@ def verified_endpoint(config, request, backend, state, *, logs=read_provider_log
                'price': pod['cost'], 'region': pod['dataCenterId']}
     state.publish('endpoint.json', binding)
     hosts = state.directory / 'known_hosts'
-    content = f'[{host}]:{port} {key}\n'.encode()
+    # OpenSSH looks up a bare host at its standard port; brackets encode only
+    # non-standard ports, including for IPv6 addresses.
+    host_identity = host if port == 22 else f'[{host}]:{port}'
+    content = f'{host_identity} {key}\n'.encode()
     try:
         fd = os.open(hosts, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except FileExistsError:
@@ -533,7 +674,14 @@ def configure_worker(config, plan, settings, state, *, deadline, clock=time.time
         receipt = state.read('configured.json')
         require(receipt is None or receipt == expected, 'CONFIGURATION_RECEIPT_CONFLICT')
         remove_private_bundle()
-        return receipt or {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN'}
+        if receipt is not None:
+            return receipt
+        result = {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN'}
+        failure = state.read('configure-failure.json')
+        diagnostic = safe_command_diagnostic(failure.get('diagnostic')) if type(failure) is dict else None
+        if diagnostic is not None:
+            result['diagnostic'] = diagnostic
+        return result
     require(clock() < deadline, 'WORKER_STARTUP_DEADLINE')
     state.publish('configure-intent.json', intent)
     # State publishes this one credential-bearing file only in the private
@@ -547,11 +695,19 @@ def configure_worker(config, plan, settings, state, *, deadline, clock=time.time
     host = settings['host']
     destination = '[' + host + ']' if ':' in host else host
     remote = '/run/probe-worker-bootstrap.json'
+    phase = 'upload'
+    def uncertain(error):
+        diagnostic = safe_command_diagnostic(getattr(error, 'diagnostic', None), phase=phase)
+        diagnostic = diagnostic or {'phase': phase, 'exit_status': None, 'timeout': False, 'classification': 'COMMAND_FAILED'}
+        result = {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN', 'diagnostic': diagnostic}
+        state.publish('configure-failure.json', result)
+        return result
     try:
-        command(['/usr/bin/scp', '-q', '-p', *options, '-P', str(settings['ssh_port']),
+        command(['/usr/bin/scp', '-p', *options, '-P', str(settings['ssh_port']),
                  str(local), 'root@' + destination + ':' + remote],
                 timeout=min(15, max(0.1, deadline-clock())))
         require(clock() < deadline, 'WORKER_STARTUP_DEADLINE')
+        phase = 'configure'
         output = command(['/usr/bin/ssh', *options, '-T', '-p', str(settings['ssh_port']), 'root@' + host,
                           '/opt/probe-core/venv/bin/python', '-I', '-m', 'probe_core.gpu_launch', '--configure', remote],
                          timeout=min(15, max(0.1, deadline-clock())))
@@ -564,10 +720,12 @@ def configure_worker(config, plan, settings, state, *, deadline, clock=time.time
         return expected
     except RunnerError as error:
         if str(error) != 'SSH_VERIFICATION_COMMAND_FAILED':
+            if str(error) == 'CONFIGURATION_RECEIPT_MISMATCH':
+                error.diagnostic = {'phase': phase, 'exit_status': 0, 'timeout': False, 'classification': 'RECEIPT_MISMATCH'}
             raise
-        return {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN'}
-    except Exception:
-        return {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN'}
+        return uncertain(error)
+    except Exception as error:
+        return uncertain(error)
     finally:
         # Never unlink an unexpected replacement or a symlink.
         remove_private_bundle()
@@ -621,7 +779,8 @@ def wait_for_worker(client, *, deadline, clock=time.time, sleep=time.sleep):
 
 def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=time.sleep,
         endpoint=verified_endpoint, tunnel_factory=SSHTunnel, client_factory=WorkerClient,
-        readiness=wait_for_worker, configure=configure_worker, progress=lambda _: None):
+        readiness=wait_for_worker, configure=configure_worker, progress=lambda _: None,
+        bootstrap_diagnostics=None):
     validate_plan(config, plan)
     state.publish('binding.json', {'config_sha256': digest(config.model_dump(mode='json')), 'plan_sha256': config.plan_sha256})
     previous = state.read('result.json')
@@ -681,6 +840,8 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
         require(clock() < startup_deadline, 'WORKER_STARTUP_DEADLINE')
         secret = read_file(config.bearer_secret_file, owner=os.geteuid(), private=True, bound=513).decode().strip()
         require(32 <= len(secret) <= 512, 'WORKER_SECRET_INVALID')
+        result['stage'] = 'ssh_tunnel'
+        progress(result['stage'])
         with tunnel_factory(**settings) as tunnel:
             client = client_factory(f'http://127.0.0.1:{tunnel.local_port}', secret, timeout_seconds=5)
             result['stage'] = 'worker_readiness'
@@ -712,20 +873,47 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
             observation = collect(ledger, plan, client)
             state.publish('observations.json', observation)
             require(observation['case_results_passed'] is True, 'CALIBRATION_DID_NOT_PASS')
-            manifest = ledger.get_manifest(request['job_ids'][0])
-            require(manifest.software.container_image_digest == config.deployment.image_digest
-                    and manifest.software.probe_mcp_git_commit == config.source_commit
-                    and manifest.hardware.region == config.deployment.region
-                    and Decimal(str(manifest.hardware.live_price_usd_per_hour)) == Decimal(str(config.expected_worker_price_usd_per_hour)),
-                    'MANIFEST_PROVENANCE_MISMATCH')
+            evidence = observation['cases'][0]
+            if plan.cases[0].expected_state == 'COMPLETED':
+                manifest = ledger.get_manifest(request['job_ids'][0])
+                require(manifest.software.container_image_digest == config.deployment.image_digest
+                        and manifest.software.probe_mcp_git_commit == config.source_commit
+                        and manifest.hardware.region == config.deployment.region
+                        and Decimal(str(manifest.hardware.live_price_usd_per_hour)) == Decimal(str(config.expected_worker_price_usd_per_hour)),
+                        'MANIFEST_PROVENANCE_MISMATCH')
+                result['manifest_sha256'] = digest(manifest.model_dump(mode='json'))
+            # Failed limit cases intentionally have no success manifest. The
+            # collector requires an exact stopped worker receipt and the named
+            # limit's specific failure, in addition to the Ledger outcome.
             result.update(status='passed', stage='completed', job_id=job.job_id, attempt_id=job.attempt_id,
-                          manifest_sha256=digest(manifest.model_dump(mode='json')))
+                          case=plan.cases[0].name, observed_state=job.state.value,
+                          observed_failure_kind=job.failure_kind,
+                          worker_receipt_sha256=digest(evidence['observed_receipt']))
     except RunnerError as error:
         result['reason'] = str(error)
+        diagnostic = safe_command_diagnostic(getattr(error, 'diagnostic', None))
+        if diagnostic is not None:
+            result['transport'] = diagnostic
     except Exception as error:
         result['reason'] = 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
         result['diagnostic'] = exception_diagnostic(error)
+        diagnostic = safe_command_diagnostic(getattr(error, 'diagnostic', None))
+        if diagnostic is not None:
+            result['transport'] = diagnostic
     finally:
+        if result['status'] == 'failed' and result.get('stage') in {
+                'verified_worker_startup', 'worker_configuration', 'ssh_tunnel', 'worker_readiness'}:
+            # Diagnostics are best effort and have less priority than deletion.
+            # No query is made after the original allowance has expired.
+            if clock() + 2 < request['deadline']:
+                try:
+                    observe = bootstrap_diagnostics or provider_bootstrap_diagnostic
+                    result['bootstrap_diagnostic'] = safe_bootstrap_diagnostic(
+                        observe(backend.config, request['observed_provider_id']))
+                except Exception:
+                    result['bootstrap_diagnostic'] = {'status': 'unavailable', 'records': []}
+            else:
+                result['bootstrap_diagnostic'] = {'status': 'skipped_deadline', 'records': []}
         progress('provider_deletion')
         result['teardown'] = stop_and_observe(cloud, backend, request, sleep=sleep)
         if not result['teardown']['confirmed']:

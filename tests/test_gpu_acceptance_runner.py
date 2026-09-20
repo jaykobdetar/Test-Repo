@@ -18,20 +18,23 @@ import pytest
 from probe_core import gpu_acceptance_runner as runner
 from probe_core.audit import canonical_json
 from probe_core.controller import Controller
-from probe_core.gpu_acceptance import AcceptanceCase, AcceptancePlan
+from probe_core.gpu_acceptance import AcceptanceCase, AcceptancePlan, fixed_plan
 from probe_core.ledger import Ledger
 from probe_core.provider import DeploymentSpec, WorkerState
 from probe_core.research_api import ResearchPolicy, ResearchService
 from probe_core.schemas import ApprovalNonce, JobSpec, RunManifest
 from probe_core.worker_contracts import ExecutionReceipt
 from probe_core.worker import WorkerHTTPServer
-from probe_core.dispatcher import WorkerClient
+from probe_core.dispatcher import TransportError, WorkerClient
 from test_runpod_provider import runpod
 from test_schemas import manifest_data
 
 
 @pytest.fixture
-def setup(tmp_path, runpod, manifest_data):
+def setup(tmp_path, runpod, manifest_data, monkeypatch):
+    # Fixture providers never make real network log requests during teardown.
+    monkeypatch.setattr(runner, 'provider_bootstrap_diagnostic',
+                        lambda *_args: {'status': 'observed', 'records': []})
     backend, http, clock, deployment = runpod
     backend.config = backend.config.model_copy(update={'max_runtime_seconds': 900})
     deployment = DeploymentSpec.model_validate(dict(deployment.model_dump(),
@@ -207,6 +210,24 @@ def test_actual_v2_endpoint_shape_requires_authenticated_host_fingerprint(setup)
         assert state.read('endpoint.json')['provider_id'] == request['observed_provider_id']
 
 
+@pytest.mark.parametrize('host', ['213.192.2.71', '2606:4700:4700::1111'])
+@pytest.mark.parametrize('port', [22, 40125])
+def test_verified_known_host_matches_openssh_standard_and_nonstandard_port(setup, host, port):
+    s = setup
+    request, events, _ = endpoint_fixtures(s, host=host)
+    s.http.pods[0]['runtime']['ports'][0]['public'] = port
+    marker = host if port == 22 else f'[{host}]:{port}'
+    def command(argv):
+        return public_key(1) if argv[0].endswith('ssh-keygen') else f'{marker} {public_key(2)}\n'
+    with runner.State(s.config.trusted_state_directory) as state:
+        settings = runner.verified_endpoint(s.config, request, s.backend, state,
+                                             logs=lambda *_: events, command=command)
+        assert settings['known_hosts_file'].read_text() == f'{marker} {public_key(2)}\n'
+        found = subprocess.run(['/usr/bin/ssh-keygen', '-F', marker, '-f', str(settings['known_hosts_file'])],
+                               capture_output=True, text=True, timeout=3)
+        assert found.returncode == 0 and public_key(2) in found.stdout
+
+
 @pytest.mark.parametrize('shape', ['runtime_missing', 'runtime_null', 'ports_missing', 'ports_null', 'ports_empty'])
 def test_not_yet_published_endpoint_is_unavailable_without_ssh_or_log_reads(setup, shape):
     s = setup
@@ -349,25 +370,33 @@ class Endpoint:
         s, request = self.s, self.request
         assert request.attempt_id == attempt_id
         summary = canonical_json({'suite': 'backend_parity_v1', 'passed': True, 'scientific_evidence': False}).encode()
+        contents = {'summary.json': summary}
+        if request.spec.operation.kind == 'capture':
+            # Synthetic bytes test transport/hash retention, not tensor math.
+            contents['tensors.safetensors'] = b'synthetic captured artifact'
         data = deepcopy(s.data)
         data['run'].update(run_id=request.job_id, parent_run_id=None, started_at=s.clock().isoformat(),
             experiment_stage='calibration', hypothesis_id=None, preregistration_hash=None,
             approval_id=request.approval_id, replicator_blinded=False)
         data['model'] = request.spec.model.model_dump(mode='json')
         data['inputs'] = request.spec.inputs.model_dump(mode='json')
-        data['experiment'].update(tool='backend_parity', intervention_hash=runner.digest(request.spec.operation.model_dump(mode='json')))
+        data['experiment'].update(tool={'backend_parity': 'backend_parity', 'capture': 'capture_activation'}[request.spec.operation.kind],
+                                  intervention_hash=runner.digest(request.spec.operation.model_dump(mode='json')))
         data['results'].update(heldout=False, replication_status='not_applicable')
         data['software'].update(container_image_digest=s.config.deployment.image_digest,
             probe_mcp_git_commit=('d'*40 if self.bad_source else s.config.source_commit))
         data['hardware'].update(region=s.config.deployment.region, live_price_usd_per_hour=0.74)
-        data['cost'] = {'gpu_seconds': 0, 'estimated_compute_usd': 0.0, 'bytes_persisted': len(summary)}
-        data['artifacts'] = [{'path': 'summary.json', 'sha256': hashlib.sha256(summary).hexdigest(), 'retention_class': 'validated'}]
+        data['cost'] = {'gpu_seconds': 0, 'estimated_compute_usd': 0.0, 'bytes_persisted': sum(map(len, contents.values()))}
+        data['artifacts'] = [{'path': name, 'sha256': hashlib.sha256(body).hexdigest(), 'retention_class': 'validated'}
+                             for name, body in contents.items()]
+        self.contents = contents
         self.summary = summary
         return ExecutionReceipt(job_id=request.job_id, attempt_id=attempt_id, state='SUCCEEDED',
             started_at=s.clock(), finished_at=s.clock(), process_stopped=True, manifest=RunManifest.model_validate(data))
     def download(self, receipt, destination, *, max_bytes):
         destination.mkdir(parents=True)
-        (destination/'summary.json').write_bytes(self.summary)
+        for name, body in self.contents.items():
+            (destination/name).write_bytes(body)
         return destination
 
 
@@ -752,12 +781,72 @@ def test_configuration_transport_uncertainty_never_replays_and_removes_private_f
             raise runner.RunnerError('SSH_VERIFICATION_COMMAND_FAILED')
         first = runner.configure_worker(s.config, s.plan, settings, state, deadline=time.time()+60,
                                         command=command, owner=os.geteuid())
-        assert first == {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN'}
+        assert first == {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN',
+                         'diagnostic': {'phase': 'configure' if failure_after_upload else 'upload',
+                                        'exit_status': None, 'timeout': False, 'classification': 'COMMAND_FAILED'}}
         assert not (state.directory/'configuration-bundle.json').exists()
         count = len(calls)
         assert runner.configure_worker(s.config, s.plan, settings, state, deadline=time.time()+60,
                                         command=command, owner=os.geteuid()) == first
         assert len(calls) == count
+
+
+def test_configure_failure_persists_only_strict_diagnostic_and_never_replays(setup):
+    s = setup
+    calls = []
+    bootstrap = {'status': 'failed', 'code': 'WORKER_BOOTSTRAP_FAILED',
+                 'error_type': 'PermissionError', 'bootstrap_line': 123}
+    with runner.State(s.config.trusted_state_directory) as state:
+        settings = configure_settings(s, state)
+        def command(argv, *, timeout):
+            calls.append(argv[0])
+            if argv[0] == '/usr/bin/scp':
+                return ''
+            code = 'import sys;print(' + repr(json.dumps(bootstrap)) + ');sys.stderr.write("SYNTHETIC_PRIVATE_STDERR");sys.exit(1)'
+            return runner.command_bytes([sys.executable, '-I', '-c', code], timeout=timeout)
+        result = runner.configure_worker(s.config, s.plan, settings, state, deadline=time.time()+60,
+                                           command=command, owner=os.geteuid())
+        assert result['diagnostic'] == {'phase': 'configure', 'exit_status': 1, 'timeout': False,
+                                         'classification': 'PROCESS_EXITED', 'bootstrap': bootstrap}
+        assert result == runner.configure_worker(s.config, s.plan, settings, state, deadline=time.time()+60,
+                                                   command=command, owner=os.geteuid())
+        assert calls == ['/usr/bin/scp', '/usr/bin/ssh']
+        assert state.read('configure-failure.json') == result
+        assert not (state.directory/'configuration-bundle.json').exists()
+        for path in state.directory.glob('*.json'):
+            assert 'SYNTHETIC_PRIVATE_STDERR' not in path.read_text()
+            assert Path(s.config.bearer_secret_file).read_text() not in path.read_text()
+
+
+@pytest.mark.parametrize('log_failure', [False, True])
+def test_startup_failure_observes_safe_bootstrap_before_unconditional_deletion(setup, log_failure):
+    s = setup
+    approve_fixture(s)
+    events = []
+    class FailedTunnel(Tunnel):
+        def __enter__(self):
+            raise TransportError('SYNTHETIC_PRIVATE_FAILURE', diagnostic={
+                'phase': 'tunnel', 'exit_status': 255, 'timeout': False, 'classification': 'TUNNEL_EXITED',
+                'stderr': 'SYNTHETIC_PRIVATE_FAILURE'})
+    def observe(*_args):
+        events.append('logs')
+        if log_failure:
+            raise RuntimeError('SYNTHETIC_PRIVATE_FAILURE')
+        return {'status': 'observed', 'records': []}
+    def stop(worker):
+        events.append('delete')
+        return s.controller.stop_gpu(worker)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = runner.run(s.config, s.plan, s.ledger, s.backend, SimpleNamespace(stop_gpu=stop), state,
+            clock=lambda: s.clock().timestamp(), sleep=lambda _: None,
+            endpoint=lambda *_: {}, tunnel_factory=FailedTunnel,
+            configure=lambda *_a, **_k: {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN'},
+            bootstrap_diagnostics=observe)
+    assert events == ['logs', 'delete'] and result['teardown']['confirmed'] is True
+    assert result['stage'] == 'ssh_tunnel' and result['status'] == 'failed'
+    assert result['transport'] == {'phase': 'tunnel', 'exit_status': 255, 'timeout': False, 'classification': 'TUNNEL_EXITED'}
+    assert result['bootstrap_diagnostic'] == {'status': 'unavailable' if log_failure else 'observed', 'records': []}
+    assert 'SYNTHETIC_PRIVATE_FAILURE' not in json.dumps(result)
 
 
 def test_configuration_receipt_mismatch_is_refused_and_source_secret_removed(setup):
@@ -817,3 +906,276 @@ def test_command_output_and_runtime_are_bounded_without_exposing_stderr():
     with pytest.raises(runner.RunnerError, match='^SSH_VERIFICATION_COMMAND_FAILED$'):
         runner.command_bytes([sys.executable, '-I', '-c', 'import time;time.sleep(20)'], timeout=.1)
     assert time.monotonic()-started < 3
+
+
+def select_wait_case(s, name):
+    inputs = s.plan.cases[0].spec.inputs
+    generated = fixed_plan(s.plan.model, 'fixed-runtime-case', inputs.dataset_revision,
+                           inputs.prompt_set_hash, inputs.prompt_ids)
+    case = next(item for item in generated.cases if item.name == name)
+    s.plan = generated.model_copy(update={'cases': (case,)})
+    raw = s.plan.model_dump_json().encode()
+    Path(s.config.plan_path).write_bytes(raw)
+    s.config = s.config.model_copy(update={'plan_sha256': 'sha256:'+hashlib.sha256(raw).hexdigest()})
+    return case
+
+
+def run_case(s, client, state):
+    return runner.run(s.config, s.plan, s.ledger, s.backend,
+        SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
+        clock=lambda: s.clock().timestamp(), sleep=lambda _: None, endpoint=lambda *_: {},
+        tunnel_factory=Tunnel, client_factory=lambda *_a, **_k: client,
+        readiness=lambda *_a, **_k: None, configure=lambda *_a, **_k: {'configured': True})
+
+
+@pytest.mark.parametrize('name', ['backend-parity', 'capture-retention', 'hard-deadline', 'output-limit', 'vram-limit'])
+def test_runner_accepts_only_one_generated_wait_case_without_more_authority(setup, name):
+    s = setup
+    select_wait_case(s, name)
+    runner.validate_plan(s.config, s.plan)
+    queued = queue(s)
+    request = runner.find_request(s.ledger, s.config, s.plan)
+    assert request['job_ids'] == [queued['job_id']]
+    assert request['max_runtime_seconds'] == 900 and request['action'] == 'CREATE'
+    assert queued['approval_consumed_by_runner'] is False and s.http.purchases == []
+
+
+@pytest.mark.parametrize('name', ['cancel-running', 'supervisor-restart'])
+def test_runner_still_refuses_action_cases(setup, name):
+    s = setup
+    select_wait_case(s, name)
+    with pytest.raises(runner.RunnerError, match='FIXED_WAIT_CASE_REQUIRED'):
+        queue(s)
+    assert s.ledger.list_jobs() == [] and s.http.purchases == []
+
+
+@pytest.mark.parametrize('path,value', [
+    (('expected_state',), 'COMPLETED'),
+    (('expected_failure_kind',), 'oom'),
+    (('spec', 'idempotency_key'), 'arbitrary-job'),
+    (('spec', 'operation', 'modules', 0, 'layer'), 15),
+    (('spec', 'limits', 'max_output_bytes'), 2),
+    (('spec', 'limits', 'max_runtime_seconds'), 240),
+    (('spec', 'inputs', 'random_seed'), 999),
+    (('spec', 'inputs', 'generation', 'max_new_tokens'), 8),
+])
+def test_mutated_fixed_case_is_refused_before_submission(setup, path, value):
+    s = setup
+    select_wait_case(s, 'output-limit')
+    data = s.plan.model_dump(mode='json')
+    target = data['cases'][0]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    s.plan = AcceptancePlan.model_validate(data)
+    with pytest.raises(runner.RunnerError, match='FIXED_WAIT_CASE_REQUIRED'):
+        queue(s)
+    assert s.ledger.list_jobs() == [] and s.http.purchases == []
+
+
+def test_multiple_generated_wait_cases_still_refused(setup):
+    s = setup
+    case = select_wait_case(s, 'capture-retention')
+    s.plan = s.plan.model_copy(update={'cases': (case, case)})
+    with pytest.raises(runner.RunnerError, match='SINGLE_CALIBRATION_CASE_REQUIRED'):
+        queue(s)
+    assert s.ledger.list_jobs() == [] and s.http.purchases == []
+
+
+class LimitEndpoint(Endpoint):
+    def __init__(self, s, kind, code, *, observed_changes=None):
+        super().__init__(s)
+        self.kind, self.code, self.observed_changes = kind, code, observed_changes or {}
+        self.queries = 0
+
+    def status(self, attempt_id):
+        self.queries += 1
+        request = self.request
+        assert attempt_id == request.attempt_id
+        values = dict(job_id=request.job_id, attempt_id=attempt_id, state='FAILED',
+            started_at=self.s.clock(), finished_at=self.s.clock(), process_stopped=True,
+            failure_kind=self.kind, error_code=self.code)
+        if self.queries > 1:
+            values.update(self.observed_changes)
+        return ExecutionReceipt(**values)
+
+    def download(self, *_args, **_kwargs):
+        raise AssertionError('a failed limit case has no successful artifact download')
+
+
+@pytest.mark.parametrize('name,kind,code', [
+    ('hard-deadline', 'timeout', 'ExecutionDeadlineExceeded'),
+    ('output-limit', 'policy', 'OutputLimitExceeded'),
+    ('vram-limit', 'oom', 'OutOfMemoryError'),
+])
+def test_exact_limit_failure_passes_with_stopped_receipt_and_no_manifest(setup, monkeypatch, name, kind, code):
+    s = setup
+    select_wait_case(s, name)
+    request = approve_fixture(s)
+    client = LimitEndpoint(s, kind, code)
+    def no_manifest(*_args):
+        raise AssertionError('failed limit cases cannot require a success manifest')
+    monkeypatch.setattr(s.ledger, 'get_manifest', no_manifest)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_case(s, client, state)
+        assert result['status'] == 'passed', result
+        observation = state.read('observations.json')['cases'][0]
+        assert observation['observed_receipt']['error_code'] == code
+        assert result['worker_receipt_sha256'] == runner.digest(observation['observed_receipt'])
+        assert run_case(s, client, state) == result
+    assert result['observed_state'] == 'FAILED' and result['observed_failure_kind'] == kind
+    assert result['case'] == name and 'manifest_sha256' not in result
+    assert result['teardown']['confirmed'] is True and result['scientific_evidence'] is False
+    assert client.posts == 1 and client.queries == 2 and len(s.http.purchases) == 1
+    assert s.backend.status(request['worker_id']).state == WorkerState.ABSENT
+
+
+def test_hard_deadline_accepts_real_ledger_expiry_and_exact_stopped_worker_code(setup):
+    s = setup
+    select_wait_case(s, 'hard-deadline')
+    request = approve_fixture(s)
+    start = s.clock()
+    class DelayedTimeoutEndpoint(LimitEndpoint):
+        def status(self, attempt_id):
+            if self.queries == 0:
+                s.clock.advance(2)
+            return super().status(attempt_id).model_copy(update={'started_at': start})
+    client = DelayedTimeoutEndpoint(s, 'timeout', 'ExecutionDeadlineExceeded')
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_case(s, client, state)
+        observation = state.read('observations.json')['cases'][0]
+    job = s.ledger.get_job(request['job_ids'][0])
+    assert job.failure_kind == 'timeout' and job.failure_reason == 'execution deadline elapsed'
+    assert (s.clock() - start).total_seconds() == 2
+    assert observation['observed_receipt']['error_code'] == 'ExecutionDeadlineExceeded'
+    assert observation['process_stopped_at'] is not None
+    assert result['status'] == 'passed' and result['teardown']['confirmed'] is True
+    assert client.posts == 1 and client.queries == 2 and len(s.http.purchases) == 1
+
+
+def test_hard_deadline_still_rejects_different_recorded_timeout_reason(setup):
+    s = setup
+    select_wait_case(s, 'hard-deadline')
+    request = approve_fixture(s)
+    client = LimitEndpoint(s, 'timeout', 'UnrelatedTimeout',
+                           observed_changes={'error_code': 'ExecutionDeadlineExceeded'})
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_case(s, client, state)
+        observation = state.read('observations.json')['cases'][0]
+    assert s.ledger.get_job(request['job_ids'][0]).failure_reason == 'UnrelatedTimeout'
+    assert observation['reason'] == 'worker failure code differs from the recorded terminal outcome'
+    assert result['status'] == 'failed' and result['reason'] == 'CALIBRATION_DID_NOT_PASS'
+    assert result['teardown']['confirmed'] is True
+
+
+@pytest.mark.parametrize('name,kind,code', [
+    ('hard-deadline', 'timeout', 'CPUTimeLimitExceeded'),
+    ('hard-deadline', 'timeout', 'TimeoutError'),
+    ('output-limit', 'policy', 'WorkerRequestError'),
+    ('output-limit', 'policy', 'InputStagingFailed'),
+    ('output-limit', 'infrastructure', 'ProcessExitedWithoutResult'),
+    ('vram-limit', 'oom', 'RAMLimitExceeded'),
+    ('vram-limit', 'oom', 'MemoryError'),
+])
+def test_unrelated_failure_cannot_pass_named_limit(setup, name, kind, code):
+    s = setup
+    select_wait_case(s, name)
+    approve_fixture(s)
+    client = LimitEndpoint(s, kind, code)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_case(s, client, state)
+    assert result['status'] == 'failed' and result['reason'] == 'CALIBRATION_DID_NOT_PASS'
+    assert result['teardown']['confirmed'] is True and client.posts == 1
+    assert len(s.http.purchases) == 1
+
+
+@pytest.mark.parametrize('changes', [
+    {'job_id': 'different-job'}, {'attempt_id': 'different-attempt'},
+    {'process_stopped': False}, {'failure_kind': 'timeout'}, {'error_code': 'WorkerRequestError'},
+    {'state': 'CANCELLED', 'failure_kind': 'policy'},
+])
+def test_limit_result_requires_matching_live_worker_receipt(setup, changes):
+    s = setup
+    select_wait_case(s, 'output-limit')
+    request = approve_fixture(s)
+    client = LimitEndpoint(s, 'policy', 'OutputLimitExceeded', observed_changes=changes)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_case(s, client, state)
+    # The dispatcher persisted a correct failure first; the independent final
+    # read must still match the exact attempt, outcome and positive stop proof.
+    assert s.ledger.get_job(request['job_ids'][0]).failure_kind == 'policy'
+    assert result['status'] == 'failed' and result['reason'] == 'CALIBRATION_DID_NOT_PASS'
+    assert result['teardown']['confirmed'] is True and client.queries == 2
+
+
+def test_limit_ledger_state_without_worker_receipt_is_inconclusive(setup):
+    s = setup
+    select_wait_case(s, 'output-limit')
+    approve_fixture(s)
+    client = LimitEndpoint(s, 'policy', 'OutputLimitExceeded')
+    with runner.State(s.config.trusted_state_directory) as state:
+        assert run_case(s, client, state)['status'] == 'passed'
+    observation = runner.collect(s.ledger, s.plan)
+    assert observation['case_results_passed'] is False
+    assert 'actual worker receipt' in observation['cases'][0]['reason']
+
+
+@pytest.mark.parametrize('recorded_code', ['WorkerRequestError', 'execution deadline elapsed'])
+def test_changed_final_failure_code_cannot_reclassify_recorded_policy_error(setup, recorded_code):
+    s = setup
+    select_wait_case(s, 'output-limit')
+    request = approve_fixture(s)
+    client = LimitEndpoint(s, 'policy', recorded_code,
+                           observed_changes={'error_code': 'OutputLimitExceeded'})
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_case(s, client, state)
+        observation = state.read('observations.json')['cases'][0]
+    assert s.ledger.get_job(request['job_ids'][0]).failure_reason == recorded_code
+    assert observation['observed_receipt']['error_code'] == 'OutputLimitExceeded'
+    assert observation['reason'] == 'worker failure code differs from the recorded terminal outcome'
+    assert result['status'] == 'failed' and result['reason'] == 'CALIBRATION_DID_NOT_PASS'
+    assert result['teardown']['confirmed'] is True
+
+
+def test_capture_summary_without_captured_tensor_cannot_pass_retention(setup):
+    s = setup
+    select_wait_case(s, 'capture-retention')
+    approve_fixture(s)
+    class MissingTensorEndpoint(Endpoint):
+        def status(self, attempt_id):
+            receipt = super().status(attempt_id)
+            del self.contents['tensors.safetensors']
+            manifest = receipt.manifest.model_copy(update={
+                'artifacts': tuple(item for item in receipt.manifest.artifacts if item.path == 'summary.json'),
+                'cost': receipt.manifest.cost.model_copy(update={'bytes_persisted': len(self.summary)})})
+            return receipt.model_copy(update={'manifest': manifest})
+    client = MissingTensorEndpoint(s)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_case(s, client, state)
+        assert result['status'] == 'failed' and result['reason'] == 'CALIBRATION_DID_NOT_PASS'
+        assert state.read('observations.json')['cases'][0]['reason'] == 'captured tensor artifact is absent'
+    assert result['teardown']['confirmed'] is True and client.posts == 1
+
+
+@pytest.mark.parametrize('corrupt', [False, True])
+def test_capture_case_retains_tensor_bytes_with_manifest_provenance(setup, corrupt):
+    s = setup
+    select_wait_case(s, 'capture-retention')
+    request = approve_fixture(s)
+    class CaptureEndpoint(Endpoint):
+        def download(self, *args, **kwargs):
+            directory = super().download(*args, **kwargs)
+            if corrupt:
+                (directory/'tensors.safetensors').write_bytes(b'changed in transport')
+            return directory
+    client = CaptureEndpoint(s)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = run_case(s, client, state)
+        assert result['status'] == ('failed' if corrupt else 'passed'), result
+        if not corrupt:
+            observation = state.read('observations.json')['cases'][0]
+            tensor = next(item for item in observation['retained_artifacts'] if item['path'] == 'tensors.safetensors')
+            assert tensor['sha256'] == 'sha256:'+hashlib.sha256(client.contents['tensors.safetensors']).hexdigest()
+            assert result['manifest_sha256'] == runner.digest(observation['manifest'])
+            assert s.ledger.get_job(request['job_ids'][0]).state == 'COMPLETED'
+    assert result['teardown']['confirmed'] is True and client.posts == 1 and len(s.http.purchases) == 1

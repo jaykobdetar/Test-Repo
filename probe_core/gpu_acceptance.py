@@ -34,6 +34,15 @@ class AcceptancePlan(FrozenModel):
     scientific_evidence: Literal[False] = False
 
 
+# A generic policy error or host RAM exhaustion does not prove the named limit.
+# These are the existing worker's specific, stopped terminal outcomes.
+LIMIT_FAILURE_CODES = {
+    "hard-deadline": frozenset({"ExecutionDeadlineExceeded"}),
+    "output-limit": frozenset({"OutputLimitExceeded"}),
+    "vram-limit": frozenset({"OutOfMemoryError"}),
+}
+
+
 def make_plan(config: WorkerConfig, label: str) -> AcceptancePlan:
     if config.device != "cuda:0" or config.model.dtype != "bfloat16" or config.model.repo == "probe/testing-tiny-qwen3":
         raise ValueError("live acceptance requires a canonical unquantized BF16/CUDA worker configuration")
@@ -45,8 +54,19 @@ def make_plan(config: WorkerConfig, label: str) -> AcceptancePlan:
     prompt_ids = tuple(prompt.prompt_id for prompt in dataset.prompts[:2])
     if len(prompt_ids) < 2:
         raise ValueError("acceptance requires two distinct prompts to exercise padding")
-    base = {"experiment_stage": "calibration", "model": config.model.model_dump(mode="json"),
-            "inputs": {"dataset_revision": asset.sha256, "prompt_set_hash": prompt_set_hash(dataset, prompt_ids),
+    return fixed_plan(config.model, label, asset.sha256, prompt_set_hash(dataset, prompt_ids), prompt_ids)
+
+
+def fixed_plan(model: ModelIdentity, label: str, dataset_revision: str,
+               prompts_sha256: str, prompt_ids: tuple[str, ...]) -> AcceptancePlan:
+    """The fixed case vocabulary, shared by preparation and runner validation.
+
+    Dataset bytes are verified by ``make_plan`` and the pinned worker. This pure
+    constructor lets the controller check a case without loading model assets.
+    It does not submit jobs or grant execution authority.
+    """
+    base = {"experiment_stage": "calibration", "model": model.model_dump(mode="json"),
+            "inputs": {"dataset_revision": dataset_revision, "prompt_set_hash": prompts_sha256,
                        "prompt_ids": prompt_ids, "random_seed": 123, "generation": {"temperature": 0.0, "max_new_tokens": 4}},
             "operation": {"kind": "capture", "modules": [{"layer": 14, "component": "residual"}], "positions": ["last"]},
             "limits": {"max_runtime_seconds": 120, "max_output_bytes": 32*1024**2, "max_cpu_cores": 4,
@@ -66,7 +86,7 @@ def make_plan(config: WorkerConfig, label: str) -> AcceptancePlan:
                       operation=operation or base["operation"], limits=dict(base["limits"], **limits))
         cases.append(AcceptanceCase(name=name, action=action, expected_state=state,
                                     expected_failure_kind=kind, spec=JobSpec.model_validate(values)))
-    return AcceptancePlan(label=label, model=config.model, cases=cases)
+    return AcceptancePlan(label=label, model=model, cases=cases)
 
 
 def submit(ledger: Ledger, plan: AcceptancePlan):
@@ -99,10 +119,10 @@ def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = 
         if job.state.value != case.expected_state or job.failure_kind != case.expected_failure_kind or stopped is None:
             row["reason"] = "expected terminal state and positive stop evidence are absent"
             continue
-        if cancellation_case and client is None:
-            # Ledger cancellation and stopped_at do not preserve the worker's
-            # outcome: the worker may have completed before cancellation arrived.
-            row["reason"] = "cancellation observation is inconclusive without an actual worker receipt"
+        if case.expected_state == "FAILED" and client is None:
+            # Local failure and stopped_at alone do not preserve the worker's
+            # outcome: its actual failure may differ, or it may have succeeded.
+            row["reason"] = "failure observation is inconclusive without an actual worker receipt"
             continue
         if client is not None:
             try:
@@ -119,12 +139,31 @@ def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = 
                     row["reason"] = "worker receipt does not confirm cancellation of the exact attempt"
                     continue
                 row["cancellation_observation"] = "confirmed"
+            elif receipt.state != (WorkerState.SUCCEEDED if case.expected_state == "COMPLETED" else WorkerState.FAILED) or receipt.failure_kind != case.expected_failure_kind:
+                row["reason"] = "worker receipt does not confirm the expected terminal outcome"
+                continue
+            if case.name in LIMIT_FAILURE_CODES:
+                if receipt.error_code not in LIMIT_FAILURE_CODES[case.name]:
+                    row["reason"] = "worker receipt does not confirm the specific resource limit"
+                    continue
+                # Dispatcher recovers an expired lease before persisting the
+                # receipt. The one-second case's lease ends at its execution
+                # deadline, so its authoritative local reason can be derived
+                # from that deadline rather than copied from the worker.
+                local_deadline = (case.name == "hard-deadline"
+                                  and job.failure_reason == "execution deadline elapsed")
+                if job.failure_reason != receipt.error_code and not local_deadline:
+                    row["reason"] = "worker failure code differs from the recorded terminal outcome"
+                    continue
         if job.state.value == "COMPLETED":
             manifest = ledger.get_manifest(job.job_id)
             if manifest.model != plan.model or manifest.hardware.provider_backend != "runpod" or manifest.hardware.gpu_count != 1 or manifest.software.container_image_digest is None:
                 row["reason"] = "canonical GPU/container provenance is absent"
                 continue
             directory = ledger.get_artifact_root(job.job_id)
+            if case.name == "capture-retention" and "tensors.safetensors" not in {item.path for item in manifest.artifacts}:
+                row["reason"] = "captured tensor artifact is absent"
+                continue
             row["retained_artifacts"] = [{"path": item.path, "sha256": sha256_file(directory/item.path)} for item in manifest.artifacts]
             if any(item["sha256"] != "sha256:"+expected.sha256 for item, expected in zip(row["retained_artifacts"], manifest.artifacts)):
                 row["reason"] = "retained artifact bytes changed"

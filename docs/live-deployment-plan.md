@@ -4,7 +4,7 @@ This is a deployment plan and acceptance checklist, not a claim that production
 deployment has passed. The local implementation and the live provider must be
 validated separately.
 
-## Verified local deployment
+## Verified local deployment history
 
 On September 19, 2026, the Ubuntu controller installation completed local acceptance:
 
@@ -22,9 +22,11 @@ On September 19, 2026, the Ubuntu controller installation completed local accept
 - The installed backup identity uploaded a snapshot to Drive, downloaded it,
   verified its hashes and restored it offline. The daily backup timer is active.
 
-The accepted application wheel is from `e6bfc71`, with the reviewed research
-startup command correction. Later dispatcher tunnel recovery and deployment
-renderer changes are committed but still need packaging for GPU service setup.
+The initial accepted application wheel was from `e6bfc71`, with the reviewed
+research startup command correction. Later reviewed upgrades added the installed
+calibration runner, bounded image cold starts and revised backup transport. Each
+installation must retain its own wheel, source identity and acceptance receipts;
+the historical results below do not certify a later release.
 The verified pre-upgrade snapshots contain initial controller/provider state
 rather than scientific results. The subsequent paid diagnostic is recorded below. These
 local checks do not establish live CUDA, provider shutdown or unattended readiness.
@@ -42,10 +44,15 @@ failed the worker resource-control prerequisite. The report was retained
 privately, the test resources were removed, and the controller closed the run.
 No persistent storage was purchased and no model inference ran.
 
-Next, establish supported resource-control delegation for the worker identity
-and repeat the bounded prerequisite test before buying persistent storage or
-running model acceptance. This diagnostic does not establish shutdown during
-controller host loss or unattended readiness.
+Subsequent bounded tests established real resource-control enforcement on one
+compatible RunPod host. Every newly assigned host must pass the same worker
+identity and containment gates before inference. This evidence does not establish
+shutdown during controller host loss or unattended readiness. Four full-worker
+calibrations stopped before inference. Image cold-start handling and clean
+environments are installed. The latest Pod loaded its image and its SSH host key
+was verified, but configuration and the authenticated tunnel failed before a
+job was dispatched. Provider deletion was confirmed. Transport diagnostics are
+being improved before another bounded calibration.
 
 ## Selected setup
 
@@ -54,19 +61,26 @@ controller host loss or unattended readiness.
 | Controller | The operator's Ubuntu machine; local SQLite and retained artifacts | Avoid another server and hosting bill for the first deployment. The machine must stay on during supervised GPU runs. |
 | Transport | Authenticated HTTP bound to loopback through an SSH tunnel with a pinned host key | Fits a single controller and worker without exposing a research API publicly. |
 | GPU | One Secure Cloud RTX 4090, subject to a fresh price and capacity check | 24 GB is sufficient for the two 1.7B models loaded separately and short, bounded calibration jobs. |
-| Data center | Revalidate before storage creation | Availability changes; no persistent location has been purchased. |
-| Persistent GPU storage | One 100 GB Standard network volume | Keeps model assets and outputs across replacement Pods without overallocating storage. |
+| Data center | Revalidate before every Pod creation | Capacity and compatible driver availability change; bind the chosen location to that run. |
+| GPU storage | Disposable Pod disk with immutable public assets baked into the worker image; no network volume | This later operator-approved choice avoids persistent GPU storage. Fetch, verify and seal outputs on the controller before declaring success. |
 | Backup | A private Google Drive folder with a separate background uploader identity | A copy remains outside both RunPod and the controller machine. Each upload must be downloaded and verified. |
 | Model inputs | Both canonical Qwen3-1.7B checkpoints, with exact revisions and file hashes | Preserve the distinction between Base and the released post-trained model. |
 | Agent API spending | No autonomous paid agent API configured in this deployment stage | Scientific-agent orchestration is a later milestone; its budget must be approved separately. |
 
 The observed GPU catalog rate was $0.74/hour. This is an observation, not a price
-promise or an authorization to launch. The controller must refresh the quote and
-enforce the approved ceiling at purchase. RunPod lists Standard network storage
-below 1 TB at $0.07/GB/month, or $7/month for 100 GB (about $0.23/day). Retained Pod
-disks, other volumes, backup charges, and controller charges also belong in the
-idle cost calculation. Local electricity and an existing subscription are not
-measured by the provider API. See [RunPod pricing](https://www.runpod.io/pricing).
+promise. The controller refreshes the quote and enforces the approved ceiling
+before creation. The operator has authorized this project's bounded GPU tests
+under a cumulative $20 ceiling; reserve each run's maximum cost before approving
+it, and keep shutdown/storage uncertainty within that total. Do not request a
+new human approval for a test already covered by that authorization.
+
+The initial 100 GB network-volume proposal is superseded by disposable research
+Pods. The temporary empty 20 GB test volume was deleted. No model download occurs
+inside a scientific job. Replacement uses the same immutable worker image and
+rechecks model hashes and previously retained controller artifacts before a fresh
+bounded parity run. Pod loss makes any uncollected output failed or inconclusive;
+it cannot silently replay the old job or approval. Backups remain independent
+of both the Pod and controller through verified Google Drive copies.
 
 ## Required evidence, in order
 
@@ -84,14 +98,18 @@ measured by the provider API. See [RunPod pricing](https://www.runpod.io/pricing
    file hash, and restore into a separate private directory. Expired backup
    authentication must produce a visible failure.
 4. **Pinned worker and assets.** Build the worker image, resolve its immutable
-   registry digest, download only the selected safe model assets, and verify
-   their pinned hashes on the persistent volume. No model download occurs in a
+   registry digest, bake only the selected safe public model assets, and verify
+   their pinned hashes as the actual worker inside the deployed image. Preserve
+   separate Base and posttrained identities. No model download occurs in a
    scientific job.
 5. **Canonical GPU acceptance.** For each real model, run BF16/CUDA reference,
    native-hook, and NNsight parity; fixed interventions; cancellation; enforced
    resource limits; artifact transfer; tunnel recovery; provider stop; and
-   replacement using the same volume. Every numerical operation belongs in the
-   approved job batch. Retain reports and actual provider readbacks.
+   replacement using the same immutable image, verified model hashes and retained
+   controller-artifact hashes. Every numerical operation belongs in its exact
+   approved job batch. Use separate short allowances when the full case set and
+   startup/collection/deletion reserve cannot fit one allowance. Retain reports
+   and actual provider readbacks.
 
 ## Conditions that prevent unattended operation
 

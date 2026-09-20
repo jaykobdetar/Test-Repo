@@ -80,14 +80,15 @@ def inputs(path, pin, *, owner=0):
     body = decoded(raw)
     fields = {'schema_version', 'original_manifest_sha256', 'previous_upgrade', 'target_upgrade',
               'previous_activation_manifest_sha256', 'failed', 'retry_id', 'files'}
-    require(type(body.get('schema_version')) is int and body['schema_version'] in {1, 2, 3}, 'MANIFEST_SCHEMA')
+    require(type(body.get('schema_version')) is int and body['schema_version'] in {1, 2, 3, 4}, 'MANIFEST_SCHEMA')
     if body['schema_version'] >= 2:
         fields |= {'previous_retry_manifest_sha256', 'previous_retry_record_sha256', 'expected_failure_reason'}
-        failures = {'REQUEST_CHANGED'} if body['schema_version'] == 3 else FAILURES-{'REQUEST_CHANGED'}
+        failures = ({'ACCEPTANCE_RUNTIME_UNAVAILABLE'} if body['schema_version'] == 4 else
+                    {'REQUEST_CHANGED'} if body['schema_version'] == 3 else FAILURES-{'REQUEST_CHANGED'})
         require(all(type(body.get(name)) is str and HEX.fullmatch(body[name]) for name in
                     ('previous_retry_manifest_sha256', 'previous_retry_record_sha256'))
                 and body.get('expected_failure_reason') in failures, 'PREVIOUS_RETRY_PIN_INVALID')
-    if body['schema_version'] == 3:
+    if body['schema_version'] >= 3:
         fields.add('failed_result_canonical_sha256')
         require(type(body.get('failed_result_canonical_sha256')) is str
                 and HEX.fullmatch(body['failed_result_canonical_sha256']), 'FAILED_RESULT_PIN_INVALID')
@@ -117,7 +118,7 @@ def helper(raw, name):
 
 
 def validate_replacement(old, new, retry_id, *, schema_version=1):
-    require(schema_version in {1, 2, 3}, 'MANIFEST_SCHEMA')
+    require(schema_version in {1, 2, 3, 4}, 'MANIFEST_SCHEMA')
     old_plan, plan = decoded(old['plan.json']), decoded(new['plan.json'])
     require(plan['label'] != old_plan['label'] and len(plan['cases']) == len(old_plan['cases']) == 1,
             'FRESH_PLAN_REQUIRED')
@@ -132,15 +133,17 @@ def validate_replacement(old, new, retry_id, *, schema_version=1):
     expected = dict(before, plan_path=str(public/'plan.json'), plan_sha256='sha256:'+digest(new['plan.json']),
                     submission_state_directory=str(SUBMIT/('retry-'+retry_id)),
                     trusted_state_directory=str(STATE/('retry-'+retry_id)))
-    if schema_version == 3:
+    if schema_version >= 3:
         from probe_core.worker_contracts import WorkerConfig
-        worker_before, worker_after = decoded(old['worker.json']), decoded(new['worker.json'])
+        worker_before = decoded(old['worker.json'])
         WorkerConfig.model_validate(worker_before)
-        checked = WorkerConfig.model_validate(worker_after)
         require(before['worker_config_sha256'] == 'sha256:'+digest(old['worker.json'])
                 and worker_before['code_git_commit'] == before['source_commit']
                 and worker_before['container_image_digest'] == before['deployment']['image_digest'],
                 'PREVIOUS_WORKER_BINDING_CHANGED')
+    if schema_version == 3:
+        worker_after = decoded(new['worker.json'])
+        checked = WorkerConfig.model_validate(worker_after)
         compare_worker = dict(worker_after, code_git_commit=worker_before['code_git_commit'],
                               container_image_digest=worker_before['container_image_digest'])
         require(compare_worker == worker_before, 'WORKER_SCOPE_CHANGED')
@@ -202,7 +205,7 @@ print(json.dumps(result,sort_keys=True))
 
 
 def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, cancelled=False,
-                    expected_failure_reason='ACCEPTANCE_RUNTIME_UNAVAILABLE'):
+                    expected_failure_reason='ACCEPTANCE_RUNTIME_UNAVAILABLE', schema_version=1):
     from probe_core.schemas import JobSpec
     require(all(snapshot.get(name) == 0 for name in ('other_unfinished_jobs', 'unconfirmed_attempts', 'open_approvals')),
             'OTHER_AUTHORITY_OR_WORK_PRESENT')
@@ -227,8 +230,15 @@ def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, can
             and intent['provider_id'] == failed['provider_id'] and intent['provider_seen'] == 1
             and intent['configuration_hash'] == request['configuration_hash']
             and snapshot['provider_absent'] is True and snapshot['pods'] == 0, 'PROVIDER_DELETION_UNCONFIRMED')
+    require(schema_version in {1, 2, 3, 4}, 'MANIFEST_SCHEMA')
+    if schema_version == 4:
+        require(expected_failure_reason == 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
+                and result.get('configuration') == {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN'}
+                and result.get('diagnostic') == {'exception_type': 'TransportError', 'location': 'gpu_acceptance_runner.py:684'},
+                'FAILED_CONFIGURATION_RESULT_CHANGED')
+    expected_stage = 'worker_configuration' if schema_version == 4 else 'verified_worker_startup'
     require(expected_failure_reason in FAILURES and result.get('status') == 'failed'
-            and result.get('stage') == 'verified_worker_startup' and result.get('reason') == expected_failure_reason
+            and result.get('stage') == expected_stage and result.get('reason') == expected_failure_reason
             and all(result.get(key) == failed[key] for key in ('request_id', 'worker_id', 'provider_id'))
             and result.get('teardown') == {'provider_id': failed['provider_id'], 'state': 'ABSENT', 'confirmed': True}
             and result.get('approval_consumed_by_runner') is False, 'FAILED_RESULT_CHANGED')
@@ -320,7 +330,7 @@ class Recovery:
                 and previous.get('previous_activation_manifest_sha256') == current['previous_activation_manifest_sha256']
                 and previous.get('target_upgrade') == current['previous_upgrade']
                 and previous.get('retry_id') != current['retry_id'], 'PREVIOUS_RETRY_CHAIN_CHANGED')
-        if previous['schema_version'] == 2:
+        if previous['schema_version'] >= 2:
             original_raw = read(capsule/'manifest-original.json')
             require(digest(original_raw) == previous_pin and decoded(original_raw) == previous,
                     'PREVIOUS_RETRY_ORIGINAL_CHANGED')
@@ -338,11 +348,15 @@ class Recovery:
         require(closed.get('status') == 'closed' and closed.get('manifest_sha256') == previous_pin
                 and closed.get('original_job_cancelled') is True and closed.get('attempts_created') is False
                 and closed.get('approval_issued') is False, 'PREVIOUS_RETRY_CLOSE_MISSING')
-        old = {name: read(capsule/name) for name in ('plan.json', 'acceptance.json', *CALIBRATION)}
+        names = ('plan.json', 'acceptance.json', *CALIBRATION)
+        if previous['schema_version'] == 3:
+            names += ('worker.json',)
+        old = {name: read(capsule/name) for name in names}
         require(all(digest(value) == previous['files'][name] for name, value in old.items()), 'PREVIOUS_RETRY_INPUT_CHANGED')
         earlier = self.previous_inputs(original, manifest=previous)
         validate_replacement(earlier, old, previous['retry_id'], schema_version=previous['schema_version'])
-        old['worker.json'] = earlier['worker.json']
+        if previous['schema_version'] != 3:
+            old['worker.json'] = earlier['worker.json']
         return old
 
     def unit_state(self, name):
@@ -351,7 +365,7 @@ class Recovery:
         return dict(line.split('=', 1) for line in raw.decode().splitlines())
 
     def verify_result_pin(self):
-        if self.m.get('schema_version') == 3:
+        if self.m.get('schema_version', 1) >= 3:
             # Pin canonical parsed JSON plus newline, not the file's formatting.
             require(digest(encoded(self.result)) == self.m['failed_result_canonical_sha256'], 'FAILED_RESULT_PIN_CHANGED')
 
@@ -364,7 +378,8 @@ class Recovery:
     def verify_failure(self, snapshot, *, cancelled=False):
         self.verify_result_pin()
         validate_failed(snapshot, self.m['failed'], decoded(self.old['plan.json']), self.result, self.bound, self.submitted,
-                        cancelled=cancelled, expected_failure_reason=self.m.get('expected_failure_reason', 'ACCEPTANCE_RUNTIME_UNAVAILABLE'))
+                        cancelled=cancelled, expected_failure_reason=self.m.get('expected_failure_reason', 'ACCEPTANCE_RUNTIME_UNAVAILABLE'),
+                        schema_version=self.m.get('schema_version', 1))
 
     def close_failed(self):
         self.stage = 'close_failed'
