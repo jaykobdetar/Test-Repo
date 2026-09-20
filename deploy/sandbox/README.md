@@ -1,6 +1,10 @@
-# Rootless CPU experiment sandbox
+# Auto Interpretability Lab: Rootless CPU sandbox
 
-This is an execution layer for arbitrary researcher Python. Enable the
+[Project overview](../../README.md) · [Validation status](../../docs/validation.md) · [Host installation](../../docs/host-installation.md)
+
+This is Auto Interpretability Lab's execution layer for arbitrary researcher
+Python on CPU. It is separate from the fixed-operation GPU worker; success here
+does not establish canonical GPU acceptance. Enable the
 researcher-facing executor only after the mandatory real containment gate below
 passes on its actual controller host with its exact pinned image and policy.
 
@@ -29,7 +33,7 @@ Keep the experiment restrictions on the actual container and rerun the gate
 under the exact deployed launcher identity and service policy.
 
 The `systemd` cgroup manager does require the trusted account's **user session
-bus**, including for container removal. During Phase 6 host preparation, enable
+bus**, including for container removal. During controller host preparation, enable
 the dedicated `probe-trusted` user's manager with `loginctl enable-linger
 probe-trusted` and ensure `user@<actual-uid>.service` is running before starting
 the research service. These are administrator setup actions on the dedicated
@@ -151,7 +155,13 @@ with surviving processes. Explicit cleanup happens only after the observation
 has passed or failed; it cannot supply evidence for a passing result. Run this
 gate under the actual installed service profile after a launcher change.
 
-## Verified environment and image
+## Installed acceptance and earlier test history
+
+The dedicated installed service passed all 16 acceptance checks on September 20,
+2026, including the launcher-crash cleanup gate. Its exact image remains pinned
+below. The [validation status](../../docs/validation.md) identifies the installed
+controller release. The earlier local runs in this section explain how the
+runtime was qualified; their overlapping counts must not be added together.
 
 The mandatory real gate passed on 2026-09-19: **eight real rootless-container
 checks passed**, including offline scientific analysis. The full run had 35

@@ -1,4 +1,11 @@
-# Verified Google Drive research backups
+# Auto Interpretability Lab: Verified Google Drive backups
+
+[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+
+This is Auto Interpretability Lab's backup and restore contract. The installed
+backup identity has completed upload, full readback and offline restore checks.
+Those snapshots preserve controller history; they do not imply a successful GPU
+result. Keep the current receipt with the installed release record.
 
 Choose an owner-only Google Drive folder and pin its folder ID in the private
 deployment configuration. The public repository contains no operator folder ID

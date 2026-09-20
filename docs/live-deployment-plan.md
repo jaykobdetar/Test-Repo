@@ -1,68 +1,64 @@
-# First live deployment
+# Auto Interpretability Lab: Live deployment checklist
 
-This is a deployment plan and acceptance checklist, not a claim that production
-deployment has passed. The local implementation and the live provider must be
-validated separately.
+[Project overview](../README.md) · [Validation status](validation.md) · [GPU procedure](gpu-deployment.md)
 
-## Verified local deployment history
+This is the deployment branch's status and remaining acceptance checklist,
+updated September 20, 2026. The branch is based on published source `7e01602`;
+the original main-branch foundation is smaller. A checked-in implementation or
+prepared plan does not count as a passed deployment gate.
 
-On September 19, 2026, the Ubuntu controller installation completed local acceptance:
+## Current status and next gate
 
-- The installed CPU service passed all 16 containment, attestation, resource-limit
-  and cleanup checks. The crash test killed both launchers before their host
-  timer could act, then observed independent process termination and removal.
-- All 26 checks of the actual installed identities passed, including denied
-  credential/admin access, allowed research status/discovery, and their audit
-  records. The research socket directory's group is assigned in the same startup
-  command that execs Python; a separate pre-start assignment was being reset by
-  systemd before the service could accept research clients.
-- Controller, research facade, independent watchdog and provider stop broker
-  were enabled and running, with no upgrade guard overrides. The human
-  administrative socket returned no compute requests.
-- The installed backup identity uploaded a snapshot to Drive, downloaded it,
-  verified its hashes and restored it offline. The daily backup timer is active.
+The installed controller is source `8a5486b`, wheel
+`c2fd62bfec0fbbb90dc556e34dac88d6969a59b5dfefb0846f31d0b691a6ee38`.
+Its 34 application files matched the package. The actual service environment
+passed all 16 CPU containment/cleanup checks, all 26 identity checks, and Drive
+upload/readback/restore. The backup timer is active. A subsequent region-only
+setup reused this application and repeated identity and backup acceptance.
 
-The initial accepted application wheel was from `e6bfc71`, with the reviewed
-research startup command correction. Later reviewed upgrades added the installed
-calibration runner, bounded image cold starts and revised backup transport. Each
-installation must retain its own wheel, source identity and acceptance receipts;
-the historical results below do not certify a later release.
-The verified pre-upgrade snapshots contain initial controller/provider state
-rather than scientific results. The subsequent paid diagnostic is recorded below. These
-local checks do not establish live CUDA, provider shutdown or unattended readiness.
+Seven full-worker attempts ended before model inference. There are 18 prepared
+case plans and **zero successful live canonical GPU cases**. The latest Pod is
+confirmed deleted, its allowance is closed, and no project GPU is running.
+The next goal is one successful Base parity job, retained artifacts and confirmed
+deletion. Broader orchestration is deferred until that path works reliably.
 
-The packaged application passed 758 local regression tests and all 16 CPU
-acceptance conditions in a separate human-owned store before installation.
-Subsequent dispatcher tests passed 19 cases, and service-template/recovery tests
-passed 81 cases. These are separate, overlapping validation sets, not a summed
-full-suite result for the latest commit.
+The seventh attempt in `EU-RO-1` ended at worker startup with `REQUEST_CHANGED`.
+The controller entered `STOP_REQUESTED`, then `UNCERTAIN` with `ProviderUncertain`;
+the watchdog subsequently recorded `uncertain_action`. The initial reconciliation
+error was not retained. A same-time log lookup returned HTTP503, while a saved
+prior Pod observation passed exact RUNNING validation. Injected HTTP503 status
+and deletion failures reproduce this sequence locally. That proves a failure
+mechanism, not the historical first trigger. No transient-status retry policy or
+cause-audit correction is represented as installed.
 
-## First GPU diagnostic
+The operator's retained evidence is named in [validation status](validation.md).
+Do not replay a consumed allowance or erase these failed requests when preparing
+a future run. Diagnosis and a matching regression must precede another paid retry.
 
-An initial supervised cloud diagnostic confirmed the expected hardware but
-failed the worker resource-control prerequisite. The report was retained
-privately, the test resources were removed, and the controller closed the run.
-No persistent storage was purchased and no model inference ran.
+## Verified milestones and historical failures
 
-Subsequent bounded tests established real resource-control enforcement on one
-compatible RunPod host. Every newly assigned host must pass the same worker
-identity and containment gates before inference. This evidence does not establish
-shutdown during controller host loss or unattended readiness. Six full-worker
-calibrations stopped before inference. Image cold-start handling, clean
-environments and SSH diagnostics are installed. The fourth Pod reached verified
-SSH host-key discovery but configuration failed. The fifth stopped on a refused
-provider endpoint lookup before SSH; its HTTP status was not retained. Both
-Pods were deleted. Controller source `82b950b` is now installed and retains bounded
-HTTP metadata to identify that refusal while preserving the existing deadlines
-and cleanup. Its installation passed all 16 sandbox and 26 identity checks, with
-a verified backup. The sixth Base Pod in `EU-CZ-1` disappeared during image
-unpacking after five minutes. The new diagnostics retained HTTP 404; controller
-shutdown and independent provider absence were confirmed. Source review found
-that the watchdog counted image startup as idle at 300 seconds, while the runner
-reserved up to 540 seconds for startup. The source correction shares the same
-absolute dispatch cutoff with the watchdog; its reviewed recovery also verifies
-the old durable stop reason before installation. This correction and numerical
-acceptance remain pending live verification.
+- Initial controller source `e6bfc71` passed installed CPU, identity and backup
+  acceptance after the reviewed research startup-command repair. Later releases
+  retained their own package and acceptance receipts.
+- Bounded cloud diagnostics verified hardware and resource enforcement on a
+  compatible delegated-cgroup-v2 host. Other assigned hosts were unsuitable;
+  every new Pod must pass the same gates. These tests ran no scientific model.
+- Early full-worker failures exposed null-runtime handling, insufficient cold
+  startup time and inherited provider credentials. The fixed image and controller
+  changes require their own live result; the earlier failures are not parity evidence.
+- The fourth attempt reached verified SSH discovery but failed configuration.
+  The fifth stopped on a provider endpoint refusal whose HTTP status was lost.
+  Controller source `82b950b` added bounded HTTP diagnostics and passed its own
+  16/26 installed checks and verified backup.
+- The sixth attempt hit the watchdog's old five-minute idle rule during image
+  extraction. The accepted `8a5486b` update shares the runner's fixed startup
+  cutoff: 900 seconds total minus 240 for execution and 120 for collection/deletion
+  leaves at most 540 seconds for startup. Its installer verified the historical
+  durable idle-stop reason. This does not extend the original approval.
+- Czech capacity was unavailable for the next proposal. The reviewed region-only
+  retarget changed the region and fresh proposal paths/IDs, preserved the worker
+  image and scientific scope, and did not upgrade application code. The resulting
+  seventh attempt is the unresolved startup failure described above.
 
 The existing Base worker image
 (`sha256:a795fe2eb429d5453c0687d116707cc8a1b0eeca2cea2c77f37a6dbe5248b437`)
@@ -102,6 +98,17 @@ it cannot silently replay the old job or approval. Backups remain independent
 of both the Pod and controller through verified Google Drive copies.
 
 ## Required evidence, in order
+
+| Step | Current standing |
+| --- | --- |
+| 1. Infrastructure diagnostic | Passed on specific compatible hosts; each new assignment must be checked |
+| 2. Separate services | Installed identity and CPU containment gates passed |
+| 3. Recovery and backup | Installed Drive upload/readback/restore passed |
+| 4. Pinned worker and assets | Base and posttrained images prepared and published; in-worker readback remains part of each acceptance run |
+| 5. Canonical GPU acceptance | Not passed; first Base parity is the immediate target |
+
+The original phase numbers in historical records differ from these five
+deployment steps. Use the following requirements when judging completion.
 
 1. **Infrastructure diagnostic.** Freeze a small diagnostic image and script,
    exact resource request, price ceiling, and short runtime. Obtain human

@@ -1,4 +1,13 @@
-# Ubuntu controller installation and identity boundary
+# Auto Interpretability Lab: Ubuntu host installation
+
+[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+
+This guide separates fresh installation from the historical repairs used on the
+first controller. The current installation has passed the 16-check CPU gate,
+26-check identity gate and Drive backup/restore; the repairs below are not routine
+upgrade instructions. Use only a reviewed helper matching its exact recorded
+failure state. Source and installed-release status are tracked in the linked
+validation page.
 
 `deploy/install-controller.sh` is a manual administrator procedure. Preparing the
 bundle or running `probe_core.host_setup` does not create accounts, alter `/etc`,
@@ -135,8 +144,10 @@ Before executing research:
    Also hard-kill the research facade during a harmless CPU job and verify
    bounded container termination. Podman's default cgroups may be managed by the
    user manager separately from the facade's system service; `KillMode` alone
-   does not establish this guarantee. The current acceptance command verifies
-   normal timeout cleanup, not this process-crash case.
+   does not establish this guarantee. The installed acceptance command now
+   kills both launchers before their host timer can act and requires independent
+   process termination and container removal. Retain that receipt alongside the
+   ordinary timeout and resource checks.
 5. Produce, upload, download and restore one real research snapshot using the
    selected private Drive folder. Retain the verification receipt.
 
@@ -153,7 +164,7 @@ current session's cached supplementary groups.
 An earlier installer omitted that interpreter permission restoration and could
 stop with `python3.13: Permission denied` immediately after moving the verified
 bundle into `/opt/probe-core`. Package installation and account creation had
-already completed, but no venv or Probe services had been configured.
+already completed, but no venv or lab services had been configured.
 
 For this exact state, `deploy/resume-controller-install.py` rechecks the original
 manifest digest, all installed file hashes and ownership, and the absence of
@@ -205,7 +216,7 @@ For this exact interrupted state, `deploy/resume-controller-runtime.py` uses a
 checksum-verified copy of the prior recovery checks, requires the corrected
 service groups and the known failed receipt, and verifies that no research or
 provider work has begun. It installs Ubuntu's maintained crun package alongside
-runc, writes only the dedicated Probe runtime configuration, verifies that
+runc, writes only the lab's dedicated runtime configuration, verifies that
 Podman selects `/usr/bin/crun`, then retries the unchanged installed acceptance
 service. The image and storage driver stay the same. A successful service gate
 is required before enabling CPU execution and continuing service/backup startup.

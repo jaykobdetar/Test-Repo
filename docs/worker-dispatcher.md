@@ -1,10 +1,17 @@
-# Trusted worker and dispatcher
+# Auto Interpretability Lab: Trusted worker and dispatcher
+
+[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+
+This guide covers Auto Interpretability Lab's worker/dispatcher contracts. The
+selected images and 18 prepared case plans still have zero successful live
+canonical GPU cases; use the linked validation page for current evidence.
 
 The worker executes fixed numerical operations using local Hugging Face weights and NNsight. The dispatcher follows the controller's already approved, consumed compute interval and publishes verified artifacts to the ledger. Neither process can authorize compute, provision a Pod, renew an allowance, or run agent-supplied Python. Provider actions belong to the separate controller; these instructions do not provision or start cloud resources.
 
 ## Deployment identities and configuration
 
-Run the dispatcher as the same trusted identity that owns the ledger and retained input artifact store (`probe-trusted` in the example units). Keep its bearer secret, SSH key, known-hosts file, configuration, and transfer directory inaccessible to the research agent. The worker has a different dedicated identity on its execution host. Give that identity read-only model/dataset assets and private writable tensor and output directories. No provider API key belongs in the worker process or container.
+Run the dispatcher as the same trusted identity that owns the ledger and retained input artifact store (`probe-trusted` in the example units). Keep its bearer secret, SSH key, known-hosts file, configuration, and transfer directory inaccessible to the research agent. The worker has a different dedicated identity on its execution host. Give that identity read-only model/dataset assets and private writable tensor and output directories. The controller sends no provider API key. The trusted image launcher removes
+provider-injected credentials before starting worker and SSH processes.
 
 Install from the reviewed source commit and locked environment. Before an acceptance run, commit the source and record that actual Git HEAD. A native CPU worker sets `container_image_digest` to null and `environment_lock_path` to the actual installed `uv.lock`; the manifest hashes those bytes. A container worker supplies the real pinned image digest from the trusted deployment and the reviewed code commit. The worker observes installed library versions and hashes config, tokenizer and weights. Git and image identities are trusted deployment attestations, not values a job can select. A lock-file hash is never used as an image digest.
 
@@ -90,4 +97,5 @@ Run the offline acceptance gate from the committed project with:
 .venv/bin/python -m pytest -q tests/test_worker.py tests/test_dispatcher.py
 ```
 
-These tests execute a randomly initialized, tiny real HF Qwen3 on CPU, including NNsight no-op/intervention parity, safetensors capture-to-patch and CPU-direction-to-steer transfer, process termination, actual authenticated loopback HTTP, and a separate dispatcher daemon driven by a controller and independent watchdog process. Receipts record the actual repository HEAD and lock-file hash. They do not establish CUDA/RunPod performance, live GPU memory enforcement, or a scientific result. CUDA container/cgroup and live SSH acceptance remain deployment gates before the first paid run. Confirmatory and replication jobs are explicitly refused until the separate trusted evaluator supplies the held-out scoring boundary.
+These tests execute a randomly initialized, tiny real HF Qwen3 on CPU, including NNsight no-op/intervention parity, safetensors capture-to-patch and CPU-direction-to-steer transfer, process termination, actual authenticated loopback HTTP, and a separate dispatcher daemon driven by a controller and independent watchdog process. Receipts record the actual repository HEAD and lock-file hash. They do not establish CUDA/RunPod performance, live GPU memory enforcement, or a scientific result. Every assigned GPU host must pass its own cgroup and SSH gates before model
+execution; passing those gates on a prior host cannot certify a new assignment. Confirmatory and replication jobs are explicitly refused until the separate trusted evaluator supplies the held-out scoring boundary.

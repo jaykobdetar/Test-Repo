@@ -1,11 +1,13 @@
-# Core API and persistence guide
+# Auto Interpretability Lab: Core API and persistence
 
-Probe's durable research foundation and the Phase 3–5 implementation: controller
-and independent watchdog, trusted experiment execution, local stdio MCP, and a
-rootless CPU sandbox. The provider supplied here is a persistent simulator;
-real RunPod provisioning belongs to Phase 6. See [IMPLEMENTATION.md](../IMPLEMENTATION.md)
-for service boundaries and verification status. The Phase 2 core remains usable
-without loading the worker or MCP modules.
+[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+
+This is the API reference for Auto Interpretability Lab's local durable core:
+queue transactions, approvals, accepted artifacts, hypotheses and audit records.
+The core remains usable without importing worker or MCP modules. The deployment
+branch also supplies a simulator and a guarded live RunPod adapter; provider
+operations are outside this persistence API. See [implementation boundaries](../IMPLEMENTATION.md)
+for the full service design and the linked validation status for accepted evidence.
 
 ## Install and test
 
@@ -33,7 +35,7 @@ manifest shape; its hashes are examples, not real model or container revisions.
 | `schemas.py` | Complete run manifest; bounded discriminated GPU operations; hypothesis/preregistration and approval contracts |
 | `ledger.py` | Transactions, queue/attempt lifecycle, approvals, hypotheses, immutable accepted runs, sealed artifacts, backup |
 | `audit.py` | Strict canonical JSON, secret-field rejection, SHA-256 chain, process-safe JSONL append/verification/reconciliation |
-| `controller.py`, `provider.py` | Human-authorized compute requests, simulated provider, independent shutdown watchdog |
+| `controller.py`, `provider.py`, `runpod_provider.py` | Human-authorized compute requests, simulator/live provider adapters, independent shutdown watchdog |
 | `worker.py`, `dispatcher.py` | Real bounded model operations, authenticated execution, retained results and recovery |
 | `research_api.py`, `research_service.py`, `mcp_server.py`, `rpc.py` | Research-only tools and authenticated local service boundaries |
 | `sandbox.py`, `artifact_store.py` | Rootless CPU experiments and durable tensor inputs |
@@ -55,7 +57,8 @@ submitted as a canonical confirmatory finding.
 
 `JobSpec.operation` is a discriminated union on `kind`: `capture`, `patch`,
 `ablate`, `steer`, `fit_probe`, `generate`, `weight_stats`, `tensor_slice`, or
-`module_manifest`. Module references constrain Qwen's 28 layers
+`module_manifest`; `backend_parity` is restricted to engineering calibration.
+Module references constrain Qwen's 28 layers
 and 16 query heads; `positions` accepts bounded token indices or `"last"`.
 Tensor inputs reference `.safetensors` artifacts. File format, hash, tensor
 shape/dtype, and actual GPU memory checks belong to the trusted executor when it
@@ -81,9 +84,9 @@ Use a private controller-owned directory on a local filesystem. The constructor
 rejects known Linux network-filesystem mounts and database symlinks, but mount
 detection cannot recognize every third-party filesystem. Do not place the live
 database or its WAL/SHM files on a RunPod network volume, NFS, SMB, or a synced
-folder. Model caches and bulk reconstructible outputs can remain on the GPU
-volume; retained artifacts passed into this core are copied to the controller's
-private artifact store before acceptance.
+folder. In the selected disposable-worker setup, public model assets come from
+the immutable image. Retained artifacts are copied to the controller's private
+artifact store before acceptance; uncollected Pod output is not durable evidence.
 
 The writer owns one SQLite connection on a dedicated thread. Public calls are
 synchronous and thread-safe. Every schema change and DML mutation uses an
@@ -114,7 +117,9 @@ Always close a ledger, preferably with its context manager.
 5. The controller may request the cloud start only after this durable grant.
    It must run the independent watchdog and enforce actual Pod shutdown. This
    ledger module never starts, stops, or schedules cloud resources. The supplied
-   controller uses a simulated provider; real provider integration is Phase 6.
+   controller supports the simulator and the guarded RunPod adapter described in
+   [the provider guide](runpod-provider.md). Neither adapter supplies scientific
+   evidence merely by creating a worker.
 6. `dispatch_next(worker_id, approval_id=..., lease_seconds=30)` claims the oldest
    eligible pending job that fits the remaining approved interval. It returns
    `None` while another execution/finalization is unresolved or no job fits.

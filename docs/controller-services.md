@@ -1,6 +1,11 @@
-# Trusted controller and independent stop service
+# Auto Interpretability Lab: Controller and independent stop service
 
-The development backend is a persistent provider simulator. A separate guarded
+[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+
+This is the service and authority contract for Auto Interpretability Lab.
+The installed controller identities have passed their actual OS-boundary checks;
+that does not certify a numerical GPU result. The development backend is a
+persistent provider simulator. A separate guarded
 [RunPod adapter](runpod-provider.md) supports short supervised acceptance runs.
 Initial creation, replacement, and any supported restart require the human
 administrative socket. Research clients can submit a request, inspect its
@@ -62,17 +67,31 @@ The provider supplies the live price; the caller cannot provide it. The provider
 
 ## Creation and replacement identity
 
-`DeploymentSpec` freezes GPU model/count, image digest, volume identity/size, and region. A provisioning request reserves a local logical worker ID and binds the exact configuration hash, job-batch hash, runtime, and replacement target. `ApprovalNonce.pod_id` refers to this stable logical worker ID. The provider must map it uniquely to the actual provider Pod ID and retain the creation request key and configuration hash for reconciliation. Replacing an existing worker requires it to be confirmed stopped and uses a new logical identity and a new human approval. The old resource and volume are retained; replacement never silently deletes them.
+`DeploymentSpec` freezes GPU model/count, image digest, volume identity/size, and region. A provisioning request reserves a local logical worker ID and binds the exact configuration hash, job-batch hash, runtime, and replacement target. `ApprovalNonce.pod_id` refers to this stable logical worker ID. The provider must map it uniquely to the actual provider Pod ID and retain the creation request key and configuration hash for reconciliation. Replacing an existing worker requires it to be confirmed stopped and uses a new logical identity and a new human approval. For the selected disposable profile, the old Pod must already be confirmed
+absent and its request stopped; accepted artifacts remain on the controller.
+The optional persistent-volume profile retains its independent network volume.
 
 The same approved request can attempt `create` or `start` only once. The absolute core deadline and `STARTING` intent are committed before the call. A process interruption, timeout, unknown status, or lost response never triggers another paid call. Startup reconciliation locates the logical identity and stops/readbacks the result. If an ambiguous creation is still absent, the interval remains unresolved: absence does not prove a delayed create cannot appear. Later reconciliation can find and stop it. There is no unsafe automatic reset of that interval.
 
 ## Stopping and failure recovery
 
-The watchdog stops at the absolute deadline even when a job is active. It also stops after five minutes without an active execution. Idle timers survive watchdog restarts. Once a stop decision is durable, subsequent activity cannot revoke it. Each stop is followed by a provider status readback; failures remain pending and are retried.
+The watchdog stops at the absolute deadline even when a job is active. Ordinary
+idle time is limited to five minutes. One pending, never-dispatched calibration
+job on a fresh disposable worker instead uses the runner's fixed startup cutoff:
+approval deadline minus the full job runtime and 120 seconds for collection and
+deletion. The first attempt permanently ends this exception. Idle timers and
+startup bounds survive watchdog restarts. Once a stop decision is durable, subsequent activity cannot revoke it. Each stop is followed by a provider status readback; failures remain pending and are retried.
 
 Known workers and deadlines are cached in the watchdog's own durable database before acknowledgment. If the main ledger becomes unreadable, the watchdog immediately stops cached active workers and reports unhealthy status. It does not forget the schedules. A fresh or healthy-looking heartbeat without the exact approval acknowledgment cannot authorize compute.
 
 After a real provider confirms its worker and executor processes are off, the controller can acknowledge termination in the core and close the compute interval. The simulator changes resource metadata only: it cannot prove that a local CPU executor terminated. Simulated shutdown therefore cancels active jobs and remains `STOP_REQUESTED` until the dispatcher obtains a verified worker process-stop receipt; a later controller reconciliation closes the interval. Stopped `FINALIZING` work remains eligible for CPU publication. The watcher has no renewal method, and retries never extend an approval deadline.
+
+The seventh full-worker attempt exposed a diagnostic gap: reconciliation can
+request a stop after a provider-status error without retaining that original
+error. A later deletion failure is recorded as `ProviderUncertain`, and the
+watchdog then records `uncertain_action`. A local injected HTTP503 sequence
+reproduces this mechanism, but it does not identify the historical first error.
+No new provider retry policy or cause-audit correction is claimed as installed.
 
 ## Research client contract
 

@@ -1,6 +1,21 @@
-# Canonical GPU deployment and acceptance
+# Auto Interpretability Lab: Canonical GPU deployment and acceptance
 
-This implementation prepares exact assets, publishes reproducible image recipes, and runs a fixed numerical calibration through the existing approved-job pipeline. A successful image build or CPU test is not a live GPU acceptance result. The provider diagnostic must run first under its own human-approved infrastructure allowance, with the independent controller/watchdog able to stop paid compute.
+[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+
+This is the implementation and acceptance procedure for Auto Interpretability
+Lab's deployment branch through source `7e01602`. It provides pinned assets,
+image recipes and fixed calibration paths through the approved-job pipeline.
+The installed controller is `8a5486b`; the immutable worker images have their own
+source identities. Commands below are reviewed procedures, not evidence that
+their live cases have passed.
+
+As of September 20, 2026, 18 plans are prepared across Base and posttrained
+workers, but no canonical GPU case has passed. Seven full-worker attempts stopped
+before inference and were deleted. The immediate focus is one successful Base
+parity run; additional orchestration is deferred. The deployment checklist gives
+the current startup blocker, and validation status separates installed acceptance
+from historical local tests. Every assigned host must pass its resource gates
+before model execution.
 
 ## Frozen checkpoints
 
@@ -179,6 +194,15 @@ Use separate bounded allowances for Base and posttrained workers; `WorkerConfig`
 
 ## Startup and supervised retry
 
+This section records the recovery contracts and earlier startup failures. The
+latest installed status is source `8a5486b`, with verified backup, 16 CPU checks
+and 26 identity checks. The region-only Romania setup retained that application.
+Its seventh attempt ended with `REQUEST_CHANGED` before inference, followed by
+confirmed deletion. Controller reconciliation requested stop before the watchdog
+recorded `uncertain_action`; the initial trigger was not saved. A concurrent
+HTTP503 log response and a local HTTP503 replay do not establish that missing
+historical cause. See [the current deployment checklist](live-deployment-plan.md).
+
 The controller may observe RunPod `status=RUNNING` before the runtime and direct SSH
 port are published. Missing or null connection details remain inside the bounded
 startup wait; malformed details or mismatched image, price, region or host key
@@ -212,8 +236,9 @@ an allowlisted environment before any cgroup, SSH or model work. SSH and every
 worker process also receive explicitly constructed environments. This removes
 inherited credentials from their exec-time environment, including the bytes
 exposed through [Linux process environment files](https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html).
-The next immutable image still needs live acceptance; the failed Pod was deleted
-and produced no numerical evidence.
+The corrected immutable Base image is published and used by later attempts,
+but still has no successful numerical acceptance result. The credential-guard
+failure produced no numerical evidence.
 
 The incident-specific `deploy/retry-gpu-calibration.py` helper has two phases
 around the normal wheel upgrade. It first verifies the stopped request, closed

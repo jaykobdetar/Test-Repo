@@ -1,6 +1,10 @@
-# RunPod provider boundary
+# Auto Interpretability Lab: RunPod provider boundary
 
-The adapter supports short, explicitly supervised acceptance runs. Unattended
+[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+
+This guide describes Auto Interpretability Lab's implemented provider boundary,
+not a claim that model acceptance has passed. The adapter supports short,
+explicitly supervised acceptance runs. Unattended
 launches remain disabled: RunPod's `stopAfter` field has not yet been demonstrated
 to stop billing after the controller host disappears. A local watchdog survives a
 controller process crash, but shares the host's power and network failure modes.
@@ -61,8 +65,9 @@ before deletion. Conflicting or duplicate matches remain uncertain after cleanup
 they never authorize another purchase automatically.
 
 This is an operating-system credential boundary. RunPod's documented API-key
-permissions do not provide a Pod stop-only scope. The account key never enters
-the research/MCP process or the GPU container. The launch environment accepts
+permissions do not provide a Pod stop-only scope. The controller's account key is never sent to the research/MCP process or GPU
+container. RunPod may inject its own Pod-scoped key; the trusted worker launcher
+removes inherited credentials before starting SSH or execution processes. The launch environment accepts
 only a dedicated Ed25519 `PUBLIC_KEY` and an optional delegated cgroup path.
 
 The provider SQLite database contains creation intents, deployment configuration,

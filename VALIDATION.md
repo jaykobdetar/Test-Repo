@@ -1,4 +1,10 @@
-# Phase 2 verification
+# Auto Interpretability Lab: Historical Phase 2 verification
+
+[Project overview](README.md) · [Validation status](docs/validation.md) · [Deployment checklist](docs/live-deployment-plan.md)
+
+This is the historical Phase 2 record, retained for provenance. It does not
+describe the current installed release or its live GPU status; use the linked
+validation status for those facts. Later test totals overlap this milestone.
 
 Verified on September 19, 2026 with Python 3.13.13, Pydantic 2.13.2,
 SQLite 3.53.1, and pytest 9.0.3 on Linux.
