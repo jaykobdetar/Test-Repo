@@ -43,6 +43,9 @@ from .dispatcher import (Dispatcher, DispatcherService, SSHTunnel, WorkerClient,
 from .direction_transfer import DIRECTION_SHA256, READBACK_PROGRAM, DirectionDispatcher
 from .gpu_acceptance import AcceptancePlan, collect, fixed_direction_plan, fixed_plan
 from .gpu_acceptance_actions import SSHActionClient, _authority, run_action
+from .gpu_replacement import (ReplacementBinding, ReplacementError, fresh_request,
+                              preflight_record, read_model_inventory, retained_bundle,
+                              submission_predecessor, verify_before_approval, verify_predecessor)
 from .ledger import JobState, Ledger
 from .provider import DeploymentSpec, WorkerState
 from .rpc import UnixRPCClient, decode
@@ -217,6 +220,7 @@ class RunnerConfig(FrozenModel):
     provider_config_path: str = '/etc/probe-core/runpod.json'
     ssh_identity_file: str = '/etc/probe-core/worker-ssh-key'
     bearer_secret_file: str = '/etc/probe-core/worker-token'
+    replacement: ReplacementBinding | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode='after')
     def fixed_profile(self):
@@ -247,6 +251,8 @@ def load_inputs(path, *, mode, owner=0):
 def validate_plan(config, plan):
     require(len(plan.cases) == 1, 'SINGLE_CALIBRATION_CASE_REQUIRED')
     case = plan.cases[0]
+    if config.replacement is not None:
+        require(case.name == 'backend-parity', 'REPLACEMENT_PARITY_REQUIRED')
     require(case.spec.experiment_stage.value == 'calibration'
             and case.spec.model == plan.model, 'FIXED_CALIBRATION_CASE_REQUIRED')
     if case.name == 'backend-parity':
@@ -357,11 +363,12 @@ class State:
 
 
 def matches_request(row, config, job_id):
-    return (row.get('action') == 'CREATE' and row.get('job_ids') == [job_id]
+    predecessor = config.replacement.worker_id if config.replacement else None
+    return (row.get('action') == ('REPLACE' if predecessor else 'CREATE') and row.get('job_ids') == [job_id]
             and row.get('configuration_hash') == config.deployment.digest
             and row.get('configuration') == config.deployment.model_dump(mode='json')
             and row.get('max_runtime_seconds') == config.max_runtime_seconds
-            and row.get('infrastructure') is None and row.get('replaces_worker_id') is None)
+            and row.get('infrastructure') is None and row.get('replaces_worker_id') == predecessor)
 
 
 def submit(config, plan, rpc, state):
@@ -382,11 +389,16 @@ def submit(config, plan, rpc, state):
         except Exception:
             require(time.monotonic() < ready_until, 'RESEARCH_SERVICE_UNAVAILABLE')
             time.sleep(0.25)
+    if config.replacement is not None:
+        submission_predecessor(config, rpc)
     job = rpc.call('submit_job', {'spec': plan.cases[0].spec.model_dump(mode='json')})
     job_id = job.get('job_id')
     require(isinstance(job_id, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', job_id), 'JOB_ID_INVALID')
     parameters = {'deployment': config.deployment.model_dump(mode='json'), 'job_ids': [job_id],
                   'max_runtime_seconds': config.max_runtime_seconds}
+    if config.replacement is not None:
+        require(job_id != config.replacement.job_id, 'REPLACEMENT_JOB_REUSED')
+        parameters['replaces_worker_id'] = config.replacement.worker_id
     intent = {'binding': binding, 'job_id': job_id, 'parameters': parameters}
     existing = state.read('provision-intent.json')
     if existing is not None:
@@ -999,7 +1011,8 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
         endpoint=verified_endpoint, tunnel_factory=SSHTunnel, client_factory=WorkerClient,
         readiness=wait_for_worker, configure=configure_worker, progress=lambda _: None,
         bootstrap_diagnostics=None, lifecycle_factory=SSHActionClient, action=run_action,
-        direction_readback=read_worker_direction):
+        direction_readback=read_worker_direction,
+        replacement_reader=verify_predecessor, model_inventory=read_model_inventory):
     validate_plan(config, plan)
     state.publish('binding.json', {'config_sha256': digest(config.model_dump(mode='json')), 'plan_sha256': config.plan_sha256})
     previous = state.read('result.json')
@@ -1026,6 +1039,13 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
     try:
         result['stage'] = 'approval_verification'
         deadline = validate_authority(ledger, config, plan, request, now=clock())
+        if config.replacement is not None:
+            result['stage'] = 'replacement_predecessor'
+            fresh_request(config, request, ledger)
+            predecessor = replacement_reader(config, plan, ledger, backend)
+            require(state.read('replacement-preflight.json') == preflight_record(config, predecessor),
+                    'REPLACEMENT_PREFLIGHT_MISSING_OR_CHANGED')
+            state.publish('replacement-before.json', predecessor)
         state.publish('bound-request.json', {key: request[key] for key in ('request_id', 'worker_id', 'approval_id', 'observed_provider_id', 'deadline', 'batch_hash')})
         result['stage'] = 'verified_worker_startup'
         progress(result['stage'])
@@ -1080,6 +1100,16 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
             require(clock() < deadline, 'APPROVED_DEADLINE_REACHED')
             require(clock() < startup_deadline, 'WORKER_STARTUP_DEADLINE')
             result['startup']['worker_ready_at'] = clock()
+            if config.replacement is not None:
+                result['stage'] = 'replacement_readback'
+                assets = model_inventory(config, plan, settings, deadline=startup_deadline, clock=clock)
+                state.publish('replacement-model.json', assets)
+                retained = retained_bundle(ledger, config.replacement)
+                require(retained == predecessor['bundle'], 'REPLACEMENT_RETAINED_ARTIFACTS_CHANGED')
+                state.publish('replacement-ready.json', {'request_id': request['request_id'],
+                    'worker_id': request['worker_id'], 'provider_id': request['observed_provider_id'],
+                    'observed_at': clock(), 'bundle': retained, 'model_receipt_sha256': assets['receipt_sha256']})
+                require(clock() < startup_deadline, 'WORKER_STARTUP_DEADLINE')
             result['stage'] = 'approved_dispatch'
             progress(result['stage'])
             direction_options = ({'readback': lambda phase: direction_readback(settings, phase, deadline=deadline, clock=clock),
@@ -1147,7 +1177,20 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                           case=plan.cases[0].name, observed_state=job.state.value,
                           observed_failure_kind=job.failure_kind,
                           worker_receipt_sha256=digest(evidence['observed_receipt']))
-    except RunnerError as error:
+            if config.replacement is not None:
+                require(job.attempt_id != config.replacement.attempt_id and job.attempt_count == 1
+                        and job.retry_count == 0 and job.worker_id == request['worker_id']
+                        and job.approval_id == request['approval_id'], 'REPLACEMENT_FRESH_ATTEMPT_INVALID')
+                after = retained_bundle(ledger, config.replacement)
+                require(after == predecessor['bundle'], 'REPLACEMENT_RETAINED_ARTIFACTS_CHANGED')
+                state.publish('replacement-after.json', {'observed_at': clock(), 'bundle': after,
+                    'job_id': job.job_id, 'attempt_id': job.attempt_id, 'manifest_sha256': result['manifest_sha256']})
+                result['replacement'] = {'complete': False, 'predecessor': config.replacement.model_dump(mode='json'),
+                    'before_sha256': digest(predecessor), 'model_readback_sha256': digest(assets),
+                    'retained_artifacts_sha256': after['artifacts_sha256'],
+                    'after_sha256': digest(state.read('replacement-after.json'))}
+    except (RunnerError, ReplacementError) as error:
+        result['status'] = 'failed'
         result['reason'] = str(error)
         diagnostic = safe_provider_diagnostic(getattr(error, 'provider_diagnostic', None))
         if diagnostic is not None:
@@ -1156,6 +1199,7 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
         if diagnostic is not None:
             result['transport'] = diagnostic
     except Exception as error:
+        result['status'] = 'failed'
         result['reason'] = 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
         result['diagnostic'] = exception_diagnostic(error)
         diagnostic = safe_command_diagnostic(getattr(error, 'diagnostic', None))
@@ -1183,13 +1227,15 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
             result.update(status='failed', reason='LIFECYCLE_ACTION_CLEANUP_UNCONFIRMED')
         if not result['teardown']['confirmed']:
             result.update(status='failed', reason='PROVIDER_DELETION_UNCONFIRMED')
+        if result['status'] == 'passed' and config.replacement is not None:
+            result['replacement']['complete'] = True
         state.publish('result.json', result)
     return result
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('submit', 'run'))
+    parser.add_argument('mode', choices=('submit', 'run', 'verify-replacement'))
     parser.add_argument('--config', type=Path, required=True)
     args = parser.parse_args()
     def interrupted(*_):
@@ -1206,14 +1252,17 @@ def main():
                 require(LEDGER.is_file() and not LEDGER.is_symlink(), 'INSTALLED_LEDGER_REQUIRED')
                 provider = RunPodProvider(RunPodConfig.load(config.provider_config_path))
                 with Ledger(LEDGER) as ledger:
-                    result = run(config, plan, ledger, provider,
-                                 ControllerClient(CONTROLLER_SOCKET, expected_server_uid=config.service_uid), state,
-                                 progress=lambda stage: print(canonical_json({'stage': stage}), flush=True))
+                    if args.mode == 'verify-replacement':
+                        result = verify_before_approval(config, plan, ledger, provider, state)
+                    else:
+                        result = run(config, plan, ledger, provider,
+                                     ControllerClient(CONTROLLER_SOCKET, expected_server_uid=config.service_uid), state,
+                                     progress=lambda stage: print(canonical_json({'stage': stage}), flush=True))
         print(canonical_json(result))
         if result.get('status') == 'failed':
             raise SystemExit(1)
     except Exception as error:
-        reason = str(error) if isinstance(error, RunnerError) and re.fullmatch(r'[A-Z0-9_]{1,100}', str(error)) else 'ACCEPTANCE_RUNNER_REFUSED'
+        reason = str(error) if isinstance(error, (RunnerError, ReplacementError)) and re.fullmatch(r'[A-Z0-9_]{1,100}', str(error)) else 'ACCEPTANCE_RUNNER_REFUSED'
         result = {'status': 'failed', 'reason': reason, 'approval_consumed_by_runner': False}
         if reason == 'ACCEPTANCE_RUNNER_REFUSED':
             result['diagnostic'] = exception_diagnostic(error)
