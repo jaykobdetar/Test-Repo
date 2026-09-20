@@ -15,6 +15,14 @@ on:
         description: Reviewed diagnostic image, including @sha256 digest
         required: true
         type: string
+      asset_profile:
+        description: Canonical public model assets to bake into this image
+        required: true
+        default: base
+        type: choice
+        options:
+          - base
+          - posttrained
 
 permissions:
   contents: read
@@ -28,14 +36,22 @@ jobs:
       packages: write
     env:
       DIAGNOSTIC_IMAGE: ${{ inputs.diagnostic_image || 'ghcr.io/jaykobdetar/probe-mcp-diagnostic@sha256:f7dd56f9f7bab9024f24f7014cca76c50186bc61fbbf34de50bd53e599e1b1af' }}
+      ASSET_PROFILE: ${{ inputs.asset_profile || 'base' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Require an immutable diagnostic image
+      - name: Require an immutable diagnostic image and select fixed public assets
         run: |
           python3 - <<'PY'
           import os, re
           if not re.fullmatch(r"ghcr.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}", os.environ["DIAGNOSTIC_IMAGE"]):
               raise SystemExit("diagnostic_image must be a reviewed GHCR image pinned by full digest")
+          profiles = {"base": "deploy/gpu/public-assets.json", "posttrained": "deploy/gpu/public-assets-posttrained.json"}
+          profile = os.environ["ASSET_PROFILE"]
+          if profile not in profiles:
+              raise SystemExit("unknown public asset profile")
+          with open(os.environ["GITHUB_ENV"], "a") as stream:
+              stream.write(f"PUBLIC_ASSETS_MANIFEST={profiles[profile]}\n")
+              stream.write(f"WORKER_TAG={'posttrained-' if profile == 'posttrained' else ''}git-{os.environ['GITHUB_SHA']}\n")
           PY
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -56,7 +72,8 @@ jobs:
           build-args: |
             DIAGNOSTIC_IMAGE=${{ env.DIAGNOSTIC_IMAGE }}
             SOURCE_COMMIT=${{ github.sha }}
-          tags: ghcr.io/${{ github.repository_owner }}/probe-mcp-worker:git-${{ github.sha }}
+            PUBLIC_ASSETS_MANIFEST=${{ env.PUBLIC_ASSETS_MANIFEST }}
+          tags: ghcr.io/${{ github.repository_owner }}/probe-mcp-worker:${{ env.WORKER_TAG }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -72,7 +89,8 @@ jobs:
           from pathlib import Path
           record = {key.lower(): os.environ[key] for key in ("IMAGE", "DIGEST", "SOURCE_COMMIT", "DIAGNOSTIC_IMAGE")}
           record.update(environment_lock_hash="sha256:"+hashlib.sha256(Path("uv.lock").read_bytes()).hexdigest(), gpu_acceptance_passed=False)
-          record["public_assets_manifest_sha256"] = "sha256:"+hashlib.sha256(Path("deploy/gpu/public-assets.json").read_bytes()).hexdigest()
+          record["asset_profile"] = os.environ["ASSET_PROFILE"]
+          record["public_assets_manifest_sha256"] = "sha256:"+hashlib.sha256(Path(os.environ["PUBLIC_ASSETS_MANIFEST"]).read_bytes()).hexdigest()
           Path("worker-image.json").write_text(json.dumps(record, indent=2)+"\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
               stream.write(f"Built `{record['image']}@{record['digest']}`. GPU acceptance has not run.\n")
