@@ -25,7 +25,7 @@ jobs:
       contents: read
       packages: write
     env:
-      DIAGNOSTIC_IMAGE: ${{ inputs.diagnostic_image || 'ghcr.io/jaykobdetar/probe-mcp-diagnostic@sha256:40df386b544b4cd5a3576d2323db774f6a22e90a6a2428f4302c28af6ce3009c' }}
+      DIAGNOSTIC_IMAGE: ${{ inputs.diagnostic_image || 'ghcr.io/jaykobdetar/probe-mcp-diagnostic@sha256:f7dd56f9f7bab9024f24f7014cca76c50186bc61fbbf34de50bd53e599e1b1af' }}
     steps:
       - uses: actions/checkout@v4
       - name: Require an immutable diagnostic image

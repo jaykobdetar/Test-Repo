@@ -38,7 +38,9 @@ class HTTP:
         self.volumes = [{"id": "volume1", "size": 100, "dataCenter": "US-IL-1", "type": "STANDARD"}]
         self.price = 0.74
         self.create_hook = None
+        self.delete_hook = None
         self.fail_after_create = False
+        self.fail_after_delete = False
         self.initial_state = "RUNNING"
         self.page_size = 1000
 
@@ -77,10 +79,15 @@ class HTTP:
             pods = [pod for pod in self.pods if pod["id"] == pod_id]
             if not pods:
                 raise ProviderHTTPError(404)
-            if method == "POST":
-                assert path.endswith("/action") and body == {"action": "stop"}
-                pods[0]["status"] = "EXITED"
-                pods[0]["cost"] = 0
+            if method == "DELETE":
+                assert path == "/v2/pods/" + pod_id and body is None
+                if self.delete_hook:
+                    self.delete_hook(pod_id)
+                self.pods.remove(pods[0])
+                if self.fail_after_delete:
+                    raise TimeoutError("synthetic private transport diagnostic")
+                return None
+            assert method == "GET"
             return deepcopy(pods[0])
         raise AssertionError((method, path, body))
 
@@ -156,7 +163,8 @@ def test_ephemeral_preflight_creates_no_persistent_storage_and_reconciles_after_
     with pytest.raises(ProviderUncertain, match="already consumed"):
         create((reopened, http, clock, spec))
     reopened.stop("worker1")
-    assert reopened.status("worker1").state == WorkerState.STOPPED
+    assert reopened.status("worker1").state == WorkerState.ABSENT
+    assert http.pods == []
     assert len(http.purchases) == 1
 
 
@@ -182,7 +190,7 @@ def test_ephemeral_preflight_rejects_unapproved_persistent_storage_readback(runp
     with pytest.raises(ProviderUncertain, match="configuration differs"):
         backend.status("worker1")
     backend.stop("worker1")
-    assert http.pods[0]["status"] == "EXITED"
+    assert http.pods == []
 
 
 @pytest.mark.parametrize("overrides", [
@@ -289,7 +297,92 @@ def test_timeout_after_create_recovers_by_inventory_and_never_retries_purchase(r
         create((reopened, http, clock, spec))
     assert len(http.purchases) == 1
     reopened.stop("worker1")
-    assert reopened.status("worker1").state == WorkerState.STOPPED
+    assert reopened.status("worker1").state == WorkerState.ABSENT
+
+
+def test_stop_binds_verified_uncertain_create_before_deleting_its_inventory_evidence(runpod):
+    backend, http, clock, spec = runpod
+    http.fail_after_create = True
+    with pytest.raises(ProviderUncertain):
+        create(runpod)
+    assert backend._intent("worker1")["provider_id"] is None
+
+    def before_delete(pod_id):
+        with closing(sqlite3.connect(backend.path)) as connection:
+            assert connection.execute(
+                "SELECT provider_id,provider_seen FROM runpod_intents").fetchone() == (pod_id, 1)
+    http.delete_hook = before_delete
+    volumes = deepcopy(http.volumes)
+    backend.stop("worker1")
+    assert http.pods == [] and http.volumes == volumes
+    reopened = RunPodProvider(backend.config, transport=http, clock=clock)
+    observed = reopened.status("worker1")
+    assert observed.state == WorkerState.ABSENT and observed.provider_id == "pod1"
+    reopened.stop("worker1")  # A repeated deletion receives 404; it never buys a replacement.
+    with pytest.raises(ProviderUncertain, match="already consumed"):
+        create((reopened, http, clock, spec))
+    assert len(http.purchases) == 1
+    assert [(method, path) for method, path, _ in http.calls if method == "DELETE"] == [
+        ("DELETE", "/v2/pods/pod1"), ("DELETE", "/v2/pods/pod1")]
+
+
+def test_delete_timeout_reconciles_known_pod_absence_without_replaying_create(runpod):
+    backend, http, clock, _ = runpod
+    create(runpod)
+    http.fail_after_delete = True
+    with pytest.raises(ProviderUncertain, match="acknowledge termination") as error:
+        backend.stop("worker1")
+    assert "private" not in str(error.value)
+    assert http.pods == []
+    reopened = RunPodProvider(backend.config, transport=http, clock=clock)
+    assert reopened.status("worker1").state == WorkerState.ABSENT
+    reopened.stop("worker1")
+    assert len(http.purchases) == 1
+
+
+@pytest.mark.parametrize("status", [403, 409, 500])
+def test_delete_errors_do_not_acknowledge_release(runpod, status):
+    backend, http, _, _ = runpod
+    create(runpod)
+
+    def refuse(_):
+        raise ProviderHTTPError(status)
+    http.delete_hook = refuse
+    with pytest.raises(ProviderUncertain, match="acknowledge termination"):
+        backend.stop("worker1")
+    assert backend.status("worker1").state == WorkerState.RUNNING
+    assert len(http.purchases) == 1
+
+
+def test_delete_acknowledgement_alone_is_not_positive_release(runpod, monkeypatch):
+    backend, http, _, _ = runpod
+    create(runpod)
+    original = http.request
+
+    def pending(method, path, body=None):
+        if method == "DELETE":
+            return {"id": "pod1"}
+        return original(method, path, body)
+    monkeypatch.setattr(http, "request", pending)
+    backend.stop("worker1")
+    assert backend.status("worker1").state == WorkerState.RUNNING
+    monkeypatch.setattr(http, "request", original)
+    backend.stop("worker1")
+    assert backend.status("worker1").state == WorkerState.ABSENT
+
+
+def test_delete_only_targets_durable_owned_pod_and_preserves_network_volume(runpod):
+    backend, http, _, _ = runpod
+    create(runpod)
+    unrelated = deepcopy(http.pods[0])
+    unrelated.update(id="unrelated", name="another-users-pod")
+    http.pods.append(unrelated)
+    volumes = deepcopy(http.volumes)
+    with pytest.raises(ProviderCapabilityError, match="durable owned"):
+        backend.stop("unrelated")
+    backend.stop("worker1")
+    assert http.pods == [unrelated] and http.volumes == volumes
+    assert [path for method, path, _ in http.calls if method == "DELETE"] == ["/v2/pods/pod1"]
 
 
 def test_uncertain_create_not_yet_visible_is_unknown_not_safely_absent(runpod):
@@ -319,7 +412,7 @@ def test_unexpected_configuration_and_price_can_still_be_stopped(runpod):
     with pytest.raises(ProviderUncertain):
         backend.status("worker1")
     backend.stop("worker1")
-    assert http.pods[0]["status"] == "EXITED"
+    assert http.pods == []
 
 
 def test_duplicate_owned_resources_are_all_stopped_but_never_misreported(runpod):
@@ -333,7 +426,10 @@ def test_duplicate_owned_resources_are_all_stopped_but_never_misreported(runpod)
     with pytest.raises(ProviderUncertain, match="multiple"):
         backend.status("worker1")
     backend.stop("worker1")
-    assert all(pod["status"] == "EXITED" for pod in http.pods)
+    assert http.pods == []
+    assert backend.status("worker1").state == WorkerState.UNKNOWN
+    assert {path for method, path, _ in http.calls if method == "DELETE"} == {
+        "/v2/pods/pod1", "/v2/pods/podduplicate"}
 
 
 def test_positive_bound_404_distinguished_from_unbound_empty_inventory(runpod):
@@ -358,12 +454,12 @@ def test_first_read_404_after_create_receipt_is_not_a_stop_confirmation(runpod, 
     assert backend.status("worker1").state == WorkerState.UNKNOWN
     assert http.pods[0]["status"] == "RUNNING"
     backend.stop("worker1")
-    assert http.pods[0]["status"] == "EXITED"
-    # The ambiguous 404 is still not sufficient until an actual resource state
-    # has been observed. Later inventory consistency supplies that evidence.
+    assert http.pods == []
+    # Deletion does not retroactively verify an unobserved create response.
+    # No automatic retry or new purchase is allowed to resolve this uncertainty.
     assert backend.status("worker1").state == WorkerState.UNKNOWN
     monkeypatch.setattr(http, "request", original)
-    assert backend.status("worker1").state == WorkerState.STOPPED
+    assert backend.status("worker1").state == WorkerState.UNKNOWN
 
 
 def test_pending_start_deadline_and_readiness_timeout_do_not_create_again(runpod):
@@ -372,7 +468,7 @@ def test_pending_start_deadline_and_readiness_timeout_do_not_create_again(runpod
     with pytest.raises(ProviderUncertain, match="readiness"):
         create(runpod)
     backend.stop("worker1")
-    assert backend.status("worker1").state == WorkerState.STOPPED
+    assert backend.status("worker1").state == WorkerState.ABSENT
     assert len(http.purchases) == 1
 
 
@@ -423,7 +519,7 @@ def test_stop_broker_exposes_only_status_and_stop_with_distinct_uid(runpod, tmp_
             captured["dispatch"](method, {"worker_id": "worker1"})
     with pytest.raises(ValueError):
         captured["dispatch"]("stop", {"worker_id": "worker1", "provider_id": "not-owned"})
-    assert captured["dispatch"]("stop", {"worker_id": "worker1"})["state"] == "STOPPED"
+    assert captured["dispatch"]("stop", {"worker_id": "worker1"})["state"] == "ABSENT"
 
 
 @pytest.mark.parametrize("environment", [{"RUNPOD_API_KEY": "not-allowed"}, {"PUBLIC_KEY": "two\nkeys"},

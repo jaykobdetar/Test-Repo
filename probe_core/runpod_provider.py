@@ -185,7 +185,7 @@ def _decimal(value):
 
 
 class RunPodProvider:
-    # A positive provider stop releases compute. ERROR/404 of an unbound create
+    # A positive provider termination releases compute. ERROR/404 of an unbound create
     # never counts as a stop; the independent process receipt remains useful too.
     stop_confirms_execution = True
 
@@ -461,6 +461,13 @@ class RunPodProvider:
         raise ProviderUncertain("created worker readiness was not confirmed before its deadline")
 
     def stop(self, worker_id):
+        """Terminate owned Pods; retained network volumes are separate resources.
+
+        A container's EXITED state can still be billed. Since this adapter never
+        resumes Pods, deletion is the reliable lifecycle operation for stopping
+        compute and removing disposable Pod storage. Mutation acknowledgement
+        alone is not proof of release: callers must separately read back status.
+        """
         intent = self._intent(worker_id)
         if intent is None:
             raise ProviderCapabilityError("stop is restricted to a durable owned create intent")
@@ -469,22 +476,32 @@ class RunPodProvider:
         if intent["provider_id"] is not None:
             ids = [intent["provider_id"]]
         else:
-            ids = [_identifier(pod.get("id")) for pod in self._pods() if self._matches(pod, intent)]
+            matches = [pod for pod in self._pods() if self._matches(pod, intent)]
+            ids = [_identifier(pod.get("id")) for pod in matches]
             if not ids:
                 raise ProviderUncertain("create remains unbound; retry inventory reconciliation, never create")
+            if len(matches) == 1:
+                try:
+                    # Preserve a verified physical identity before deletion can
+                    # remove the inventory evidence for a timed-out create.
+                    self._observe(matches[0], intent)
+                except (ProviderUncertain, ProviderResponseError):
+                    # Conflicting configuration must not block emergency cleanup,
+                    # but cannot establish a trustworthy terminal identity either.
+                    pass
         errors = []
         for provider_id in ids:
             try:
-                self.transport.request("POST", "/v2/pods/" + quote(provider_id, safe="") + "/action", {"action": "stop"})
+                self.transport.request("DELETE", "/v2/pods/" + quote(provider_id, safe=""))
             except ProviderHTTPError as exc:
-                if exc.status not in (404, 409):
+                if exc.status != 404:
                     errors.append(exc)
             except Exception as exc:
                 errors.append(exc)
         if errors:
-            raise ProviderUncertain("one or more owned pods did not acknowledge the stop request") from None
-        # The caller must observe a positive terminal state separately. A 200 or
-        # conflict from the mutation alone never supplies termination evidence.
+            raise ProviderUncertain("one or more owned pods did not acknowledge termination") from None
+        # The caller must observe a positive terminal state separately. A success
+        # or 404 from the mutation alone never supplies termination evidence.
 
 
 class StopBrokerClient:

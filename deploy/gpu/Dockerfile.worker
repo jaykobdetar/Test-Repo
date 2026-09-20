@@ -7,6 +7,7 @@ COPY deploy/gpu/bootstrap-requirements.txt /tmp/bootstrap-requirements.txt
 RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes --no-deps -r /tmp/bootstrap-requirements.txt && rm /tmp/bootstrap-requirements.txt
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY probe_core ./probe_core
+COPY deploy/gpu/diagnose.py deploy/gpu/accept-resources.py /opt/probe/
 ENV UV_PROJECT_ENVIRONMENT=/opt/probe-core/venv UV_LINK_MODE=copy
 RUN uv sync --locked --extra worker --no-dev --no-editable && uv cache clean && \
     python -c 'import hashlib,json,pathlib,re,sys; commit=sys.argv[1]; assert re.fullmatch("[0-9a-f]{40}",commit); pathlib.Path("build-provenance.json").write_text(json.dumps({"source_commit":commit,"environment_lock_hash":"sha256:"+hashlib.sha256(pathlib.Path("uv.lock").read_bytes()).hexdigest()},sort_keys=True)+"\n")' "$SOURCE_COMMIT" && \

@@ -34,7 +34,7 @@ The only required startup input is `PUBLIC_KEY`, containing a single trusted Ed2
 
 The pinned PyTorch wheel uses CUDA 13. NVIDIA lists driver branch 580 as the minimum for that major version; the diagnostic checks the actual driver, exactly one GPU, and compute capability at least 8.0 for native BF16. See [NVIDIA's compatibility table](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html). The planned short-prompt worker batch reserves 20 GiB VRAM, 24 GiB RAM and four CPU cores; choose hardware with additional RAM for the supervisor and operating system.
 
-The current worker requires a real writable **delegated cgroup-v2 subtree**, with CPU, memory and PID controllers enabled for children. The diagnostic checks the filesystem type, writes fixed limits into a temporary empty child and reads them back. It does not change host processes or enable controllers on behalf of the provider. An ordinary writable directory cannot imitate this result. A read-only mount or missing delegation blocks model execution. Public RunPod API documentation has not established a way to request this delegation; an image cannot grant itself missing host capabilities. Provider-specific alternatives require measured evidence and a separate reviewed implementation.
+The worker requires a real writable **delegated cgroup-v2 subtree**, with CPU, memory and PID controllers enabled for children. RunPod may supply a writable namespace root with these controllers available but not yet enabled for children. The trusted bootstrap now prepares that delegation before dropping privileges: it moves the Pod's existing processes into `probe-bootstrap`, enables the three controllers, and creates `probe-jobs/supervisor`. The worker owns only the delegated job subtree; the provider's outer resource limits are preserved. Read-only mounts, v1-only hosts, missing delegation and unexpected pre-existing groups still block model execution.
 
 Before the empty-child probe, the diagnostic now records bounded cgroup mount,
 membership, namespace, ownership and permission observations. It opens the three
@@ -50,10 +50,16 @@ worker access. `worker_prerequisites_passed` requires the active empty-child
 probe to have run as the verified worker identity, including `cgroup.kill`
 availability and successful cleanup; a root diagnostic intentionally cannot
 grant that result. These probes still do not prove enforcement under load.
-The bootstrap's existing UID10001 invocation remains the worker prerequisite
-gate. Missing delegation is reported without changing controllers or migrating
-processes. Linux distinguishes controller availability from enabling controllers
-for children; see [cgroup v2 delegation](https://docs.kernel.org/admin-guide/cgroup-v2.html#delegation).
+The diagnostic itself remains observational except for its temporary empty-child
+probe. The separate trusted bootstrap validates the provider namespace before
+preparing its child groups. Linux distinguishes controller availability from
+enabling controllers for children; see [cgroup v2 delegation](https://docs.kernel.org/admin-guide/cgroup-v2.html#delegation).
+
+`deploy/gpu/accept-resources.py` provides a separate bounded live acceptance gate:
+CPU throttling under load, memory exhaustion, process creation refusal and whole
+group cleanup, including a descendant in a separate session. It runs as UID10001
+from the supervisor leaf and modifies only freshly created test groups. Passing
+local tests or reading configured limits does not substitute for this live result.
 
 ## Full worker image
 
@@ -67,7 +73,7 @@ docker build --platform linux/amd64 --file deploy/gpu/Dockerfile.worker --build-
 
 Replace placeholders with verified values. Publish only after reviewing the source commit; use the returned registry digest in the controller's deployment request and `WorkerConfig.container_image_digest`. A build alone does not establish CUDA compatibility or successful inference.
 
-The image bootstrap runs trusted SSH as container root, then the worker supervisor and numerical children as fixed UID/GID **10001** with a private home directory. It checks cgroup delegation under that unprivileged identity. A failed check exits; the external controller must still stop the paid Pod. The image does not contain cloud-management credentials, a Docker socket or an untrusted code endpoint.
+The image bootstrap runs trusted SSH as container root, then the worker supervisor and numerical children as fixed UID/GID **10001** with a private home directory. Before dropping privileges, each supervisor enters `probe-jobs/supervisor`; its numerical children can then move into individual attempt groups beneath the same delegated parent. It checks cgroup access under that unprivileged identity. A failed check exits; the external controller must still delete the paid Pod. The image does not contain cloud-management credentials, a Docker socket or an untrusted code endpoint. These GPU limits govern the fixed trusted operations; arbitrary untrusted Python continues to use the separate CPU sandbox.
 
 Before the GPU diagnostic, a separate no-model subprocess under UID10001 must traverse/read every declared model and dataset asset, read its private config/token, and create/fsync/remove small probes in the private tensor/output directories. It also rejects model/dataset files owned by or writable by the worker. A root-owned `0440` file in a root-only directory is insufficient: staged parent traversal and GID10001 read access must both be correct. The bootstrap performs no automatic recursive ownership changes.
 
@@ -79,7 +85,7 @@ Prepare volume permissions before launch:
 | `/workspace/probe/tensors` and `/workspace/probe/attempts` | UID/GID 10001, directories `0700` |
 | `/workspace/probe/config/worker.json` and `worker-token` | UID/GID 10001, files `0600`, private parent directory |
 
-Build `worker.json` from the verified inventory's `model` and `assets`, registered dataset hashes, actual live price/region, exact image digest and source commit, `device: "cuda:0"`, `backend: "nnsight"`, and the measured delegated cgroup path. The default config/token paths are shown above; trusted startup variables `PROBE_WORKER_CONFIG` and `PROBE_WORKER_TOKEN_FILE` may override them. The execution API binds only to loopback port 8080. The SSH server permits forwarding to that port; the controller still supplies its separate bearer secret.
+Build `worker.json` from the verified inventory's `model` and `assets`, registered dataset hashes, actual live price/region, exact image digest and source commit, `device: "cuda:0"`, `backend: "nnsight"`, and `cgroup_directory: "/sys/fs/cgroup/probe-jobs"`. The default config/token paths are shown above; trusted startup variables `PROBE_WORKER_CONFIG` and `PROBE_WORKER_TOKEN_FILE` may override them. The execution API binds only to loopback port 8080. The SSH server permits forwarding to that port; the controller still supplies its separate bearer secret.
 
 The bootstrap restarts a crashed **local supervisor** at most three times while SSH remains available. It neither restarts a Pod nor resubmits a job. The replacement supervisor adopts persisted PID/start-time/boot identity and the same attempt/deadline. Graceful SIGTERM closes the supervisor and terminates its children. The trusted lifecycle helper verifies `/run/probe-worker-supervisor.pid` against the actual process, its credentials, command and bootstrap parent before a restart test.
 

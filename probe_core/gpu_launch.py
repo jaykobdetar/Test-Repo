@@ -4,6 +4,7 @@ Root supervises SSH. The numerical supervisor runs as the fixed unprivileged
 worker UID. No provider credential or paid action exists in this entry point.
 """
 import json
+from functools import partial
 import os
 from pathlib import Path
 import re
@@ -18,10 +19,14 @@ from .worker_contracts import WorkerConfig
 WORKER_UID = 10001
 
 
-def _worker_identity():
-    os.setgroups([])
-    os.setgid(WORKER_UID)
-    os.setuid(WORKER_UID)
+def _prepare_worker_cgroups(config: WorkerConfig):
+    from .pod_bootstrap import prepare
+
+    # This path is created inside the verified, provider-delegated namespace.
+    # An arbitrary writable host cgroup is not an equivalent launch contract.
+    if config.cgroup_directory != "/sys/fs/cgroup/probe-jobs":
+        raise ValueError("RunPod worker cgroup_directory must be /sys/fs/cgroup/probe-jobs")
+    return prepare(root="/sys/fs/cgroup", worker_uid=WORKER_UID, worker_gid=WORKER_UID)
 
 
 def _private_worker_file(path):
@@ -98,6 +103,9 @@ def main():
     provenance = json.loads(Path("/opt/probe-core/build-provenance.json").read_text())
     if config.device != "cuda:0" or config.provider_backend != "runpod" or config.code_git_commit != provenance["source_commit"]:
         raise SystemExit("worker configuration must match this reviewed CUDA image and actual source commit")
+    from .pod_bootstrap import enter_supervisor_and_drop
+    scope = _prepare_worker_cgroups(config)
+    worker_identity = partial(enter_supervisor_and_drop, scope)
     public_key = os.environ.pop("PUBLIC_KEY", "").strip()
     if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: [^\r\n]+)?", public_key):
         raise SystemExit("PUBLIC_KEY must be one trusted Ed25519 public key")
@@ -116,13 +124,17 @@ def main():
     # access would not prove that the numerical supervisor can enforce limits.
     worker_environment = dict(os.environ, HOME="/home/probe-worker", USER="probe-worker", LOGNAME="probe-worker")
     paths = subprocess.run([sys.executable, "-m", "probe_core.gpu_launch", "--check-paths", str(config_path), str(token_path)],
-                           preexec_fn=_worker_identity, env=worker_environment, timeout=30, check=False)
+                           preexec_fn=worker_identity, env=worker_environment, timeout=30, check=False)
     if paths.returncode != 0:
         raise SystemExit("worker asset permissions failed before model loading; external controller must stop the Pod")
     preflight = subprocess.run([sys.executable, "/opt/probe/diagnose.py", "--cgroup-root", config.cgroup_directory],
-                               preexec_fn=_worker_identity, env=worker_environment, timeout=45, check=False)
+                               preexec_fn=worker_identity, env=worker_environment, timeout=45, check=False)
     if preflight.returncode != 0:
         raise SystemExit("worker prerequisites failed; the external controller must stop this paid Pod")
+    containment = subprocess.run([sys.executable, "/opt/probe/accept-resources.py", "--cgroup-root", config.cgroup_directory],
+                                 preexec_fn=worker_identity, env=worker_environment, timeout=40, check=False)
+    if containment.returncode != 0:
+        raise SystemExit("worker resource enforcement failed under load; external controller must delete the Pod")
     stopped = False
     def terminate(*_):
         nonlocal stopped
@@ -132,7 +144,7 @@ def main():
     ssh = subprocess.Popen(["/usr/sbin/sshd", "-D", "-e", "-f", str(ssh_config)], start_new_session=True)
     def start_worker():
         process = subprocess.Popen([sys.executable, "-m", "probe_core.worker", "--config", str(config_path), "--token-file", str(token_path), "--port", "8080"],
-                                   preexec_fn=_worker_identity, env=worker_environment, start_new_session=True)
+                                   preexec_fn=worker_identity, env=worker_environment, start_new_session=True)
         Path("/run/probe-worker-supervisor.pid").write_text(str(process.pid)+"\n")
         print(json.dumps({"worker_supervisor_pid": process.pid, "execution_authority_renewed": False}), flush=True)
         return process

@@ -21,9 +21,13 @@ controller process crash, but shares the host's power and network failure modes.
   deadline. A new approval cannot extend an existing interval.
 - Reconcile uncertain creation using a durable logical worker ID, request ID and
   configuration hash in Pod metadata. A timeout never triggers another create.
-- Stop only Pods associated with durable owned creation intents, through REST v2,
-  and obtain a separate readback. An unbound or newly created Pod's first 404 is
-  uncertain. `ERROR`, nonzero billed cost and inconsistent runtime remain uncertain.
+- Stop by permanently deleting only Pods associated with durable owned creation
+  intents, using REST v2 `DELETE /pods/{id}`, then obtain a separate readback.
+  This removes the Pod's disposable disks; its independently managed network
+  volume survives. A successful DELETE response is not itself stop evidence.
+  Absence of a previously observed, durably bound Pod confirms release; an
+  unbound or newly created Pod's first 404 remains uncertain. `ERROR`, nonzero
+  billed cost and inconsistent runtime remain uncertain.
 - Replace a stopped worker with a fresh approved Pod using the same network
   volume. Resume is disabled because its API lacks an atomic purchase ceiling.
 
@@ -44,6 +48,10 @@ trusted service UID. Only that UID can read the API key (owned by that UID, mode
 group or others. The watchdog has a separate UID and no provider key. Its Unix
 broker endpoint accepts only that UID and only `status` / `stop` for logical
 worker IDs; it has no start, create, credential or arbitrary HTTP method.
+Here `stop` terminates the Pod rather than keeping a stopped Pod for later reuse.
+An uncertain create's single matching inventory entry is verified and bound
+before deletion. Conflicting or duplicate matches remain uncertain after cleanup;
+they never authorize another purchase automatically.
 
 This is an operating-system credential boundary. RunPod's documented API-key
 permissions do not provide a Pod stop-only scope. The account key never enters
@@ -85,8 +93,14 @@ nonce cannot be consumed as an infrastructure allowance.
 
 - [Live REST v2 OpenAPI](https://api.runpod.io/v2/openapi.json): create has no
   purchase ceiling/deadline/idempotency input; Pod actions accept an action only;
-  inventories are cursor-paginated. The stop action is documented to release
-  compute. `EXITED`/`TERMINATED` costs are reported as zero.
+  inventories are cursor-paginated. Live observations showed that `EXITED` can
+  coexist with a nonzero reported cost, so container state alone does not
+  establish release.
+- [Terminate a Pod](https://docs.runpod.io/api-reference-v2/pods/terminate-a-pod):
+  permanent termination releases compute. The adapter uses this operation
+  because Pod resume is unsupported and durable assets are on network volumes.
+  Repeated DELETE is safe for the exact owned identity; conflicts and transport
+  errors remain uncertain until a separate positive readback.
 - [GraphQL schema](https://graphql-spec.runpod.io/): initial on-demand create has
   `deployCost`, `stopAfter` and `terminateAfter`; resume has neither a purchase
   ceiling nor a deadline. The published Pod object provides no deadline readback.
