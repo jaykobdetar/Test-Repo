@@ -225,14 +225,14 @@ def test_runner_refuses_changed_direction_recipe_before_submission(prepared, fie
     assert s.ledger.list_jobs() == [] and s.http.purchases == []
 
 
-def test_separate_direction_plan_preserves_the_existing_seven_case_plan(prepared):
+def test_separate_direction_plan_preserves_the_runtime_case_plan(prepared):
     s = prepared
     case = s.plan.cases[0]
     assert case.spec.idempotency_key == s.plan.label and case.name == 'public-direction-transfer'
     assert case.spec.operation.direction.model_dump(mode='json') == direction_reference()
     inputs = case.spec.inputs
     assert len(fixed_plan(s.plan.model, s.plan.label, inputs.dataset_revision,
-                         inputs.prompt_set_hash, inputs.prompt_ids).cases) == 7
+                         inputs.prompt_set_hash, inputs.prompt_ids).cases) == 8
     assert controller_direction(s.registry) == s.registration
 
 

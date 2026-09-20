@@ -42,7 +42,7 @@ from .dispatcher import (Dispatcher, DispatcherService, SSHTunnel, WorkerClient,
                          SSH_FAILURE_PATTERNS, TransportError, ssh_failure_classification)
 from .direction_transfer import DIRECTION_SHA256, READBACK_PROGRAM, DirectionDispatcher
 from .gpu_acceptance import AcceptancePlan, collect, fixed_direction_plan, fixed_plan
-from .gpu_acceptance_actions import SSHActionClient, run_action
+from .gpu_acceptance_actions import SSHActionClient, _authority, run_action
 from .ledger import JobState, Ledger
 from .provider import DeploymentSpec, WorkerState
 from .rpc import UnixRPCClient, decode
@@ -261,7 +261,7 @@ def validate_plan(config, plan):
         require(case == expected, 'FIXED_CALIBRATION_CASE_REQUIRED')
     else:
         require(case.name in {'capture-retention', 'hard-deadline', 'output-limit', 'vram-limit',
-                             'cancel-running', 'supervisor-restart'}, 'FIXED_CALIBRATION_CASE_REQUIRED')
+                             'cancel-running', 'supervisor-restart', 'tunnel-reconnect'}, 'FIXED_CALIBRATION_CASE_REQUIRED')
         inputs = case.spec.inputs
         expected = next(item for item in fixed_plan(plan.model, plan.label, inputs.dataset_revision,
                         inputs.prompt_set_hash, inputs.prompt_ids).cases if item.name == case.name)
@@ -834,6 +834,9 @@ class RunningAction:
         self.done = threading.Event()
         self.entered = threading.Event()
         self.start_attempted = False
+        self.reconnect_pending = threading.Event()
+        self.reconnect_finished = threading.Event()
+        self.reconnect_request = self.reconnect_result = None
         self.report = None
         self.passed = False
         self.clock = clock
@@ -849,7 +852,7 @@ class RunningAction:
         remote = SimpleNamespace(status=guarded(client.status), cancel=guarded(client.cancel))
         helper = SimpleNamespace(config_sha256=lifecycle.config_sha256,
             endpoint_identity=lifecycle.endpoint_identity, inspect=guarded(lifecycle.inspect),
-            restart=guarded(lifecycle.restart))
+            restart=guarded(lifecycle.restart), reconnect=guarded(self.request_reconnect))
 
         def execute():
             self.entered.set()
@@ -881,6 +884,18 @@ class RunningAction:
         self.check()
         self.start_attempted = True
         self.thread.start()
+
+    def request_reconnect(self, request, action_id, *, expected_before):
+        # run_action has already durably recorded its once-only intent. The
+        # action thread never closes a transport while the dispatcher uses it.
+        self.check()
+        require(self.reconnect_request is None, 'TUNNEL_RECONNECT_ALREADY_REQUESTED')
+        self.reconnect_request = (request, action_id, expected_before)
+        self.reconnect_pending.set()
+        while not self.reconnect_finished.wait(.1):
+            self.check()
+        self.check()
+        return self.reconnect_result
 
     def check(self):
         if self.stop.is_set() or self.clock() >= self.deadline or time.monotonic() >= self.monotonic_deadline:
@@ -927,6 +942,57 @@ def read_worker_direction(settings, phase, *, deadline, clock=time.time, command
     # nothing from this remote output is published unless that comparison passes.
     require(type(value) is dict, 'DIRECTION_READBACK_INVALID')
     return value
+
+
+def reconnect_owned_tunnel(task, ledger, dispatcher, service, tunnel, lifecycle, settings,
+                          configuration, transports, tunnel_factory, *, clock=time.time,
+                          lifecycle_factory=SSHActionClient):
+    """Replace only local SSH, between dispatcher ticks and within a live lease."""
+    task.check()
+    request, action_id, before = task.reconnect_request
+    now = datetime.fromtimestamp(clock(), timezone.utc)
+    job = ledger.get_job(request.job_id)
+    require(dispatcher._request(job) == request and _authority(ledger, request, now),
+            'TUNNEL_RECONNECT_AUTHORITY_CHANGED')
+    # Close may need 10s, opening may need 10s, and the next status call 5s.
+    # A reconnect that cannot fit cannot revive an expired execution allowance.
+    require(request.deadline.timestamp() - now.timestamp() > 25, 'TUNNEL_RECONNECT_WINDOW_EXHAUSTED')
+    pinned = lifecycle_factory(lifecycle_settings(settings, configuration))
+    require(pinned.endpoint_identity == lifecycle.endpoint_identity, 'TUNNEL_RECONNECT_ENDPOINT_CHANGED')
+    old_process = tunnel.process
+    require(old_process is not None and old_process.poll() is None, 'TUNNEL_RECONNECT_NOT_LIVE')
+    previous = {'pid': old_process.pid, 'local_port': tunnel.local_port}
+    renewed = ledger.heartbeat(request.job_id, request.attempt_id, request.worker_id, lease_seconds=30)
+    require(dispatcher._request(renewed) == request and renewed.lease_expires_at.timestamp() <= request.deadline.timestamp(),
+            'TUNNEL_RECONNECT_DEADLINE_CHANGED')
+    task.check()
+    tunnel.close()
+    previous['exit_status'] = old_process.poll()
+    require(type(previous['exit_status']) is int, 'TUNNEL_RECONNECT_OLD_PROCESS_NOT_STOPPED')
+    task.check()
+    # Revalidate the key/config binding after close as well as before it. The
+    # replacement uses the identical local port, so observer clients keep the
+    # same loopback URL and no upload, configuration or submission is replayed.
+    require(lifecycle_factory(lifecycle_settings(settings, configuration)).endpoint_identity == pinned.endpoint_identity,
+            'TUNNEL_RECONNECT_ENDPOINT_CHANGED')
+    replacement = tunnel_factory(**settings, local_port=previous['local_port'])
+    transports.callback(replacement.close)  # Own cleanup before starting another SSH process.
+    require(replacement.__enter__() is replacement, 'TUNNEL_RECONNECT_TRANSPORT_INVALID')
+    task.check()
+    require(replacement.process is not None and replacement.process.poll() is None
+            and replacement.local_port == previous['local_port'] and replacement.process.pid != previous['pid']
+            and _authority(ledger, request, datetime.fromtimestamp(clock(), timezone.utc)),
+            'TUNNEL_RECONNECT_AUTHORITY_CHANGED')
+    service.tunnel = replacement
+    ack = {'schema_version': 1, 'operation': 'reconnect_tunnel', 'action_id': action_id,
+           'replayed': False, 'before': before, 'endpoint_identity': pinned.endpoint_identity,
+           'previous_transport': previous,
+           'replacement_transport': {'pid': replacement.process.pid, 'local_port': replacement.local_port},
+           'renewed_at': now.isoformat(), 'previous_lease': job.lease_expires_at.timestamp(),
+           'renewed_lease': renewed.lease_expires_at.timestamp(), 'execution_deadline': request.deadline.timestamp()}
+    task.reconnect_result = ack
+    task.reconnect_finished.set()
+    return replacement
 
 
 def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=time.sleep,
@@ -1003,7 +1069,10 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
         result['stage'] = 'ssh_tunnel'
         progress(result['stage'])
         with ExitStack() as resources:
-            tunnel = resources.enter_context(tunnel_factory(**settings))
+            # The action stop callback stays above this whole transport stack,
+            # including a subsequently opened replacement tunnel.
+            transports = resources.enter_context(ExitStack())
+            tunnel = transports.enter_context(tunnel_factory(**settings))
             client = client_factory(f'http://127.0.0.1:{tunnel.local_port}', secret, timeout_seconds=5)
             result['stage'] = 'worker_readiness'
             progress(result['stage'])
@@ -1037,6 +1106,11 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                                                 deadline=deadline, clock=clock, action=action)
                     resources.callback(action_task.stop.set)  # Runs before the tunnel's potentially slow close.
                     action_task.start()  # Ownership and cleanup exist before a thread can run.
+                if (action_task is not None and action_task.reconnect_pending.is_set()
+                        and not action_task.reconnect_finished.is_set()):
+                    tunnel = reconnect_owned_tunnel(action_task, ledger, dispatcher, service, tunnel, lifecycle,
+                        settings, result['configuration'], transports, tunnel_factory, clock=clock,
+                        lifecycle_factory=lifecycle_factory)
                 if action_task is not None and action_task.done.is_set():
                     require(action_task.passed, 'LIFECYCLE_ACTION_NOT_ESTABLISHED')
                 if job.state in (JobState.COMPLETED, JobState.FAILED):

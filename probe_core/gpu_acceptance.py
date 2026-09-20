@@ -20,7 +20,7 @@ from .worker_contracts import PromptDataset, WorkerConfig, WorkerState
 
 class AcceptanceCase(FrozenModel):
     name: Identifier
-    action: Literal["wait", "cancel_after_running", "restart_supervisor_after_running"]
+    action: Literal["wait", "cancel_after_running", "restart_supervisor_after_running", "reconnect_tunnel_after_running"]
     expected_state: Literal["COMPLETED", "FAILED"]
     expected_failure_kind: Literal["timeout", "cancelled", "policy", "oom"] | None = None
     spec: JobSpec
@@ -80,6 +80,7 @@ def fixed_plan(model: ModelIdentity, label: str, dataset_revision: str,
         ("output-limit", "wait", "FAILED", "policy", None, {"max_output_bytes": 1}),
         ("vram-limit", "wait", "FAILED", "oom", None, {"max_vram_bytes": 1024**3}),
         ("supervisor-restart", "restart_supervisor_after_running", "COMPLETED", None, None, {}),
+        ("tunnel-reconnect", "reconnect_tunnel_after_running", "COMPLETED", None, None, {}),
     ]
     cases = []
     for name, action, state, kind, operation, limits in definitions:
@@ -213,9 +214,11 @@ def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = 
         remaining.append("cancellation requested after the exact attempt was observed running")
     if "restart_supervisor_after_running" not in proven_actions:
         remaining.append("supervisor PID changed while the same attempt remained fenced")
+    if "reconnect_tunnel_after_running" not in proven_actions:
+        remaining.append("owned SSH tunnel reconnected to the same endpoint while preserving the exact live attempt")
     remaining.extend(["provider-confirmed stop and separately approved restart/replacement",
                       "model and retained-artifact hash readback after replacement"])
-    # Action transcripts can prove a local cancellation or supervisor restart.
+    # Action transcripts can prove cancellation, supervisor restart or local SSH replacement.
     # They cannot prove provider shutdown, asset persistence or Pod replacement.
     return {"schema_version": 1, "kind": "gpu_runtime_acceptance_observations", "model": plan.model.model_dump(mode="json"),
             "case_results_passed": all(row["passed"] for row in reports), "cases": reports,

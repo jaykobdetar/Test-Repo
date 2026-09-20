@@ -22,13 +22,13 @@ def test_plan_requires_live_canonical_config_and_submits_no_approval(manifest_da
                         tensor_directory=str(tmp_path/"tensors"),output_directory=str(tmp_path/"output"),device="cuda:0",backend="nnsight",
                         code_git_commit="a"*40,container_image_digest="sha256:"+"b"*64,provider_backend="runpod",region="test-fixture",live_price_usd_per_hour=0.74,cgroup_directory="/not-a-real-cgroup-test-fixture")
     plan=make_plan(config,"base-acceptance")
-    assert len(plan.cases)==7
+    assert len(plan.cases)==8
     assert plan.cases[0].spec.operation.kind=="backend_parity"
     assert all(case.spec.experiment_stage.value=="calibration" for case in plan.cases)
     with Ledger(tmp_path/"ledger.sqlite") as ledger:
         queued=submit(ledger,plan)
         assert not queued["approval_consumed"] and not queued["compute_started"]
-        assert len(queued["job_ids"])==7
+        assert len(queued["job_ids"])==8
         observed=collect(ledger,plan)
         assert not observed["case_results_passed"]
         assert not observed["lifecycle_acceptance_complete"]

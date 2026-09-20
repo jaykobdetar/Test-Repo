@@ -271,6 +271,33 @@ def _process_key(identity):
     return tuple(identity[key] for key in ("pid", "identity", "boot_id"))
 
 
+def _reconnect_ack(ack, before, request, action_id, endpoint_identity):
+    """Revalidate a local transport replacement without granting job authority."""
+    try:
+        if (type(ack) is not dict or ack.get("schema_version") != 1
+                or ack.get("operation") != "reconnect_tunnel" or ack.get("action_id") != action_id
+                or ack.get("replayed") is not False or ack.get("endpoint_identity") != endpoint_identity
+                or not _stable(before, _snapshot(ack["before"], request))
+                or before["supervisor"] != ack["before"]["supervisor"]):
+            return False
+        old, new = ack["previous_transport"], ack["replacement_transport"]
+        if (set(old) != {"pid", "exit_status", "local_port"} or set(new) != {"pid", "local_port"}
+                or any(type(value["pid"]) is not int or value["pid"] <= 1 for value in (old, new))
+                or old["pid"] == new["pid"] or type(old["exit_status"]) is not int
+                or not -255 <= old["exit_status"] <= 255
+                or any(type(value["local_port"]) is not int or not 1 <= value["local_port"] <= 65535 for value in (old, new))
+                or old["local_port"] != new["local_port"]):
+            return False
+        renewed = datetime.fromisoformat(ack["renewed_at"])
+        leases = (ack["previous_lease"], ack["renewed_lease"])
+        return (renewed.tzinfo is not None
+                and all(type(value) in (int, float) and math.isfinite(value) for value in leases)
+                and renewed.timestamp() < min(leases) <= max(leases) <= request.deadline.timestamp()
+                and ack["execution_deadline"] == request.deadline.timestamp())
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _cancel_proof(snapshot, before, request):
     proof = snapshot.get("cancellation")
     proof_hash = snapshot.get("cancellation_sha256")
@@ -333,6 +360,8 @@ def run_action(ledger, plan, *, case_name, job_id, attempt_id, approval_id, clie
     if len(matches) != 1 or matches[0].action == "wait":
         raise ActionError("ACTION_CASE_INVALID")
     case = matches[0]
+    if case.action == "reconnect_tunnel_after_running" and not callable(getattr(lifecycle, "reconnect", None)):
+        raise ActionError("TUNNEL_RECONNECT_REQUIRES_RUNNER")
     if case.spec.experiment_stage.value != "calibration" or case.spec.model != plan.model:
         raise ActionError("ACTION_REQUIRES_CALIBRATION_PLAN")
     job = ledger.get_job(job_id)
@@ -376,6 +405,10 @@ def run_action(ledger, plan, *, case_name, job_id, attempt_id, approval_id, clie
                 try:
                     if case.action == "cancel_after_running":
                         ack = {"operation": "cancel", "receipt": _receipt(client.cancel(attempt_id), request).model_dump(mode="json")}
+                    elif case.action == "reconnect_tunnel_after_running":
+                        ack = lifecycle.reconnect(request, action_id, expected_before=checked)
+                        if not _reconnect_ack(ack, checked, request, action_id, lifecycle.endpoint_identity):
+                            return _report(binding, action_id, "uncertain", "TUNNEL_RECONNECT_NOT_ESTABLISHED", intent)
                     else:
                         ack = lifecycle.restart(request, action_id, expected_before=checked)
                         if (ack.get("action_id") != action_id or ack.get("operation") != "restart" or
@@ -426,6 +459,16 @@ def run_action(ledger, plan, *, case_name, job_id, attempt_id, approval_id, clie
                         break
                     if not after["child_alive"] and not checked["child_alive"]:
                         result = _report(binding, action_id, "passed", "EXACT_RUNNING_ATTEMPT_CANCELLED", intent, ack, checked, receipt)
+                        break
+                elif case.action == "reconnect_tunnel_after_running":
+                    if (not _running(after, request, clock()) or not _running(checked, request, clock())
+                            or receipt.state != WorkerState.RUNNING or receipt.process_stopped
+                            or before["supervisor"] != after["supervisor"]
+                            or before["supervisor"] != checked["supervisor"]):
+                        result = _report(binding, action_id, "inconclusive", "RECONNECT_DID_NOT_PRESERVE_LIVE_ATTEMPT", intent, ack, checked, receipt)
+                        break
+                    if _authority(ledger, request, clock()):
+                        result = _report(binding, action_id, "passed", "TUNNEL_RECONNECTED_EXACT_ATTEMPT", intent, ack, checked, receipt)
                         break
                 else:
                     if not _running(after, request, clock()) or not _running(checked, request, clock()) or receipt.state != WorkerState.RUNNING or receipt.process_stopped:
@@ -479,6 +522,11 @@ def _recorded_proof(report, intent, acknowledgment, request, action):
         outcomes = [receipt, _receipt(after["receipt"], request), _receipt(ack["receipt"], request)]
         return (ack.get("operation") == "cancel" and _cancel_proof(after, before, request) and
                 all(item.state == WorkerState.CANCELLED and item.failure_kind == "cancelled" and item.process_stopped for item in outcomes))
+    if action == "reconnect_tunnel_after_running":
+        return (_reconnect_ack(ack, before, request, report["action_id"], report["binding"]["endpoint_identity"])
+                and before["supervisor"] == after["supervisor"]
+                and _running(after, request, datetime.fromisoformat(after["observed_at"]))
+                and receipt.state == WorkerState.RUNNING and not receipt.process_stopped)
     return (ack.get("operation") == "restart" and ack.get("action_id") == report["action_id"] and
             ack.get("signal_sent") is True and ack.get("replayed") is False and
             _stable(before, _snapshot(ack["before"], request)) and ack["before"]["supervisor"] == before["supervisor"] and
