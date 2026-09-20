@@ -208,13 +208,28 @@ def test_successful_root_probe_cannot_certify_worker_prerequisites(tmp_path, mon
     assert implementation.diagnose(tmp_path)["worker_prerequisites_passed"] is False
 
 
-@pytest.mark.parametrize("row", ["NVIDIA RTX 3090, GPU-test, 580.65.06, 24564, 8.9", "NVIDIA GeForce RTX 4090, GPU-test, 580.65.06, 123, 8.9", "NVIDIA GeForce RTX 4090, GPU-test, 580.65.06, 50000, 8.9", "NVIDIA GeForce RTX 4090, GPU-test, 580.65.06, 24564, inf", "NVIDIA GeForce RTX 4090, GPU-test, 580.65.06, 24564, nan", "NVIDIA GeForce RTX 4090, GPU-test, 580.65.06, 24564, invalid", "NVIDIA GeForce RTX 4090, GPU-test, 570.1, 24564, 8.9"])
+@pytest.mark.parametrize("row", ["NVIDIA RTX 3090, GPU-test, 580.65.06, 24564, 8.9", "NVIDIA GeForce RTX 4090, GPU-test, 580.65.06, 123, 8.9", "NVIDIA GeForce RTX 4090, GPU-test, 580.65.06, 22999, 8.9", "NVIDIA GeForce RTX 4090, GPU-test, 580.65.06, 24564, inf", "NVIDIA GeForce RTX 4090, GPU-test, 580.65.06, 24564, nan", "NVIDIA GeForce RTX 4090, GPU-test, 580.65.06, 24564, invalid", "NVIDIA GeForce RTX 4090, GPU-test, 570.1, 24564, 8.9"])
 def test_gpu_identity_and_finite_capability_are_required(tmp_path, monkeypatch, row):
     implementation = module()
     monkeypatch.setattr(implementation,"_command",lambda _: {"returncode":0,"stdout":row+"\n"})
     monkeypatch.setattr(implementation,"inspect_cgroup",lambda _: {"worker_identity_verified":True})
     monkeypatch.setattr(implementation,"cgroup_probe",lambda _: {"passed":True})
     assert implementation.diagnose(tmp_path)["worker_prerequisites_passed"] is False
+
+
+@pytest.mark.parametrize("memory_mib,passed", [(23000, True), (24564, True), (49140, True), (50000, True),
+                                             (22999, False), (20480, False), ("nan", False), ("inf", False), ("49140.5", False)])
+def test_vram_is_a_minimum_capacity_check_including_measured_48gib_device(tmp_path, monkeypatch, memory_mib, passed):
+    implementation = module()
+    row = f"NVIDIA GeForce RTX 4090, GPU-test, 595.71.05, {memory_mib}, 8.9\n"
+    monkeypatch.setattr(implementation, "_command", lambda _: {"returncode":0, "stdout":row})
+    monkeypatch.setattr(implementation, "inspect_cgroup", lambda _: {"worker_identity_verified":True})
+    monkeypatch.setattr(implementation, "cgroup_probe", lambda _: {"passed":True})
+    report = implementation.diagnose(tmp_path)
+    assert report["cuda13_native_bf16_hardware_passed"] is passed
+    assert report["worker_prerequisites_passed"] is passed
+    assert report["nvidia_smi"]["stdout"] == row  # Preserve observed capacity; never rewrite it to 24 GiB.
+    assert report["scientific_evidence"] is False and report["provider_stop_verified"] is False
 
 
 @pytest.mark.parametrize("measurement", [("1e100",1,0), ("8.9",2,0), ("8.9",1,1)])

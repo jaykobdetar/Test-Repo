@@ -1,4 +1,8 @@
-"""No-model, no-inference GPU/cgroup measurement. Never starts/stops cloud resources."""
+"""No-model, no-inference GPU/cgroup measurement. Never starts/stops cloud resources.
+
+Device capacity is a minimum prerequisite, not permission to allocate that much.
+A larger measured GPU does not increase the approved 20 GiB per-job VRAM limit.
+"""
 from __future__ import annotations
 
 import argparse
@@ -17,6 +21,7 @@ import sys
 import uuid
 
 WORKER_UID = 10001
+MIN_GPU_MEMORY_MIB = 23000
 READ_LIMIT = 8192
 MAX_MOUNTS = 32
 MAX_ANCESTORS = 16
@@ -490,7 +495,7 @@ def diagnose(cgroup_root: Path):
             row = gpu_rows[0]
             capability = float(row[4])
             gpu_passed = (row[0] == "NVIDIA GeForce RTX 4090" and int(row[2].split(".")[0]) >= 580
-                          and 24000 <= int(row[3]) <= 25000 and math.isfinite(capability) and capability == 8.9)
+                          and int(row[3]) >= MIN_GPU_MEMORY_MIB and math.isfinite(capability) and capability == 8.9)
         except ValueError:
             gpu_passed = False
     inspection = inspect_cgroup(cgroup_root)

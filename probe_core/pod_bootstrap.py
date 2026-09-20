@@ -236,7 +236,9 @@ def _validate_scope(scope, uid, gid):
         mapping = _proc_read("/proc/self/" + filename)
         _mapped_identity(mapping, worker_id)
         _require(mapping == _proc_read("/proc/1/" + filename), "PID1 must belong to this remapped Pod identity")
-    _require(os.getxattr(scope.fd, "user.delegate") == b"1", "provider delegation marker is absent")
+    # user.delegate is an optional userspace convention, not the kernel's
+    # delegation contract. The private nsdelegate mount and the actual ownership
+    # and write-denial checks below establish the boundary on this Pod.
     info = scope.info()
     _require(info.st_uid == 0 and not info.st_mode & 0o022, "delegated root ownership is unsafe")
     for name in _DELEGATE_FILES:

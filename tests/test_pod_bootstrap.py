@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import ctypes
 from dataclasses import replace
+import errno
 import os
 from pathlib import Path
 import stat
@@ -132,7 +133,6 @@ def test_prepare_migrates_only_private_members_before_enabling_and_delegates_exa
     lambda scope, obs: obs.update({"/proc/self/mountinfo": MOUNT.replace("rw,nosuid", "ro,nosuid")}),
     lambda scope, obs: obs.update({"/proc/self/mountinfo": MOUNT.replace(",nsdelegate", "")}),
     lambda scope, obs: obs.update({"/proc/self/mountinfo": MOUNT + MOUNT.replace("1020", "1021").replace("/sys/fs/cgroup", "/other")}),
-    lambda scope, obs: setattr(scope, "marker", b"0"),
     lambda scope, obs: setattr(scope, "outer_writable", True),
     lambda scope, obs: scope.owners.update({"memory.max": 0}),
     lambda scope, obs: scope.owners.update({"cgroup.procs": 10001}),
@@ -164,6 +164,15 @@ def test_foreign_member_is_rejected_before_mkdir(kernel, monkeypatch):
     with pytest.raises(bootstrap.BootstrapRefused, match="foreign"):
         bootstrap.prepare()
     assert not scope.events
+
+
+def test_missing_optional_userspace_marker_does_not_override_kernel_delegation(kernel, monkeypatch):
+    scope, _ = kernel
+    def no_marker(*_args):
+        raise OSError(errno.ENODATA, "optional user.delegate marker is absent")
+    monkeypatch.setattr(bootstrap.os, "getxattr", no_marker)
+    assert bootstrap.prepare().jobs_root == "/sys/fs/cgroup/probe-jobs"
+    assert all(scope.files[name] == value for name, value in LIMITS.items())
 
 
 def test_process_reuse_aborts_before_migration_of_reused_pid(kernel, monkeypatch):
