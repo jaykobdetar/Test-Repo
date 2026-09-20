@@ -31,6 +31,11 @@ and deletion failures reproduce this sequence locally. That proves a failure
 mechanism, not the historical first trigger. No transient-status retry policy or
 cause-audit correction is represented as installed.
 
+The next source correction retains the initiating stop cause and allows one
+bounded retry for a known running Pod's transient status error. Local regressions
+cover recovery, exhausted retries, original deadline enforcement and sanitized
+audit evidence. Installation and a new live Base run remain the next gates.
+
 The operator's retained evidence is named in [validation status](validation.md).
 Do not replay a consumed allowance or erase these failed requests when preparing
 a future run. Diagnosis and a matching regression must precede another paid retry.

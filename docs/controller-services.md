@@ -91,7 +91,18 @@ request a stop after a provider-status error without retaining that original
 error. A later deletion failure is recorded as `ProviderUncertain`, and the
 watchdog then records `uncertain_action`. A local injected HTTP503 sequence
 reproduces this mechanism, but it does not identify the historical first error.
-No new provider retry policy or cause-audit correction is claimed as installed.
+The source correction records the initiating cause in the same audit transaction
+as `STOP_REQUESTED`, before any deletion. It includes only fixed reason codes,
+an exception category and bounded HTTP metadata, never response bodies or raw
+headers. It is not yet part of the installed controller at the status above.
+
+For an already running, physically identified RunPod, reconciliation may retry
+one status read after HTTP 429, 502, 503 or 504. It waits two seconds only when
+the complete request timeout still fits inside the original deadline. A longer
+or unparsed `Retry-After`, challenge, second failure, expired deadline or changed
+binding receives no further retry. Normal creation and stop/readback calls keep
+their existing one-shot behavior. This does not extend an approval or allow
+cached status to stand in for provider confirmation.
 
 ## Research client contract
 
