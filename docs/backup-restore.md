@@ -52,6 +52,14 @@ administrator installer copies only the `gdrive` remote, excluding unrelated
 configured storage accounts. OAuth refreshes may update this service-owned file.
 Its token contents never enter command arguments, logs, receipts or the archive.
 
+Configure a dedicated Google OAuth client for a lasting installation. Leaving
+`client_id` blank uses rclone's shared application and its shared API quota;
+another user's traffic can then interrupt this controller's backups. Rclone also
+[documents retirement of the shared client during 2026](https://rclone.org/drive/#making-your-own-client-id).
+Changing the client requires authorizing the replacement connection; it does not
+require moving or deleting the existing backup folder. Keep the replacement
+client secret and tokens in the same private service-owned configuration.
+
 `probe-backup.service` invokes the snapshot producer first, then uploads completed
 archives through rclone with an explicitly pinned Drive folder ID. Each object is
 named by the immutable snapshot ID. The uploader downloads the full remote object,
@@ -64,12 +72,29 @@ An expired/revoked OAuth grant, transfer failure or altered download fails visib
 none produces a success receipt. The reviewed administrator installer enables a
 daily timer with up to ten minutes of jitter and catches up after downtime.
 Existing exact archive hashes with verified remote receipts skip repeated transfers.
+Immutable uploads compare checksums, so recreating a temporary staging file with
+a different timestamp does not make an unchanged archive conflict with itself.
+Transfers have bounded retries for rate limits and temporary network failures.
+Every download retry discards partial bytes before starting again; a successful
+command alone is insufficient to create a receipt. Authentication, permission,
+content-conflict and unclassified errors still stop the upload. Failure messages
+contain a fixed error code, operation and attempt number, never provider error
+text or credentials.
 After a successful backup, a separate trusted retention service keeps the newest
 two verified local archives. It removes only an older archive with a matching
 successful remote/readback/restore receipt; unverified and unrelated files remain.
 When an upload is pending, the producer retries it rather than accumulating new
 daily archives. Remote snapshots are retained; no Drive delete operation is used.
 Local space or remote quota failures remain visible and require operator action.
+
+For a schema-3 controller upgrade, the reviewed release also pins the replacement
+backup transport. Before installing application files, the upgrader runs that
+transport temporarily as the existing backup identity with the same snapshot
+dependency and filesystem restrictions. It finishes pending uploads, then creates
+and verifies a fresh snapshot matching the current ledger/provider history and
+audit prefix. The temporary service override is removed and the backup schedule
+restored before installation. A failed backup or unconfirmed cleanup stops the
+upgrade; the installed application is not replaced to get around the backup gate.
 
 ```sh
 python -m probe_core.backup upload /private/new-snapshot.tar --config /var/lib/probe-backup/rclone.conf --drive-folder-id YOUR_PRIVATE_DRIVE_FOLDER_ID --receipts /var/lib/probe-backups/receipts

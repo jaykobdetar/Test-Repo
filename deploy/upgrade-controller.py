@@ -42,6 +42,10 @@ OTHER_UNITS = ("probe-backup.timer", "probe-backup.service", "probe-snapshot.ser
 GUARD_NAME = "50-probe-upgrade.conf"
 GUARD = b"[Unit]\nConditionPathExists=!/etc/probe-core/upgrade-blocked\n"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
+BACKUP_UNIT_SHA256 = "e2fd04fbc40137448573d6d80ebc3348c856952b1aeaa812c1483e14e8ef21c0"
+BACKUP_BRIDGE_CODES = {"BRIDGE_PATH_CHANGED", "BRIDGE_INPUT_CHANGED", "BACKUP_TRANSPORT_CHANGED",
+                      "BACKUP_VERIFICATION_INCOMPLETE", "HISTORY_READER_CHANGED", "FRESH_BACKUP_METADATA_INVALID",
+                      "FRESH_BACKUP_AUDIT_MISMATCH", "FRESH_BACKUP_HISTORY_INVALID", "FRESH_BACKUP_NOT_UNIQUELY_VERIFIED"}
 SANDBOX_CHECKS = {"immutable_image_present", "cpu_job", "network_denied", "gpu_unavailable", "host_path_denied",
                   "trusted_paths_readonly", "credentials_absent", "pid_limit_enforced", "output_limit_enforced",
                   "memory_limit_enforced", "wall_time_enforced", "runtime_attestation", "cpu_cgroup_limit_attested",
@@ -196,12 +200,17 @@ def release_body(raw):
     body = json.loads(raw)
     fields = {"schema_version", "source_commit", "wheel_filename", "wheel_sha256", "identity_checker_sha256"}
     require(type(body) is dict and type(body.get("schema_version")) is int
-            and body["schema_version"] in {1, 2}, "TARGET_MANIFEST_SCHEMA")
-    if body["schema_version"] == 2:
+            and body["schema_version"] in {1, 2, 3}, "TARGET_MANIFEST_SCHEMA")
+    if body["schema_version"] >= 2:
         fields.add("previous_upgrade")
         previous = body.get("previous_upgrade")
-        require(type(previous) is dict and set(previous) == {"wheel_sha256", "release_manifest_sha256"}
-                and all(type(value) is str and HEX.fullmatch(value) for value in previous.values()), "PREVIOUS_UPGRADE_SCHEMA")
+        require((body["schema_version"] == 3 and previous is None) or
+                (type(previous) is dict and set(previous) == {"wheel_sha256", "release_manifest_sha256"}
+                 and all(type(value) is str and HEX.fullmatch(value) for value in previous.values())), "PREVIOUS_UPGRADE_SCHEMA")
+    if body["schema_version"] == 3:
+        fields.add("backup_transport_sha256")
+        require(type(body.get("backup_transport_sha256")) is str
+                and HEX.fullmatch(body["backup_transport_sha256"]), "BACKUP_TRANSPORT_PIN_MISSING")
     require(set(body) == fields and type(body.get("source_commit")) is str
             and re.fullmatch(r"[0-9a-f]{40}", body["source_commit"])
             and type(body.get("wheel_filename")) is str
@@ -256,6 +265,24 @@ def completed_upgrade(directory, release, previous_raw, *, owner=0):
     else:
         require(receipt.get("previous_wheel_sha256") == hashlib.sha256(previous_raw).hexdigest()
                 and receipt.get("dependencies_unchanged") is True, "PRIOR_UPGRADE_CHAIN_INVALID")
+    if release["schema_version"] == 3:
+        bridge = receipt.get("backup_bridge", {})
+        require(type(bridge) is dict and bridge.get("transport_sha256") == release["backup_transport_sha256"]
+                and all(type(bridge.get(key)) is str and HEX.fullmatch(bridge[key])
+                        for key in ("snapshot_id", "archive_sha256", "history_sha256", "audit_prefix_sha256", "evidence_sha256")),
+                "PRIOR_BACKUP_BRIDGE_EVIDENCE_INVALID")
+        saved = read_file(directory / "backup-bridge.json", owner=owner, limit=65536)
+        require(hashlib.sha256(saved).hexdigest() == bridge["evidence_sha256"]
+                and json.loads(saved) == {key: value for key, value in bridge.items() if key != "evidence_sha256"},
+                "PRIOR_BACKUP_BRIDGE_EVIDENCE_HASH")
+        baseline, tip = bridge.get("baseline", {}), bridge.get("audit_tip", {})
+        require(type(baseline) is dict and type(tip) is dict and bridge["history_sha256"] == baseline.get("history_sha256")
+                and bridge["audit_prefix_sha256"] == baseline.get("audit_tip")
+                and type(tip.get("sequence")) is int and type(baseline.get("audit_events")) is int
+                and tip["sequence"] >= baseline["audit_events"], "PRIOR_BACKUP_BRIDGE_HISTORY")
+        times = [datetime.fromisoformat(bridge[key]) for key in ("not_before", "created_at", "verified_at")]
+        require(all(value.tzinfo is not None for value in times) and times == sorted(times)
+                and times[-1] <= datetime.fromisoformat(receipt["finished_at"]), "PRIOR_BACKUP_BRIDGE_TIME")
     identity_raw = read_file(path.parent / "identity-acceptance.json", owner=owner, limit=65536)
     identity = json.loads(identity_raw)
     checks = identity.get("checks", {})
@@ -302,6 +329,9 @@ def verify_baseline(root, digest, previous_upgrade=None, *, owner=0):
         raw = read_file(directory / release["wheel_filename"], owner=owner)
         require(hashlib.sha256(raw).hexdigest() == wheel_hash, "PRIOR_UPGRADE_WHEEL_HASH")
         wheel = inspect_wheel(raw)
+        if release["schema_version"] == 3:
+            require(hashlib.sha256(wheel["members"].get("probe_core/backup.py", b"")).hexdigest()
+                    == release["backup_transport_sha256"], "PRIOR_BACKUP_TRANSPORT_HASH")
         require(wheel["requirements"] == original["requirements"]
                 and wheel["requires_python"] == original["requires_python"], "PRIOR_UPGRADE_DEPENDENCY_CHANGE")
         checker = read_file(directory / "verify-installed-identities.py", owner=owner, limit=1024 * 1024)
@@ -403,10 +433,125 @@ def update_commit(raw, commit):
     return "".join(lines).encode()
 
 
+# This code runs as the existing backup identity, never as the administrator.
+# Only backup.py comes from the pinned target wheel; its relative imports use
+# the already verified installed package and unchanged dependencies.
+BACKUP_BRIDGE = r'''
+import argparse, contextlib, hashlib, importlib.util, io, json, os, re, stat, sys, tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+def checked(path):
+    if path.resolve() != path.absolute():
+        raise ValueError("BRIDGE_PATH_CHANGED")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > 1048576:
+            raise ValueError("BRIDGE_INPUT_CHANGED")
+        raw = stream.read(1048577)
+        if len(raw) != info.st_size:
+            raise ValueError("BRIDGE_INPUT_CHANGED")
+        return raw
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--drive-folder-id", required=True)
+    args = parser.parse_args()
+    directory = Path(__file__).parent
+    request = json.loads(checked(directory / "request.json"))
+    report = {"schema_version": 1, "ok": False, "phase": request["phase"]}
+    module = None
+    try:
+        raw = checked(directory / "backup.py")
+        if hashlib.sha256(raw).hexdigest() != request["transport_sha256"]:
+            raise ValueError("BACKUP_TRANSPORT_CHANGED")
+        spec = importlib.util.spec_from_file_location("probe_core.upgrade_backup", directory / "backup.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        sys.argv = ["probe_core.backup", "upload-pending", "--outbox", request["outbox"],
+                    "--config", request["credential"], "--drive-folder-id", args.drive_folder_id,
+                    "--receipts", request["receipts"]]
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            module.main()
+        results = json.loads(captured.getvalue())
+        if not results or not all(all(item.get(key) is True for key in ("verified", "readback_verified", "restore_verified")) for item in results):
+            raise ValueError("BACKUP_VERIFICATION_INCOMPLETE")
+        report["snapshot_ids"] = [item["snapshot_id"] for item in results]
+        if request["phase"] == "fresh":
+            reader = checked(directory / "history.py")
+            if hashlib.sha256(reader).hexdigest() != request["history_sha256"]:
+                raise ValueError("HISTORY_READER_CHANGED")
+            namespace = {}
+            exec(compile(reader, "pinned-backup-history", "exec"), namespace)
+            found = []
+            for archive in sorted(Path(request["outbox"]).glob("probe-*.tar")):
+                digest = module._inventory(archive, module.MAX_SNAPSHOT_BYTES + module.MAX_MANIFEST_BYTES + 1024**3)["sha256"]
+                matching = [item for item in results if item["archive_sha256"] == digest and item["snapshot_id"] not in request["drained_ids"]]
+                if not matching:
+                    continue
+                with tempfile.TemporaryDirectory(prefix=".upgrade-history-", dir=request["receipts"]) as temporary:
+                    stage = Path(temporary)
+                    pinned = stage / "archive.tar"
+                    module._copy(archive, pinned, module.MAX_SNAPSHOT_BYTES + module.MAX_MANIFEST_BYTES + 1024**3, digest)
+                    extracted = stage / "extracted"
+                    extracted.mkdir(mode=0o700)
+                    metadata = module._unpack(pinned, extracted, module.MAX_SNAPSHOT_BYTES)
+                    created = datetime.fromisoformat(metadata["created_at"])
+                    after = datetime.fromisoformat(request["not_before"])
+                    if (created.tzinfo is None or not after <= created <= datetime.now(timezone.utc)
+                            or metadata["snapshot_id"] != matching[0]["snapshot_id"]
+                            or metadata.get("provider_state", {}).get("path") != "state/provider.sqlite"):
+                        raise ValueError("FRESH_BACKUP_METADATA_INVALID")
+                    try:
+                        history = namespace["idle_history_snapshot"](extracted / "state/research.sqlite",
+                                  extracted / "state/provider.sqlite", expected=request["baseline"])
+                    except Exception:
+                        raise ValueError("FRESH_BACKUP_HISTORY_INVALID") from None
+                    if metadata["audit_tip"] != {"sequence": history["audit_events"], "hash": history["audit_tip"]}:
+                        raise ValueError("FRESH_BACKUP_AUDIT_MISMATCH")
+                    found.append({"snapshot_id": metadata["snapshot_id"], "archive_sha256": digest,
+                                  "created_at": metadata["created_at"], "history_sha256": history["history_sha256"],
+                                  "audit_tip": metadata["audit_tip"], "audit_prefix_sha256": history["audit_prefix_sha256"]})
+            if len(found) != 1:
+                raise ValueError("FRESH_BACKUP_NOT_UNIQUELY_VERIFIED")
+            report["fresh"] = found[0]
+        report["ok"] = True
+    except Exception as error:
+        report["error_type"] = type(error).__name__
+        # Transport errors from the pinned implementation are classified and
+        # credential-free. All other exception messages remain withheld.
+        if module is not None and isinstance(error, module.BackupError) and re.fullmatch(r"BACKUP_TRANSPORT_[A-Z0-9_]{1,200}", str(error)):
+            report["error_code"] = str(error)
+        elif type(error) is ValueError and str(error) in {
+                "BRIDGE_PATH_CHANGED", "BRIDGE_INPUT_CHANGED", "BACKUP_TRANSPORT_CHANGED", "BACKUP_VERIFICATION_INCOMPLETE",
+                "HISTORY_READER_CHANGED", "FRESH_BACKUP_METADATA_INVALID", "FRESH_BACKUP_AUDIT_MISMATCH",
+                "FRESH_BACKUP_HISTORY_INVALID", "FRESH_BACKUP_NOT_UNIQUELY_VERIFIED"}:
+            report["error_code"] = str(error)
+    path = Path(request["report"])
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        json.dump(report, stream, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return 0 if report["ok"] else 1
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
 class Upgrade:
     def __init__(self, *, root=ROOT, config=CONFIG, units=UNITS, owner=0, run=subprocess.run,
                  backup_copy=Path("/var/lib/probe-backup/backup.env"),
-                 sandbox_report=Path("/var/lib/probe-sandbox/acceptance-report.json")):
+                 sandbox_report=Path("/var/lib/probe-sandbox/acceptance-report.json"),
+                 runtime=Path("/run"), runtime_units=Path("/run/systemd/system"),
+                 backup_state=Path("/var/lib/probe-backup"),
+                 backup_outbox=Path("/var/lib/probe-backups/outbox"),
+                 backup_receipts=Path("/var/lib/probe-backups/receipts")):
         self.root, self.config, self.units, self.owner, self.run = root, config, units, owner, run
         self.backup_copy, self.sandbox_report = backup_copy, sandbox_report
         self.stage = "validation"
@@ -415,6 +560,9 @@ class Upgrade:
         self.closed_after_failure = False
         self.history_reader = None
         self.history_baseline = None
+        self.runtime, self.runtime_units = runtime, runtime_units
+        self.backup_state, self.backup_outbox, self.backup_receipts = backup_state, backup_outbox, backup_receipts
+        self.backup_bridge_evidence = None
 
     def command(self, arguments, *, timeout=60):
         result = self.run(arguments, cwd=self.root, env=ENV, stdin=subprocess.DEVNULL,
@@ -432,6 +580,145 @@ class Upgrade:
 
     def systemctl(self, *arguments, timeout=60):
         return self.command(["/usr/bin/systemctl", *arguments], timeout=timeout)
+
+    def backup_unit_state(self, name="probe-backup.service"):
+        raw = self.systemctl("show", name, "--property=LoadState,FragmentPath,DropInPaths,ActiveState,MainPID,ControlPID,KillMode")
+        return dict(line.split("=", 1) for line in raw.decode().splitlines())
+
+    def backup_stopped(self):
+        state = self.backup_unit_state()
+        require(state.get("ActiveState") in {"inactive", "failed"} and state.get("MainPID") == "0"
+                and state.get("ControlPID") == "0", "BACKUP_SHUTDOWN_UNCONFIRMED")
+
+    def wait_backup_prune(self):
+        def finished():
+            state = self.backup_unit_state("probe-backup-prune.service")
+            require(state.get("ActiveState") != "failed", "BACKUP_PRUNE_FAILED")
+            return state.get("ActiveState") == "inactive" and state.get("MainPID") == "0" and state.get("ControlPID") == "0"
+        wait_ready(finished, timeout=30)
+
+    def backup_bridge(self, transport, digest, users):
+        """Run the pinned transport without modifying the installed package.
+
+        The normal snapshot producer, identity, filesystem restrictions and
+        full remote readback/restore gate remain in force for both runs.
+        """
+        source = self.units / "probe-backup.service"
+        original = read_file(source, owner=self.owner, limit=65536)
+        require(hashlib.sha256(original).hexdigest() == BACKUP_UNIT_SHA256, "BACKUP_UNIT_NOT_REVIEWED")
+        require(hashlib.sha256(transport).hexdigest() == digest, "BACKUP_TRANSPORT_HASH")
+        for directory in (self.runtime, self.runtime_units):
+            trusted_directory(directory, owner=self.owner)
+        trusted_directory(self.backup_state, owner=users["probe-backup"])
+        state = self.backup_unit_state()
+        require(state.get("LoadState") == "loaded" and state.get("FragmentPath") == str(source)
+                and state.get("DropInPaths") == "" and state.get("KillMode") == "control-group", "BACKUP_UNIT_CHANGED")
+        self.backup_stopped()
+        require(self.backup_unit_state("probe-backup.timer").get("ActiveState") == "active", "BACKUP_TIMER_NOT_ACTIVE")
+        overrides = self.runtime_units / "probe-backup.service.d"
+        override = overrides / "90-probe-upgrade-backup.conf"
+        require(not overrides.exists() and not overrides.is_symlink(), "EXISTING_BACKUP_OVERRIDE")
+        directory = Path(tempfile.mkdtemp(prefix="probe-upgrade-backup-", dir=self.runtime))
+        directory.chmod(0o755)
+        rendered = ("[Service]\nExecStart=\nExecStart=" + str(self.root / "venv/bin/python") + " -I "
+                    + str(directory / "bridge.py") + " --drive-folder-id ${DRIVE_FOLDER_ID}\n"
+                    + "TimeoutStartSec=330\nTimeoutStopSec=15\n").encode()
+        files = {"backup.py": transport, "bridge.py": BACKUP_BRIDGE.encode(), "history.py": self.history_reader.encode(),
+                 "override.conf": rendered}
+        reports, paused, configured, launched = [], False, False, False
+        try:
+            paused = True
+            self.systemctl("stop", "probe-backup.timer")
+            self.backup_stopped()
+            self.wait_backup_prune()
+            for name, raw in files.items():
+                atomic_file(directory / name, raw, uid=self.owner, gid=os.getegid(), mode=0o644)
+            overrides.mkdir(mode=0o755)
+            configured = True
+            os.rename(directory / "override.conf", override)
+            self.systemctl("daemon-reload")
+            require(self.backup_unit_state().get("DropInPaths") == str(override), "BACKUP_OVERRIDE_NOT_EXACT")
+            drained = []
+            for phase in ("drain", "fresh"):
+                baseline = self.idle()
+                request = {"phase": phase, "transport_sha256": digest,
+                           "history_sha256": hashlib.sha256(files["history.py"]).hexdigest(),
+                           "baseline": baseline, "not_before": datetime.now(timezone.utc).isoformat(),
+                           "drained_ids": drained, "outbox": str(self.backup_outbox),
+                           "receipts": str(self.backup_receipts), "credential": str(self.backup_state / "rclone.conf"),
+                           "report": str(self.backup_state / (directory.name + "-" + phase + ".json"))}
+                path = Path(request["report"])
+                require(not path.exists() and not path.is_symlink(), "BACKUP_BRIDGE_REPORT_EXISTS")
+                reports.append(path)
+                raw = json.dumps(request, sort_keys=True).encode()
+                files["request.json"] = raw
+                atomic_file(directory / "request.json", raw, uid=self.owner, gid=os.getegid(), mode=0o644)
+                print("Probe upgrade: verifying " + ("pending backups" if phase == "drain" else "a fresh current-state backup") + ".", flush=True)
+                launched = True
+                failure = None
+                try:
+                    self.systemctl("start", "probe-backup.service", timeout=350)
+                except (UpgradeError, subprocess.TimeoutExpired) as error:
+                    failure = error
+                if failure is not None:
+                    # Killing a timed-out systemctl client does not stop its unit.
+                    self.systemctl("stop", "probe-backup.service", timeout=35)
+                self.backup_stopped()
+                report = self.read_backup_report(path, users["probe-backup"])
+                if not report.get("ok"):
+                    code = report.get("error_code")
+                    safe = code if type(code) is str and (code in BACKUP_BRIDGE_CODES or re.fullmatch(r"BACKUP_TRANSPORT_[A-Z0-9_]{1,200}", code)) else "BACKUP_BRIDGE_FAILED"
+                    print("Probe upgrade: backup stopped (" + safe + ").", flush=True)
+                require(failure is None and report.get("schema_version") == 1 and report.get("phase") == phase
+                        and report.get("ok") is True, "BACKUP_BRIDGE_GATE_FAILED")
+                ids = report.get("snapshot_ids")
+                require(type(ids) is list and ids and all(type(value) is str and HEX.fullmatch(value) for value in ids), "BACKUP_BRIDGE_REPORT_INVALID")
+                if phase == "drain":
+                    drained = ids
+                else:
+                    fresh = report.get("fresh", {})
+                    require(type(fresh) is dict and fresh.get("snapshot_id") in ids and fresh["snapshot_id"] not in drained
+                            and fresh.get("history_sha256") == baseline["history_sha256"]
+                            and fresh.get("audit_prefix_sha256") == baseline["audit_tip"]
+                            and type(fresh.get("archive_sha256")) is str and HEX.fullmatch(fresh["archive_sha256"]), "FRESH_BACKUP_NOT_VERIFIED")
+                    self.backup_bridge_evidence = {"transport_sha256": digest, **fresh, "baseline": baseline,
+                                                   "not_before": request["not_before"], "verified_at": datetime.now(timezone.utc).isoformat()}
+                self.idle()
+                self.wait_backup_prune()
+        finally:
+            # Refuse to remove executable inputs until the complete unit scope
+            # is stopped. A failed cleanup leaves the timer paused, never a
+            # partially restored schedule executing a temporary transport.
+            if launched:
+                self.systemctl("stop", "probe-backup.service", timeout=35)
+                self.backup_stopped()
+            if configured:
+                if override.exists() or override.is_symlink():
+                    require(read_file(override, owner=self.owner) == rendered, "BACKUP_OVERRIDE_CHANGED")
+                    override.unlink()
+                overrides.rmdir()
+                self.systemctl("daemon-reload")
+                require(self.backup_unit_state().get("DropInPaths") == "", "BACKUP_OVERRIDE_REMOVAL_UNCONFIRMED")
+            for name, raw in files.items():
+                path = directory / name
+                if path.exists():
+                    require(read_file(path, owner=self.owner) == raw, "BACKUP_BRIDGE_INPUT_CHANGED")
+                    path.unlink()
+            directory.rmdir()
+            for path in reports:
+                if path.exists():
+                    self.read_backup_report(path, users["probe-backup"])
+                    path.unlink()
+            require(read_file(source, owner=self.owner) == original, "BACKUP_UNIT_CHANGED")
+            if paused:
+                self.systemctl("start", "probe-backup.timer")
+                require(self.backup_unit_state("probe-backup.timer").get("ActiveState") == "active", "BACKUP_TIMER_RESTORE_FAILED")
+
+    def read_backup_report(self, path, uid):
+        require(path.exists() or path.is_symlink(), "BACKUP_BRIDGE_REPORT_MISSING")
+        info = path.lstat()
+        require(not info.st_mode & 0o077, "BACKUP_BRIDGE_REPORT_NOT_PRIVATE")
+        return json.loads(read_file(path, owner=uid, limit=65536))
 
     def ready(self, users):
         expected = (("/run/probe-research/research.sock", "probe-research"),
@@ -514,6 +801,10 @@ class Upgrade:
         new_wheel = inspect_wheel(new_raw)
         require(new_wheel["requirements"] == old_wheel["requirements"]
                 and new_wheel["requires_python"] == old_wheel["requires_python"], "DEPENDENCY_CHANGE_REFUSED")
+        transport = new_wheel["members"].get("probe_core/backup.py")
+        if release["schema_version"] == 3:
+            require(type(transport) is bytes and 0 < len(transport) <= 1048576
+                    and hashlib.sha256(transport).hexdigest() == release["backup_transport_sha256"], "BACKUP_TRANSPORT_HASH")
         require(new_raw != old_raw, "TARGET_IS_ALREADY_INSTALLED")
         trusted_directory(self.config, owner=self.owner)
         trusted_directory(self.units, owner=self.owner)
@@ -548,7 +839,10 @@ class Upgrade:
         self.idle()  # Read-only refusal before stopping any service.
         dependencies = self.command([str(self.root / "venv/bin/python"), "-I", "-c", DEPENDENCIES])
         self.phase("pre_upgrade_backup", "saving and verifying the pre-upgrade backup")
-        self.systemctl("start", "probe-backup.service", timeout=360)
+        if release["schema_version"] == 3:
+            self.backup_bridge(transport, release["backup_transport_sha256"], users)
+        else:
+            self.systemctl("start", "probe-backup.service", timeout=360)
         self.idle()
         upgrades = self.root / "upgrades"
         upgrades.mkdir(mode=0o700, exist_ok=True)
@@ -563,6 +857,10 @@ class Upgrade:
                           ("research-before.json", original_config), ("rollback/backup.env", provenance[0][1]),
                           ("rollback/backup-account.env", provenance[1][1])):
             atomic_file(self.work / name, raw, uid=self.owner, gid=os.getegid(), mode=0o600)
+        if self.backup_bridge_evidence is not None:
+            raw = json.dumps(self.backup_bridge_evidence, sort_keys=True).encode()
+            atomic_file(self.work / "backup-bridge.json", raw, uid=self.owner, gid=os.getegid(), mode=0o600)
+            self.backup_bridge_evidence["evidence_sha256"] = hashlib.sha256(raw).hexdigest()
         try:
             self.changed = True
             self.stage = "close_research"
@@ -610,6 +908,8 @@ class Upgrade:
                        "identity_checks": identity["check_count"], "cloud_mutations_performed": False,
                        "previous_upgrade_evidence": baseline_evidence,
                        "finished_at": datetime.now(timezone.utc).isoformat()}
+            if self.backup_bridge_evidence is not None:
+                receipt["backup_bridge"] = self.backup_bridge_evidence
             atomic_file(self.work / "upgrade-report.json", json.dumps(receipt, indent=2).encode() + b"\n",
                         uid=self.owner, gid=os.getegid(), mode=0o600)
             (self.config / "upgrade-blocked").unlink()

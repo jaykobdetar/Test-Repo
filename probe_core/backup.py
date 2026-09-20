@@ -17,8 +17,10 @@ import re
 import sqlite3
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
+import time
 import uuid
 
 from .artifact_store import ArtifactStore
@@ -402,9 +404,86 @@ def restore_snapshot(archive: str | Path, destination: str | Path, *, expected_s
     return {**verified, "destination": str(destination), "restored": True, "services_started": False}
 
 
+def _transport_failure(stderr: bytes, *, operation: str) -> tuple[str, bool]:
+    """Classify only explicit evidence; never expose provider/credential text."""
+    if len(stderr) > 65536:
+        return "DIAGNOSTIC_TOO_LARGE", False
+    text = stderr.decode("utf-8", errors="replace").lower()
+    for patterns, code in (
+        (("invalid_grant", "invalid_client", "token expired and there's no refresh token"), "AUTHORIZATION_REJECTED"),
+        (("immutable",), "IMMUTABLE_CONFLICT"),
+        (("failed to save config", "failed to create temp file for new config", "failed to move previous config"), "CREDENTIAL_WRITE_FAILED"),
+        (("permission denied", "operation not permitted", "read-only file system", "insufficient authentication scopes", "insufficientpermissions"), "PERMISSION_REFUSED"),
+        (("x509:", "certificate verify failed", "certificate signed by unknown authority"), "TLS_VERIFICATION_FAILED"),
+    ):
+        if any(pattern in text for pattern in patterns):
+            return code, False
+    if any(pattern in text for pattern in ("ratelimitexceeded", "rate_limit_exceeded", "user rate limit exceeded")):
+        return "RATE_LIMITED", True
+    status = re.search(r"(?:googleapi: error|http(?:/\d(?:\.\d)?)?(?: error| status(?: code)?)?|status(?: code)?)\s*[:=]?\s*(\d{3})\b", text)
+    if status:
+        number = int(status[1])
+        if number == 429 or 500 <= number < 600:
+            return "PROVIDER_TEMPORARY", True
+        if number in {401, 403}:
+            return "AUTHORIZATION_REFUSED", False
+    if "forbidden" in text or "unauthorized" in text:
+        return "AUTHORIZATION_REFUSED", False
+    if operation == "cat" and (status and status[1] == "404" or
+            any(pattern in text for pattern in ("directory not found", "object not found", "file not found"))):
+        # Only used immediately after a successful immutable upload. A delayed
+        # Drive lookup may be retried; a readback still must pass full SHA/restore.
+        return "READBACK_NOT_VISIBLE", True
+    if re.search(r"\b(?:unexpected )?eof\b", text) or any(pattern in text for pattern in (
+            "connection reset", "connection refused", "broken pipe", "i/o timeout", "deadline exceeded",
+            "tls handshake timeout", "temporary failure in name resolution", "server misbehaving",
+            "network is unreachable", "connection timed out")):
+        return "NETWORK_TEMPORARY", True
+    return "UNCLASSIFIED_FAILURE", False
+
+
+def _run_transfer(base, arguments, *, config: Path, deadline: float, output=None):
+    operation = arguments[0]
+    if operation not in {"copyto", "cat"}:
+        raise BackupError("BACKUP_TRANSPORT_OPERATION_INVALID")
+    attempts = 0
+    for attempt in range(1, 4):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BackupError(f"BACKUP_TRANSPORT_{operation.upper()}_DEADLINE_AFTER_{attempts}_ATTEMPTS")
+        if output is not None:
+            output.flush()
+            output.seek(0)
+            output.truncate()  # Never append a retry to an incomplete download.
+        attempts = attempt
+        try:
+            result = subprocess.run([*base, *arguments], stdin=subprocess.DEVNULL,
+                                    stdout=output if output is not None else subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, timeout=min(60, remaining), check=False,
+                                    env={"PATH": "/usr/bin:/bin", "HOME": str(config.parent)})
+            if result.returncode == 0:
+                return
+            code, retry = _transport_failure(result.stderr or b"", operation=operation)
+        except subprocess.TimeoutExpired:
+            code, retry = "PROCESS_TIMEOUT", True
+        except OSError:
+            code, retry = "EXECUTION_FAILED", False
+        # Fixed fields only, including when a later attempt succeeds. No exception
+        # strings, stderr excerpts, tokens, URLs, remote IDs or filenames escape.
+        print(f"backup_transport operation={operation} attempt={attempt} code={code}", file=sys.stderr, flush=True)
+        if not retry or attempt == 3:
+            raise BackupError(f"BACKUP_TRANSPORT_{operation.upper()}_{code}_AFTER_{attempt}_ATTEMPTS") from None
+        delay = (5, 30)[attempt - 1]
+        if deadline - time.monotonic() <= delay:
+            raise BackupError(f"BACKUP_TRANSPORT_{operation.upper()}_DEADLINE_AFTER_{attempt}_ATTEMPTS") from None
+        time.sleep(delay)
+
+
 def upload_snapshot(archive: str | Path, *, rclone_config: str | Path, drive_folder_id: str,
-                    receipt_directory: str | Path, rclone: str = "/usr/bin/rclone") -> dict:
+                    receipt_directory: str | Path, rclone: str = "/usr/bin/rclone",
+                    _transport_deadline: float | None = None) -> dict:
     """Upload only to a pinned Drive root, then download and verify the full copy."""
+    deadline = time.monotonic() + 240 if _transport_deadline is None else _transport_deadline
     archive, config, receipts = Path(archive).absolute(), Path(rclone_config).absolute(), Path(receipt_directory).absolute()
     info = config.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
@@ -418,25 +497,19 @@ def upload_snapshot(archive: str | Path, *, rclone_config: str | Path, drive_fol
         raise BackupError("backup credentials must contain only the gdrive Drive remote")
     receipts.mkdir(mode=0o700, parents=True, exist_ok=True)
     base = [rclone, "--config", str(config), "--drive-root-folder-id", drive_folder_id,
-            "--ask-password=false", "--retries", "1", "--low-level-retries", "1"]
+            # Keep Drive's normal per-request recovery; the parent process still
+            # bounds each entire command and the whole outbox transfer budget.
+            "--ask-password=false", "--retries", "1", "--low-level-retries", "10"]
 
     def run(arguments, *, output=None):
-        result = subprocess.run([*base, *arguments], stdin=subprocess.DEVNULL,
-                                stdout=output if output is not None else subprocess.PIPE,
-                                stderr=subprocess.PIPE, timeout=3600, check=False,
-                                env={"PATH": "/usr/bin:/bin", "HOME": str(config.parent)})
-        if result.returncode:
-            # Provider errors can contain OAuth context. Never persist/display them.
-            if b"invalid_grant" in result.stderr:
-                raise BackupError("Drive authorization expired or was revoked; reconnect the backup account")
-            raise BackupError("Drive backup transfer failed; credential/provider details withheld")
+        _run_transfer(base, arguments, config=config, deadline=deadline, output=output)
 
     with tempfile.TemporaryDirectory(prefix=".readback-", dir=receipts) as temporary:
         pinned = Path(temporary) / "source.tar"
         identity = _copy(archive, pinned, MAX_SNAPSHOT_BYTES + MAX_MANIFEST_BYTES + 1024**3)
         checked = verify_snapshot(pinned, expected_sha256=identity["sha256"], scratch_directory=temporary)
         remote = "gdrive:probe-" + checked["snapshot_id"] + ".tar"
-        run(["copyto", str(pinned), remote, "--immutable", "--no-traverse"])
+        run(["copyto", str(pinned), remote, "--immutable", "--checksum", "--no-traverse"])
         downloaded = Path(temporary) / "download.tar"
         with downloaded.open("xb") as stream:
             run(["cat", remote], output=stream)
@@ -483,6 +556,8 @@ def publish_snapshot(ledger: Ledger, *, outbox: str | Path, input_store: str | P
 
 def upload_pending(*, outbox: str | Path, rclone_config: str | Path, drive_folder_id: str,
                    receipt_directory: str | Path, rclone: str = "/usr/bin/rclone") -> list[dict]:
+    # One budget for the whole outbox, not a fresh timeout for each archive.
+    deadline = time.monotonic() + 240
     results, receipts = [], []
     for path in Path(receipt_directory).glob("*.json"):
         receipt = json.loads(_read_regular(path, 1024**2))
@@ -496,7 +571,7 @@ def upload_pending(*, outbox: str | Path, rclone_config: str | Path, drive_folde
             results.append({**previous, "transfer_skipped": True})
             continue
         results.append(upload_snapshot(archive, rclone_config=rclone_config, drive_folder_id=drive_folder_id,
-                                       receipt_directory=receipt_directory, rclone=rclone))
+                                       receipt_directory=receipt_directory, rclone=rclone, _transport_deadline=deadline))
     return results
 
 

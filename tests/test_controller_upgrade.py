@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 from types import SimpleNamespace
 import zipfile
 
@@ -483,6 +484,230 @@ def test_second_upgrade_gate_failure_retains_current_rollback_and_guards(host):
     assert host.operation.closed_after_failure and (host.config / "upgrade-blocked").exists()
     assert (host.operation.work / "rollback" / NAME).read_bytes() == current
     assert all(host.fake.state[name] == "inactive" for name in upgrade.GUARDED)
+
+
+@pytest.fixture
+def bridge_host(host, tmp_path, monkeypatch):
+    operation = host.operation
+    operation.runtime = tmp_path / "run"
+    operation.runtime_units = operation.runtime / "systemd/system"
+    operation.runtime_units.mkdir(mode=0o755, parents=True)
+    operation.runtime.chmod(0o755)
+    operation.backup_state = tmp_path / "backup-state"
+    operation.backup_state.mkdir(mode=0o700)
+    operation.backup_outbox = tmp_path / "outbox"
+    operation.backup_receipts = tmp_path / "receipts"
+    operation.backup_outbox.mkdir(); operation.backup_receipts.mkdir()
+    users = {name: OWNER + offset for offset, name in enumerate(("probe-trusted", "probe-research", "probe-watchdog", "probe-backup", "human"))}
+    users["probe-backup"] = OWNER  # Fake service writes under the test identity.
+    monkeypatch.setattr(upgrade, "discover_users", lambda _: users)
+    write(host.units / "probe-backup.service", (SCRIPT.parent / "live/probe-backup.service").read_bytes(), 0o644)
+    transport = b"# exact reviewed test transport\n"
+    args, release = make_release(host.args.release_manifest.parent,
+                                 wheel_bytes(b"VERSION = 'bridge'\n", extras={"probe_core/backup.py": transport}))
+    args.original_manifest_sha256 = host.args.original_manifest_sha256
+    release.update(schema_version=3, previous_upgrade=None, backup_transport_sha256=hashlib.sha256(transport).hexdigest())
+    write(args.release_manifest, json.dumps(release).encode())
+    args.release_manifest_sha256 = hashlib.sha256(args.release_manifest.read_bytes()).hexdigest()
+    host.args, host.release, host.transport = args, release, transport
+    host.bridge_phases, host.bridge_fault = [], None
+    original_run = operation.run
+
+    def run(command, **options):
+        override = operation.runtime_units / "probe-backup.service.d/90-probe-upgrade-backup.conf"
+        if command[:2] == ["/usr/bin/systemctl", "show"] and "MainPID" in command[-1]:
+            host.fake.commands.append(command)
+            name = command[2]
+            paths = str(override) if name == "probe-backup.service" and override.exists() else ""
+            state = host.fake.state[name]
+            pid = "123" if host.bridge_fault == "unconfirmed_stop" and host.bridge_phases else "0"
+            return SimpleNamespace(returncode=0, stderr=b"", stdout=(f"LoadState=loaded\nFragmentPath={host.units/name}\n"
+                f"DropInPaths={paths}\nActiveState={state}\nMainPID={pid}\nControlPID=0\nKillMode=control-group\n").encode())
+        if command == ["/usr/bin/systemctl", "start", "probe-backup.service"]:
+            host.fake.commands.append(command)
+            directory = next(path for path in operation.runtime.iterdir() if path.name.startswith("probe-upgrade-backup-"))
+            assert directory.stat().st_mode & 0o777 == 0o755
+            assert (directory / "backup.py").read_bytes() == transport
+            assert all((directory / name).stat().st_mode & 0o777 == 0o644 for name in ("backup.py", "bridge.py", "history.py", "request.json"))
+            assert "User=" not in override.read_text() and "Requires=" not in override.read_text()
+            assert (host.site / "probe_core/__init__.py").read_bytes() == b"VERSION = 'old'\n"
+            request = json.loads((directory / "request.json").read_bytes())
+            phase = request["phase"]
+            host.bridge_phases.append(phase)
+            report = {"schema_version": 1, "phase": phase, "ok": True, "snapshot_ids": ["a"*64] if phase == "drain" else ["a"*64, "c"*64]}
+            if phase == "fresh":
+                report["fresh"] = {"snapshot_id": "c"*64, "archive_sha256": "d"*64, "created_at": request["not_before"],
+                                   "history_sha256": request["baseline"]["history_sha256"],
+                                   "audit_prefix_sha256": request["baseline"]["audit_tip"],
+                                   "audit_tip": {"sequence": request["baseline"]["audit_events"], "hash": request["baseline"]["audit_tip"]}}
+            if host.bridge_fault == "stale" and phase == "fresh": report["fresh"]["snapshot_id"] = "a"*64
+            if host.bridge_fault == "history" and phase == "fresh": report["fresh"]["history_sha256"] = "e"*64
+            if host.bridge_fault in {"failed", "timeout"}:
+                report.update(ok=False, error_type="BackupError", error_code="BACKUP_TRANSPORT_CAT_RATE_LIMITED_AFTER_3_ATTEMPTS")
+            write(Path(request["report"]), json.dumps(report).encode())
+            if host.bridge_fault == "timeout": raise subprocess.TimeoutExpired(command, options["timeout"])
+            return SimpleNamespace(returncode=int(not report["ok"]), stderr=b"", stdout=b"")
+        if "pip" in command:
+            assert not override.parent.exists()
+            assert not list(operation.runtime.glob("probe-upgrade-backup-*"))
+            assert host.bridge_phases == ["drain", "fresh"]
+        return original_run(command, **options)
+    operation.run = run
+    return host
+
+
+def test_schema3_bridge_preserves_gate_and_removes_override_before_install(bridge_host):
+    host = bridge_host
+    result = host.operation.execute(host.args)
+    assert result["backup_bridge"]["transport_sha256"] == host.release["backup_transport_sha256"]
+    assert result["backup_bridge"]["snapshot_id"] == "c"*64
+    assert host.bridge_phases == ["drain", "fresh"]
+    assert not list(host.operation.backup_state.iterdir())
+    assert host.fake.state["probe-backup.timer"] == "active"
+    reference = {"wheel_sha256": host.release["wheel_sha256"], "release_manifest_sha256": host.args.release_manifest_sha256}
+    assert upgrade.verify_baseline(host.root, host.args.original_manifest_sha256, reference, owner=OWNER)[1] == host.args.wheel.read_bytes()
+
+
+@pytest.mark.parametrize("fault", ["failed", "timeout", "stale", "history"])
+def test_schema3_failed_backup_never_installs_and_restores_original_schedule(bridge_host, fault):
+    host = bridge_host
+    host.bridge_fault = fault
+    with pytest.raises(upgrade.UpgradeError): host.operation.execute(host.args)
+    assert not host.operation.changed and host.operation.work is None
+    assert not any("pip" in command for command in host.fake.commands)
+    assert not (host.operation.runtime_units / "probe-backup.service.d").exists()
+    assert not list(host.operation.runtime.glob("probe-upgrade-backup-*"))
+    assert host.fake.state["probe-backup.timer"] == "active"
+    assert (host.config / "research.json").read_bytes() == host.original_config
+
+
+def test_schema3_unconfirmed_shutdown_keeps_code_and_timer_paused(bridge_host):
+    host = bridge_host
+    host.bridge_fault = "unconfirmed_stop"
+    with pytest.raises(upgrade.UpgradeError, match="SHUTDOWN_UNCONFIRMED"):
+        host.operation.execute(host.args)
+    assert (host.operation.runtime_units / "probe-backup.service.d/90-probe-upgrade-backup.conf").exists()
+    assert list(host.operation.runtime.glob("probe-upgrade-backup-*"))
+    assert host.fake.state["probe-backup.timer"] == "inactive"
+    assert not any("pip" in command for command in host.fake.commands)
+
+
+def test_schema3_wrong_transport_pin_refuses_before_service_or_installed_code(bridge_host):
+    host = bridge_host
+    host.release["backup_transport_sha256"] = "f"*64
+    raw = json.dumps(host.release).encode()
+    write(host.args.release_manifest, raw)
+    host.args.release_manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    with pytest.raises(upgrade.UpgradeError, match="BACKUP_TRANSPORT_HASH"):
+        host.operation.execute(host.args)
+    assert host.fake.commands == []
+
+
+def test_schema3_override_publish_failure_removes_own_partial_state(bridge_host, monkeypatch):
+    host = bridge_host
+    original = upgrade.os.rename
+    def fail(source, destination):
+        if Path(destination).name == "90-probe-upgrade-backup.conf": raise OSError("injected rename failure")
+        return original(source, destination)
+    monkeypatch.setattr(upgrade.os, "rename", fail)
+    with pytest.raises(OSError): host.operation.execute(host.args)
+    assert not (host.operation.runtime_units / "probe-backup.service.d").exists()
+    assert not list(host.operation.runtime.glob("probe-upgrade-backup-*"))
+    assert host.fake.state["probe-backup.timer"] == "active"
+    assert not host.bridge_phases
+
+
+def test_schema3_timer_stop_timeout_restores_schedule(bridge_host):
+    host = bridge_host
+    original = host.operation.run
+    def timeout(command, **options):
+        result = original(command, **options)
+        if command == ["/usr/bin/systemctl", "stop", "probe-backup.timer"]:
+            raise subprocess.TimeoutExpired(command, options["timeout"])
+        return result
+    host.operation.run = timeout
+    with pytest.raises(subprocess.TimeoutExpired): host.operation.execute(host.args)
+    assert host.fake.state["probe-backup.timer"] == "active"
+    assert not list(host.operation.runtime.glob("probe-upgrade-backup-*"))
+
+
+@pytest.mark.parametrize("fault", [None, "old_snapshot", "different_history", "different_audit", "sensitive_error", "quota"])
+def test_bridge_wrapper_checks_real_snapshot_history_without_network(tmp_path, monkeypatch, fault):
+    from contextlib import closing
+    import sqlite3
+    import sys
+    from probe_core.artifact_store import ArtifactStore
+    from probe_core.backup import create_snapshot, verify_snapshot, restore_snapshot
+    from probe_core.ledger import Ledger
+    from probe_core.controller import Controller
+
+    code = tmp_path / "code"
+    code.mkdir(mode=0o755)
+    outbox, receipts = tmp_path / "outbox", tmp_path / "receipts"
+    outbox.mkdir(); receipts.mkdir()
+    provider = tmp_path / "provider.sqlite"
+    with closing(sqlite3.connect(provider)) as connection:
+        connection.execute("CREATE TABLE runpod_intents (worker_id TEXT PRIMARY KEY)")
+        connection.commit()
+    history_raw = upgrade.history_reader((SCRIPT.parent / "verify-installed-identities.py").read_bytes())
+    history_namespace = {}
+    exec(history_raw, history_namespace)
+    store = ArtifactStore(tmp_path / "inputs")
+    before = datetime.now(timezone.utc)
+    with Ledger(tmp_path / "live.sqlite") as ledger:
+        Controller(ledger, object(), watchdog_health_path=tmp_path / "unused-health", controller_idle_usd_per_day=0)
+        ledger.record_event("tool_call", {"tool": "local_bridge_acceptance"})
+        baseline = history_namespace["idle_history_snapshot"](tmp_path / "live.sqlite", provider)
+        snapshot = create_snapshot(ledger, outbox / "probe-snapshot.tar", input_store=store.root,
+                                   source_commit="a"*40, provider_database=provider)
+    verified = verify_snapshot(snapshot["archive"], expected_sha256=snapshot["archive_sha256"])
+    restored = restore_snapshot(snapshot["archive"], tmp_path / "restored", expected_sha256=snapshot["archive_sha256"])
+    results = [{**verified, "readback_verified": True, "restore_verified": restored["restored"]}]
+    transport = (SCRIPT.parent.parent / "probe_core/backup.py").read_bytes()
+    write(code / "backup.py", transport, 0o644)
+    write(code / "history.py", history_raw.encode(), 0o644)
+    request = {"phase": "fresh", "transport_sha256": hashlib.sha256(transport).hexdigest(),
+               "history_sha256": hashlib.sha256(history_raw.encode()).hexdigest(), "baseline": baseline,
+               "not_before": before.isoformat(), "drained_ids": [], "outbox": str(outbox),
+               "receipts": str(receipts), "credential": str(tmp_path / "never-read.conf"),
+               "report": str(tmp_path / "report.json")}
+    if fault == "old_snapshot": request["not_before"] = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+    if fault == "different_history": request["baseline"]["history_sha256"] = "f"*64
+    if fault == "different_audit": request["baseline"]["audit_tip"] = "f"*64
+    write(code / "request.json", json.dumps(request).encode(), 0o644)
+    namespace = {"__name__": "bridge_unit_test", "__file__": str(code / "bridge.py")}
+    exec(upgrade.BACKUP_BRIDGE, namespace)
+    # Service ownership is covered by the host/profile tests. This unit test
+    # executes as the developer UID and substitutes only that root read check.
+    namespace["checked"] = lambda path: path.read_bytes()
+    original_spec = importlib.util.spec_from_file_location
+    def module_spec(name, path):
+        value = original_spec(name, path)
+        original_exec = value.loader.exec_module
+        def load(module):
+            original_exec(module)
+            def uploaded():
+                if fault == "sensitive_error": raise module.BackupError("secret-must-not-appear")
+                if fault == "quota": raise module.BackupError("BACKUP_TRANSPORT_CAT_RATE_LIMITED_AFTER_3_ATTEMPTS")
+                print(json.dumps(results))
+            module.main = uploaded
+        value.loader.exec_module = load
+        return value
+    monkeypatch.setattr(importlib.util, "spec_from_file_location", module_spec)
+    monkeypatch.setattr(sys, "argv", ["bridge", "--drive-folder-id", "public-folder-id"])
+    status = namespace["main"]()
+    raw = Path(request["report"]).read_text()
+    report = json.loads(raw)
+    assert Path(request["report"]).stat().st_mode & 0o777 == 0o600
+    assert status == (0 if fault is None else 1)
+    assert report["ok"] is (fault is None)
+    assert "secret-must-not-appear" not in raw
+    if fault is None:
+        assert report["fresh"]["history_sha256"] == baseline["history_sha256"]
+        assert report["fresh"]["audit_prefix_sha256"] == baseline["audit_tip"]
+        assert report["fresh"]["archive_sha256"] == snapshot["archive_sha256"]
+    if fault == "quota":
+        assert report["error_code"] == "BACKUP_TRANSPORT_CAT_RATE_LIMITED_AFTER_3_ATTEMPTS"
 
 
 def test_failed_previous_completion_refuses_before_any_service_or_installed_code(host):
