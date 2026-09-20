@@ -5,15 +5,15 @@
 This is the implementation and acceptance procedure for Auto Interpretability
 Lab's deployment branch through source `7e01602`. It provides pinned assets,
 image recipes and fixed calibration paths through the approved-job pipeline.
-The installed controller is `8a5486b`; the immutable worker images have their own
+The installed controller is `4b19ac6`; the immutable worker images have their own
 source identities. Commands below are reviewed procedures, not evidence that
 their live cases have passed.
 
 As of September 20, 2026, 18 plans are prepared across Base and posttrained
-workers, but no canonical GPU case has passed. Seven full-worker attempts stopped
-before inference and were deleted. The immediate focus is one successful Base
+workers, but no canonical GPU case has passed. The eighth full-worker attempt reached dispatch
+but failed during CUDA initialization; its Pod was deleted. The immediate focus is one successful Base
 parity run; additional orchestration is deferred. The deployment checklist gives
-the current startup blocker, and validation status separates installed acceptance
+the current CUDA blocker, and validation status separates installed acceptance
 from historical local tests. Every assigned host must pass its resource gates
 before model execution.
 
@@ -194,14 +194,14 @@ Use separate bounded allowances for Base and posttrained workers; `WorkerConfig`
 
 ## Startup and supervised retry
 
-This section records the recovery contracts and earlier startup failures. The
-latest installed status is source `8a5486b`, with verified backup, 16 CPU checks
-and 26 identity checks. The region-only Romania setup retained that application.
-Its seventh attempt ended with `REQUEST_CHANGED` before inference, followed by
-confirmed deletion. Controller reconciliation requested stop before the watchdog
-recorded `uncertain_action`; the initial trigger was not saved. A concurrent
-HTTP503 log response and a local HTTP503 replay do not establish that missing
-historical cause. See [the current deployment checklist](live-deployment-plan.md).
+This section records recovery contracts and historical startup failures. The
+installed controller is source `4b19ac6`, with verified backup, 16 CPU checks and
+26 identity checks. The eighth attempt reached approved dispatch but failed
+CUDA initialization. The narrow AF_UNIX creation correction has passed local
+driver and BF16 kernel checks; the rebuilt image still needs RunPod acceptance.
+A retry preserves the completed failure and stopped attempt, binds a new immutable
+worker image, and creates fresh job/request/approval identities. See
+[the current deployment checklist](live-deployment-plan.md).
 
 The controller may observe RunPod `status=RUNNING` before the runtime and direct SSH
 port are published. Missing or null connection details remain inside the bounded

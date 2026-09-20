@@ -9,32 +9,29 @@ prepared plan does not count as a passed deployment gate.
 
 ## Current status and next gate
 
-The installed controller is source `8a5486b`, wheel
-`c2fd62bfec0fbbb90dc556e34dac88d6969a59b5dfefb0846f31d0b691a6ee38`.
-Its 34 application files matched the package. The actual service environment
-passed all 16 CPU containment/cleanup checks, all 26 identity checks, and Drive
-upload/readback/restore. The backup timer is active. A subsequent region-only
-setup reused this application and repeated identity and backup acceptance.
+The installed controller is source `4b19ac6`, wheel
+`a43e336773fe21155a890aa4a545a26ab70d71a6a7d01bf5e0b0619ac86434c3`.
+Its 34 application files matched the package. After an unchanged CPU acceptance
+rerun, all 16 containment/cleanup checks and all 26 identity checks passed.
+Research and the verified Drive backup schedule are restored. The original
+intermittent CPU timeout classification failure remains retained, not claimed fixed.
 
-Seven full-worker attempts ended before model inference. There are 18 prepared
-case plans and **zero successful live canonical GPU cases**. The latest Pod is
-confirmed deleted, its allowance is closed, and no project GPU is running.
-The next goal is one successful Base parity job, retained artifacts and confirmed
-deletion. Broader orchestration is deferred until that path works reliably.
+The eighth full-worker attempt reached verified configuration, SSH tunneling,
+worker readiness and approved dispatch. CUDA initialization then failed with
+error 304; result collection marked the case failed and deletion was independently
+confirmed. There are 18 prepared plans and **zero successful live canonical GPU cases**.
 
-The seventh attempt in `EU-RO-1` ended at worker startup with `REQUEST_CHANGED`.
-The controller entered `STOP_REQUESTED`, then `UNCERTAIN` with `ProviderUncertain`;
-the watchdog subsequently recorded `uncertain_action`. The initial reconciliation
-error was not retained. A same-time log lookup returned HTTP503, while a saved
-prior Pod observation passed exact RUNNING validation. Injected HTTP503 status
-and deletion failures reproduce this sequence locally. That proves a failure
-mechanism, not the historical first trigger. No transient-status retry policy or
-cause-audit correction is represented as installed.
+A local A/B reproduction identified a project-controlled failure: the worker's
+seccomp filter denied CUDA's `socket(AF_UNIX, SOCK_SEQPACKET|SOCK_CLOEXEC, 0)`.
+The unchanged filter returns CUDA304; permitting only AF_UNIX creation succeeds.
+The narrow correction retains all `connect`, `sendto` and `sendmsg` denials and
+passed a local BF16 matrix operation. Exact rebuilt-image acceptance on RunPod
+remains required before claiming the cloud failure is resolved.
 
-The next source correction retains the initiating stop cause and allows one
-bounded retry for a known running Pod's transient status error. Local regressions
-cover recovery, exhausted retries, original deadline enforcement and sanitized
-audit evidence. Installation and a new live Base run remain the next gates.
+The installed controller already retains initiating reconciliation causes and
+allows one deadline-bounded retry for eligible transient status reads. Its eighth
+run progressed through dispatch. The seventh attempt's discarded historical
+trigger is still unknown; a prior local HTTP503 replay was mechanism evidence only.
 
 The operator's retained evidence is named in [validation status](validation.md).
 Do not replay a consumed allowance or erase these failed requests when preparing
@@ -63,12 +60,13 @@ a future run. Diagnosis and a matching regression must precede another paid retr
 - Czech capacity was unavailable for the next proposal. The reviewed region-only
   retarget changed the region and fresh proposal paths/IDs, preserved the worker
   image and scientific scope, and did not upgrade application code. The resulting
-  seventh attempt is the unresolved startup failure described above.
+  seventh attempt stopped during startup; its initiating error was not retained.
 
-The existing Base worker image
-(`sha256:a795fe2eb429d5453c0687d116707cc8a1b0eeca2cea2c77f37a6dbe5248b437`)
-is unchanged; the new acceptance orchestration runs on the controller and does
-not require rebuilding that image.
+The corrected Base worker image is published at
+`sha256:97a87f0ccf7baae5a77dd6dabaf1f7de1d476396449b40da4e96c8bef7140e41`,
+from source `f031a674c688acad1e2a7fe84caed5b1580d2357`. Its public pull, immutable
+registry identity and source provenance were verified. It has not yet run a
+canonical calibration. The eighth attempt used the older `a795fe2e…` image.
 The separately pinned posttrained worker image has been published at
 `sha256:618792509a6aad88709d3ce6e1636ffc69a6a0db637202653117ee4bcc8d2152`,
 from worker source `fb7c04a0bc3d03f141934185b50283e30f221f32`. Its registry digest

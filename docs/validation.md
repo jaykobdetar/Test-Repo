@@ -10,27 +10,26 @@ acceptance and successful model execution are separate claims.
 
 | Scope | Latest retained evidence | What it establishes |
 | --- | --- | --- |
-| Installed controller | Source `8a5486b748fc9b9f31b30408e01527729bc102bc`, wheel `c2fd62bfec0fbbb90dc556e34dac88d6969a59b5dfefb0846f31d0b691a6ee38`; all 34 application files matched the package | Exact installed controller bytes; worker provenance remains separate |
+| Installed controller | Source `4b19ac6f2bbaf2b6a5c563a30186abf87d856ad5`, wheel `a43e336773fe21155a890aa4a545a26ab70d71a6a7d01bf5e0b0619ac86434c3`; all 34 application files matched the package | Exact installed controller bytes; worker provenance remains separate |
 | CPU sandbox | All 16 installed checks passed | Containment, resource enforcement, attestation and independent cleanup after launcher crashes under the actual service profile |
 | OS identities | All 26 installed checks passed | Intended socket access, credential/admin denial and audited research reads |
 | Backup | Drive upload, full readback and offline restore passed; timer restored | Recoverable retained controller/provider history, not a scientific result |
 | Region-only preparation | 95 focused checks and a separately verified installation | Fresh Romania proposal with unchanged application, worker image and scientific scope |
-| GPU acceptance | Seven full-worker attempts ended before inference; all test Pods deleted | Zero successful live canonical cases; 18 plans are prepared, not passed |
+| GPU acceptance | The eighth attempt reached dispatch and failed at CUDA initialization; all test Pods deleted | Zero successful live canonical cases; 18 plans are prepared, not passed |
 
-The latest attempt ended with `REQUEST_CHANGED` during worker startup. The
-controller requested stop before the watchdog recorded `uncertain_action`.
-Its original reconciliation trigger was discarded. A concurrent provider-log
-lookup returned HTTP503; the saved prior Pod passed exact RUNNING validation.
-A local injected status-GET503/deletion503 sequence reproduces the shutdown
-mechanism, but cannot prove which error initiated the live stop.
+The eighth attempt completed SSH configuration and readiness before CUDA returned
+error 304. A local driver-only comparison and syscall trace reproduced that error
+with the exact worker filter, identifying denied AF_UNIX socket creation. The
+narrow candidate passes local CUDA initialization and a tiny BF16 GPU kernel while
+retaining internet socket and connection/send restrictions. It is not live RunPod
+or canonical model acceptance.
 
-The startup controller release passed both CI runs with 1,867 tests passing and
-10 real-container tests skipped. The installed sandbox gate provides separate
-runtime evidence; skipped CI tests remain skips. On deployment source `7e01602`, one CI run
-passed and another reported 1,912 passed, one failure and 10 skips: output-size
-accounting raced an atomic `summary.json.partial` rename. The isolated correction
-is not part of the installed worker image, and this documentation does not claim
-that release passed every CI run. Focused and full-suite counts overlap.
+Installed controller source `4b19ac6` passed both CI workflows with 2,024 tests and
+10 environment-specific skips, plus source/wheel builds. Its installed CPU gate
+initially failed timeout classification; the unchanged rerun passed all 16 checks,
+followed by all 26 identity checks, with no application reinstall. That transient
+CPU check is not claimed fixed. The CUDA filter correction has separate focused
+syscall tests and requires its own published image and live calibration.
 
 The immediate target is the first successful Base parity run with retained
 artifacts and confirmed provider deletion. Further orchestration is deferred.
@@ -39,8 +38,8 @@ checks and scientific evaluation remain unproven. No project GPU is running at
 the latest retained readback.
 
 The operator retains `calibration-startup-verification.json`,
-`calibration-retarget-verification.json`, `public-calibration-seventh-attempt.json`
-and `seventh-stop-local-reproduction.json` with the private deployment records.
+`calibration-status-package-verification.json`, `public-calibration-eighth-attempt.json`
+and `cuda-filter-local-verification.json` with the private deployment records.
 They document the claims above; private credentials, provider responses and
 administrator receipts are not copied into this public repository.
 

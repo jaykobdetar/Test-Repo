@@ -43,7 +43,7 @@ As of September 20, 2026:
 | Independent backups | Google Drive upload, download, hash verification and offline restore have passed. |
 | RunPod containment | Resource controls and cleanup passed on one compatible host. Every newly assigned host must repeat the checks. |
 | Model images | Separate Base and posttrained images are published with pinned public assets and verified registry provenance. Verification inside a live worker is still required. |
-| End-to-end GPU execution | **Not established.** Seven calibration attempts stopped before model inference. No passing canonical GPU result is claimed. |
+| End-to-end GPU execution | **Not established.** The eighth attempt reached approved dispatch but failed during CUDA initialization. No passing canonical GPU result is claimed. |
 | Scientific workflow | Private held-out evaluation, independent Explorer/Skeptic/Replicator sessions and blind scientific calibration remain future work. |
 
 The immediate milestone is one complete Base-model calibration: startup,

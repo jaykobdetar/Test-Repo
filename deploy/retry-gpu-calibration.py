@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Close one undispatched failed calibration, then prepare its pinned replacement.
+"""Close one evidenced failed calibration, then prepare its pinned replacement.
 
-The two phases straddle the ordinary verified wheel upgrade. Neither phase
-approves compute or writes the ledger directly; cancellation/submission use the
-existing research identity. Existing evidence and credentials are retained.
+The two phases straddle an ordinary verified wheel upgrade unless schema6 pins
+the same installed wheel; that path verifies a fresh backup and installed
+identities before preparation. Neither phase approves compute or writes the
+ledger directly. Undispatched cancellation and fresh submission use the existing
+research identity; a stopped failed attempt is preserved without cancellation.
 """
 import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import pwd
@@ -22,6 +25,9 @@ ROOT = Path('/opt/probe-core')
 PUBLIC = Path('/etc/probe-calibration')
 SUBMIT = Path('/var/lib/probe-calibration-submit')
 STATE = Path('/var/lib/probe-core/gpu-acceptance')
+OUTBOX = Path('/var/lib/probe-backups/outbox')
+RECEIPTS = Path('/var/lib/probe-backups/receipts')
+MAX_BACKUP = 64 * 1024**2
 UNITS = Path('/etc/systemd/system')
 CALIBRATION = ('probe-calibration-submit.service', 'probe-calibration-run.service')
 FILES = {'activate-gpu-calibration.py', 'upgrade-controller.py', 'plan.json', 'acceptance.json', *CALIBRATION}
@@ -86,10 +92,11 @@ def inputs(path, pin, *, owner=0):
     body = decoded(raw)
     fields = {'schema_version', 'original_manifest_sha256', 'previous_upgrade', 'target_upgrade',
               'previous_activation_manifest_sha256', 'failed', 'retry_id', 'files'}
-    require(type(body.get('schema_version')) is int and body['schema_version'] in {1, 2, 3, 4, 5}, 'MANIFEST_SCHEMA')
+    require(type(body.get('schema_version')) is int and body['schema_version'] in {1, 2, 3, 4, 5, 6}, 'MANIFEST_SCHEMA')
     if body['schema_version'] >= 2:
         fields |= {'previous_retry_manifest_sha256', 'previous_retry_record_sha256', 'expected_failure_reason'}
-        failures = ({'ACCEPTANCE_RUNTIME_UNAVAILABLE'} if body['schema_version'] == 4 else
+        failures = ({'CALIBRATION_DID_NOT_PASS'} if body['schema_version'] == 6 else
+                    {'ACCEPTANCE_RUNTIME_UNAVAILABLE'} if body['schema_version'] == 4 else
                     {'REQUEST_CHANGED'} if body['schema_version'] == 3 else FAILURES-{'REQUEST_CHANGED'})
         reason = body.get('expected_failure_reason')
         reason_valid = (type(reason) is str and FAILURE_CODE.fullmatch(reason)) if body['schema_version'] == 5 else reason in failures
@@ -108,6 +115,10 @@ def inputs(path, pin, *, owner=0):
             fields.add('previous_retarget_manifest_sha256')
             require(type(body['previous_retarget_manifest_sha256']) is str
                     and HEX.fullmatch(body['previous_retarget_manifest_sha256']), 'PREVIOUS_RETARGET_PIN_INVALID')
+    if body['schema_version'] == 6:
+        fields |= {'expected_failure_stage', 'failed_attempt'}
+        require(body.get('expected_failure_stage') == 'artifact_collection', 'FAILED_STAGE_INVALID')
+        validate_attempt_identity(body.get('failed_attempt'))
     require(set(body) == fields, 'MANIFEST_SCHEMA')
     require(HEX.fullmatch(body['original_manifest_sha256']) and HEX.fullmatch(body['previous_activation_manifest_sha256'])
             and re.fullmatch(r'[0-9a-f]{32}', body['retry_id']), 'MANIFEST_IDENTITY')
@@ -115,10 +126,10 @@ def inputs(path, pin, *, owner=0):
         value = body[name]
         require(type(value) is dict and set(value) == {'wheel_sha256', 'release_manifest_sha256'}
                 and all(type(v) is str and HEX.fullmatch(v) for v in value.values()), 'UPGRADE_PIN_INVALID')
-    require(body['previous_upgrade'] != body['target_upgrade'], 'NEW_UPGRADE_REQUIRED')
+    require(body['schema_version'] == 6 or body['previous_upgrade'] != body['target_upgrade'], 'NEW_UPGRADE_REQUIRED')
     require(type(body['failed']) is dict and set(body['failed']) == {'request_id', 'worker_id', 'job_id', 'provider_id'}
             and all(type(v) is str and IDENT.fullmatch(v) for v in body['failed'].values()), 'FAILED_CASE_INVALID')
-    names = FILES | ({'worker.json'} if body['schema_version'] == 3 else set())
+    names = FILES | ({'worker.json'} if body['schema_version'] in {3, 6} else set())
     require(type(body['files']) is dict and set(body['files']) == names
             and all(type(v) is str and HEX.fullmatch(v) for v in body['files'].values()), 'FILE_PINS_INVALID')
     files = {name: read(path.parent/name, owner=owner) for name in sorted(names)}
@@ -134,7 +145,7 @@ def helper(raw, name):
 
 
 def validate_replacement(old, new, retry_id, *, schema_version=1):
-    require(schema_version in {1, 2, 3, 4, 5}, 'MANIFEST_SCHEMA')
+    require(schema_version in {1, 2, 3, 4, 5, 6}, 'MANIFEST_SCHEMA')
     old_plan, plan = decoded(old['plan.json']), decoded(new['plan.json'])
     require(plan['label'] != old_plan['label'] and len(plan['cases']) == len(old_plan['cases']) == 1,
             'FRESH_PLAN_REQUIRED')
@@ -157,7 +168,7 @@ def validate_replacement(old, new, retry_id, *, schema_version=1):
                 and worker_before['code_git_commit'] == before['source_commit']
                 and worker_before['container_image_digest'] == before['deployment']['image_digest'],
                 'PREVIOUS_WORKER_BINDING_CHANGED')
-    if schema_version == 3:
+    if schema_version in {3, 6}:
         worker_after = decoded(new['worker.json'])
         checked = WorkerConfig.model_validate(worker_after)
         compare_worker = dict(worker_after, code_git_commit=worker_before['code_git_commit'],
@@ -195,7 +206,7 @@ ledger="/var/lib/probe-core/research.sqlite"
 provider="/var/lib/probe-provider/runpod.sqlite"
 result={"jobs":rows(ledger,"SELECT * FROM jobs WHERE job_id=?",(failed["job_id"],)),
         "requests":rows(ledger,"SELECT * FROM compute_requests WHERE request_id=?",(failed["request_id"],)),
-        "attempts":rows(ledger,"SELECT attempt_id FROM attempts WHERE job_id=?",(failed["job_id"],)),
+        "attempts":rows(ledger,"SELECT * FROM attempts WHERE job_id=?",(failed["job_id"],)),
         "intents":rows(provider,"SELECT worker_id,request_key,configuration_hash,provider_id,provider_seen FROM runpod_intents WHERE worker_id=?",(failed["worker_id"],))}
 result["other_unfinished_jobs"]=rows(ledger,"SELECT count(*) AS n FROM jobs WHERE job_id!=? AND state NOT IN ('COMPLETED','FAILED')",(failed["job_id"],))[0]["n"]
 result["unconfirmed_attempts"]=rows(ledger,"SELECT count(*) AS n FROM attempts WHERE stopped_at IS NULL")[0]["n"]
@@ -220,9 +231,18 @@ print(json.dumps(result,sort_keys=True))
 '''
 
 
+def validate_attempt_identity(value):
+    require(type(value) is dict and set(value) == {'attempt_id', 'failure_kind', 'failure_reason'}
+            and type(value['attempt_id']) is str and IDENT.fullmatch(value['attempt_id'])
+            and type(value['failure_kind']) is str
+            and value['failure_kind'] in {'scientific', 'infrastructure', 'cancelled', 'policy', 'timeout', 'oom'}
+            and type(value['failure_reason']) is str and 0 < len(value['failure_reason']) <= 4096,
+            'FAILED_ATTEMPT_IDENTITY_INVALID')
+
+
 def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, cancelled=False,
                     expected_failure_reason='ACCEPTANCE_RUNTIME_UNAVAILABLE', schema_version=1,
-                    expected_failure_stage=None):
+                    expected_failure_stage=None, failed_attempt=None):
     from probe_core.schemas import JobSpec
     require(all(snapshot.get(name) == 0 for name in ('other_unfinished_jobs', 'unconfirmed_attempts', 'open_approvals')),
             'OTHER_AUTHORITY_OR_WORK_PRESENT')
@@ -230,12 +250,40 @@ def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, can
             'FAILED_CASE_NOT_UNIQUE')
     job, request, approval, intent = (snapshot[name][0] for name in ('jobs', 'requests', 'approvals', 'intents'))
     require(job['job_id'] == failed['job_id']
-            and decoded(job['spec_json']) == JobSpec.model_validate(old_plan['cases'][0]['spec']).model_dump(mode='json')
-            and job['attempt_id'] is None and job['attempt_count'] == job['retry_count'] == 0 and not snapshot['attempts'],
+            and decoded(job['spec_json']) == JobSpec.model_validate(old_plan['cases'][0]['spec']).model_dump(mode='json'),
             'FAILED_CASE_EXECUTED_OR_CHANGED')
-    require((job['state'] == 'PENDING' and not cancelled) or
-            (job['state'] == 'FAILED' and job['failure_kind'] == 'cancelled'
-             and job['failure_reason'] == 'research client cancellation' and cancelled), 'FAILED_JOB_STATE_CHANGED')
+    if schema_version == 6:
+        validate_attempt_identity(failed_attempt)
+        require(job['state'] == 'FAILED' and job['attempt_count'] == 1 and job['retry_count'] == 0
+                and all(job.get(key) == value for key, value in failed_attempt.items())
+                and job['worker_id'] == failed['worker_id'] and job['approval_id'] == request['approval_id']
+                and len(snapshot['attempts']) == 1, 'FAILED_ATTEMPT_NOT_TERMINAL')
+        attempt = snapshot['attempts'][0]
+        require(attempt['attempt_id'] == failed_attempt['attempt_id'] and attempt['attempt_number'] == 1
+                and attempt['job_id'] == failed['job_id'] and attempt['worker_id'] == failed['worker_id']
+                and attempt['approval_id'] == request['approval_id']
+                and attempt['outcome'] == failed_attempt['failure_kind'], 'FAILED_ATTEMPT_BINDING_CHANGED')
+        timestamps = [attempt.get(key) for key in ('dispatched_at', 'execution_deadline', 'stopped_at')]
+        timestamps += [approval.get(key) for key in ('consumed_at', 'deadline', 'ended_at')]
+        require(all(type(value) in (int, float) and math.isfinite(value) and value > 0 for value in timestamps)
+                and approval['consumed_at'] <= attempt['dispatched_at'] <= attempt['stopped_at'] <= approval['ended_at']
+                and attempt['dispatched_at'] < attempt['execution_deadline'] <= request['deadline']
+                and approval['consumed_at'] <= approval['deadline'] <= request['deadline'],
+                'FAILED_ATTEMPT_STOP_UNCONFIRMED')
+        document = decoded(approval['document'])
+        require(document.get('approval_id') == approval['approval_id'] and document.get('pod_id') == failed['worker_id']
+                and document.get('batch_hash') == request['batch_hash']
+                and type(document.get('max_runtime_seconds')) is int and document['max_runtime_seconds'] > 0
+                and approval['consumed_at'] + document['max_runtime_seconds'] == request['deadline'],
+                'FAILED_APPROVAL_BINDING_CHANGED')
+        require(all(result[key] == value for key, value in {**failed, 'attempt_id': failed_attempt['attempt_id']}.items()
+                    if key in result), 'FAILED_RESULT_CHANGED')
+    else:
+        require(job['attempt_id'] is None and job['attempt_count'] == job['retry_count'] == 0 and not snapshot['attempts'],
+                'FAILED_CASE_EXECUTED_OR_CHANGED')
+        require((job['state'] == 'PENDING' and not cancelled) or
+                (job['state'] == 'FAILED' and job['failure_kind'] == 'cancelled'
+                 and job['failure_reason'] == 'research client cancellation' and cancelled), 'FAILED_JOB_STATE_CHANGED')
     require(request['request_id'] == failed['request_id'] and request['worker_id'] == failed['worker_id']
             and request['observed_provider_id'] == failed['provider_id'] and request['state'] == 'STOPPED'
             and decoded(request['job_ids']) == [failed['job_id']] and request['action'] == 'CREATE'
@@ -247,7 +295,7 @@ def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, can
             and intent['provider_id'] == failed['provider_id'] and intent['provider_seen'] == 1
             and intent['configuration_hash'] == request['configuration_hash']
             and snapshot['provider_absent'] is True and snapshot['pods'] == 0, 'PROVIDER_DELETION_UNCONFIRMED')
-    require(schema_version in {1, 2, 3, 4, 5}, 'MANIFEST_SCHEMA')
+    require(schema_version in {1, 2, 3, 4, 5, 6}, 'MANIFEST_SCHEMA')
     if schema_version == 4:
         require(expected_failure_reason == 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
                 and result.get('configuration') == {'configured': None, 'reason': 'CONFIGURATION_RESPONSE_UNCERTAIN'}
@@ -263,6 +311,13 @@ def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, can
                 and result.get('scientific_evidence') is False, 'FAILED_RESULT_CHANGED')
         expected_stage = expected_failure_stage
         reason_valid = type(expected_failure_reason) is str and FAILURE_CODE.fullmatch(expected_failure_reason)
+    if schema_version == 6:
+        require(expected_failure_stage == 'artifact_collection'
+                and type(result.get('schema_version')) is int and result['schema_version'] == 1
+                and result.get('kind') == 'single_public_gpu_calibration'
+                and result.get('scientific_evidence') is False, 'FAILED_RESULT_CHANGED')
+        expected_stage = 'artifact_collection'
+        reason_valid = expected_failure_reason == 'CALIBRATION_DID_NOT_PASS'
     require(reason_valid and result.get('status') == 'failed'
             and result.get('stage') == expected_stage and result.get('reason') == expected_failure_reason
             and all(result.get(key) == failed[key] for key in ('request_id', 'worker_id', 'provider_id'))
@@ -271,6 +326,17 @@ def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, can
     require(all(bound.get(key) == request[key] for key in ('request_id', 'worker_id', 'approval_id', 'batch_hash', 'deadline', 'observed_provider_id'))
             and all(submitted.get(key) == failed[key] for key in ('request_id', 'worker_id', 'job_id'))
             and submitted.get('approval_id') == approval['approval_id'], 'FAILED_BINDING_CHANGED')
+
+
+def validate_local_gates(capsule, pins, activation):
+    require(type(pins) is dict and set(pins) == {'before.tar', 'backup.json', 'identity-acceptance.json'}
+            and all(type(value) is str and HEX.fullmatch(value) for value in pins.values()), 'LOCAL_GATES_MISSING')
+    files = {name: read(capsule/name, limit=MAX_BACKUP if name == 'before.tar' else 1048576) for name in pins}
+    require(all(digest(raw) == pins[name] for name, raw in files.items()), 'LOCAL_GATES_CHANGED')
+    receipt = decoded(files['backup.json'])
+    require(receipt.get('archive_sha256') == pins['before.tar'] and all(receipt.get(key) is True
+            for key in ('verified', 'readback_verified', 'restore_verified')), 'BACKUP_NOT_VERIFIED')
+    activation.identity_gate(decoded(files['identity-acceptance.json']))
 
 
 class Recovery:
@@ -290,11 +356,13 @@ class Recovery:
             self.a.write_file(path, raw, uid=0, gid=0, mode=0o600)
 
     def initialize(self, mode, human):
+        self.human = human
         reference = self.m['previous_upgrade' if mode == 'close-failed' else 'target_upgrade']
         _, raw, _, _, _ = self.u.verify_baseline(ROOT, self.m['original_manifest_sha256'], reference, owner=0)
         require(digest(raw) == reference['wheel_sha256'], 'INSTALLED_WHEEL_CHANGED')
         directory = ROOT/'upgrades'/reference['wheel_sha256']
         checker = read(directory/'verify-installed-identities.py')
+        self.checker = checker
         self.operation.reader = self.a.extract_reader(checker)
         self.operation.users = tuple(pwd.getpwnam(name).pw_uid for name in ('probe-trusted', 'probe-research', human))
         require(len(set(self.operation.users)) == 3 and min(self.operation.users) > 0, 'IDENTITIES_CHANGED')
@@ -334,6 +402,8 @@ class Recovery:
         if self.work.exists(): self.a.trusted(self.work)
         else: self.work.mkdir(mode=0o700)
         self.record('manifest.json', encoded(self.m))
+        if self.m['schema_version'] == 6:
+            self.record('verify-installed-identities.py', checker)
         for name, raw in self.files.items(): self.record(name, raw)
 
     def previous_inputs(self, original, *, manifest=None, _seen=()):
@@ -352,7 +422,8 @@ class Recovery:
         # original manifest hash used as the capsule's identity.
         require(digest(raw) == current['previous_retry_record_sha256'], 'PREVIOUS_RETRY_RECORD_CHANGED')
         previous = decoded(raw)
-        versions = {4, 5} if current['schema_version'] == 5 else {current['schema_version']-1}
+        versions = ({5, 6} if current['schema_version'] == 6 else
+                    {4, 5} if current['schema_version'] == 5 else {current['schema_version']-1})
         require(type(previous.get('schema_version')) is int and previous['schema_version'] in versions
                 and previous.get('original_manifest_sha256') == current['original_manifest_sha256']
                 and previous.get('previous_activation_manifest_sha256') == current['previous_activation_manifest_sha256']
@@ -374,16 +445,34 @@ class Recovery:
                 'PREVIOUS_RETRY_NOT_COMPLETED')
         closed = decoded(read(capsule/'close-report.json'))
         require(closed.get('status') == 'closed' and closed.get('manifest_sha256') == previous_pin
-                and closed.get('original_job_cancelled') is True and closed.get('attempts_created') is False
+                and closed.get('original_job_cancelled') is (previous['schema_version'] != 6)
+                and (previous['schema_version'] != 6 or closed.get('failed_job_preserved') is True)
+                and closed.get('attempts_created') is False
                 and closed.get('approval_issued') is False, 'PREVIOUS_RETRY_CLOSE_MISSING')
         names = ('plan.json', 'acceptance.json', *CALIBRATION)
-        if previous['schema_version'] == 3:
+        if previous['schema_version'] in {3, 6}:
             names += ('worker.json',)
         old = {name: read(capsule/name) for name in names}
         require(all(digest(value) == previous['files'][name] for name, value in old.items()), 'PREVIOUS_RETRY_INPUT_CHANGED')
         earlier = self.previous_inputs(original, manifest=previous, _seen=(*_seen, previous_pin))
         validate_replacement(earlier, old, previous['retry_id'], schema_version=previous['schema_version'])
-        if previous['schema_version'] != 3:
+        if previous['schema_version'] == 6:
+            snapshot = decoded(read(capsule/'failed-snapshot.json'))
+            evidence = decoded(read(capsule/'failed-evidence.json'))
+            require(closed.get('failed_attempt') == previous.get('failed_attempt')
+                    and digest(encoded(snapshot)) == closed.get('failed_snapshot_sha256')
+                    and digest(encoded(evidence)) == closed.get('failed_evidence_sha256')
+                    and digest(encoded(evidence['result'])) == previous.get('failed_result_canonical_sha256'),
+                    'PREVIOUS_FAILED_ATTEMPT_EVIDENCE_CHANGED')
+            validate_failed(snapshot, previous['failed'], decoded(earlier['plan.json']),
+                            evidence['result'], evidence['bound'], evidence['submitted'], schema_version=6,
+                            expected_failure_stage=previous.get('expected_failure_stage'),
+                            expected_failure_reason=previous.get('expected_failure_reason'),
+                            failed_attempt=previous.get('failed_attempt'))
+            if previous['previous_upgrade'] == previous['target_upgrade']:
+                require(report.get('application_reinstalled') is False, 'PREVIOUS_RETRY_NOT_COMPLETED')
+                validate_local_gates(capsule, report.get('local_gates'), self.a)
+        if previous['schema_version'] not in {3, 6}:
             old['worker.json'] = earlier['worker.json']
         if retarget:
             old = self.apply_retarget(current, retarget, old, report['submission'])
@@ -490,10 +579,106 @@ class Recovery:
         self.verify_result_pin()
         validate_failed(snapshot, self.m['failed'], decoded(self.old['plan.json']), self.result, self.bound, self.submitted,
                         cancelled=cancelled, expected_failure_reason=self.m.get('expected_failure_reason', 'ACCEPTANCE_RUNTIME_UNAVAILABLE'),
-                        schema_version=self.m.get('schema_version', 1), expected_failure_stage=self.m.get('expected_failure_stage'))
+                        schema_version=self.m.get('schema_version', 1), expected_failure_stage=self.m.get('expected_failure_stage'),
+                        failed_attempt=self.m.get('failed_attempt'))
+
+    def preserve_failed(self):
+        """Schema6 records an already stopped failure; never sends cancellation."""
+        snapshot = self.snapshot()
+        self.verify_failure(snapshot)
+        previous = self.work/'close-report.json'
+        receipt = decoded(read(previous)) if previous.exists() else None
+        if receipt is not None:
+            self.verify_preserved_receipt(receipt, snapshot)
+            self.operation.baseline = receipt['history']
+        history = self.operation.idle()
+        self.record('close-intent.json', {'manifest_sha256': self.pin, 'failed_evidence_sha256': self.failure_hash})
+        self.record('failed-evidence.json', {'result': self.result, 'bound': self.bound, 'submitted': self.submitted})
+        self.record('failed-snapshot.json', snapshot)
+        after = self.snapshot()
+        self.verify_failure(after)
+        require(after == snapshot, 'FAILED_HISTORY_CHANGED')
+        # idle() retains its baseline and verifies every historical row and the
+        # audit prefix again; this phase performs no ledger mutation.
+        self.operation.idle()
+        if receipt is not None:
+            return receipt
+        receipt = {'schema_version': 1, 'status': 'closed', 'manifest_sha256': self.pin,
+                   'failed_evidence_sha256': self.failure_hash, 'failed_snapshot_sha256': digest(encoded(snapshot)),
+                   'failed_attempt': self.m['failed_attempt'], 'history': history,
+                   'original_job_cancelled': False, 'failed_job_preserved': True,
+                   'attempts_created': False, 'approval_issued': False}
+        self.record('close-report.json', receipt)
+        return receipt
+
+    def verify_preserved_receipt(self, receipt, snapshot):
+        require(receipt.get('status') == 'closed' and receipt.get('manifest_sha256') == self.pin
+                and receipt.get('failed_evidence_sha256') == self.failure_hash
+                and receipt.get('failed_snapshot_sha256') == digest(encoded(snapshot))
+                and receipt.get('failed_attempt') == self.m['failed_attempt']
+                and receipt.get('original_job_cancelled') is False and receipt.get('failed_job_preserved') is True
+                and receipt.get('attempts_created') is False and receipt.get('approval_issued') is False,
+                'CLOSE_RECEIPT_CHANGED')
+        require(decoded(read(self.work/'failed-snapshot.json')) == snapshot
+                and digest(read(self.work/'failed-evidence.json')) == self.failure_hash,
+                'FAILED_HISTORY_CHANGED')
+
+    def local_gates(self):
+        """Verify backup and installed identities when only the remote image changes."""
+        self.stage = 'backup'
+        checker = helper(self.checker, 'pinned_retry_identity_checker')
+        previous = set(OUTBOX.glob('probe-*.tar'))
+        backup_uid = pwd.getpwnam('probe-backup').pw_uid
+        for _ in range(2):
+            # A pending upload can consume the first run; the second then
+            # produces a fresh archive through the unchanged service profile.
+            self.operation.command(['/usr/bin/systemctl', 'start', 'probe-backup.service'], timeout=360)
+            values = self.operation.ctl('show', 'probe-backup.service', '--property=Result,ExecMainStatus')
+            require(dict(line.split('=', 1) for line in values.decode().splitlines())
+                    == {'Result': 'success', 'ExecMainStatus': '0'}, 'BACKUP_SERVICE_NOT_SUCCESSFUL')
+            deadline = time.monotonic()+30
+            while True:
+                state = self.operation.ctl('show', 'probe-backup-prune.service', '--property=ActiveState', '--value').strip()
+                if state == b'inactive':
+                    break
+                require(state in {b'active', b'activating', b'deactivating'} and time.monotonic() < deadline,
+                        'BACKUP_PRUNE_NOT_FINISHED')
+                time.sleep(.1)
+            archive = checker.completed_archive(outbox=OUTBOX, receipts=RECEIPTS,
+                trusted_uid=self.operation.users[0], backup_uid=backup_uid)
+            if archive not in previous:
+                raw = read(archive, owner=self.operation.users[0], limit=MAX_BACKUP)
+                checksum = digest(raw)
+                paths = list(RECEIPTS.glob('*.json'))
+                require(len(paths) <= 100, 'BACKUP_RECEIPTS_UNBOUNDED')
+                matching = [decoded(read(path, owner=backup_uid, limit=65536)) for path in paths]
+                matching = [value for value in matching if value.get('archive_sha256') == checksum]
+                require(len(matching) == 1 and all(matching[0].get(key) is True
+                        for key in ('verified', 'readback_verified', 'restore_verified')), 'BACKUP_NOT_VERIFIED')
+                self.record('before.tar', raw)
+                self.record('backup.json', matching[0])
+                break
+        else:
+            raise RetryError('FRESH_BACKUP_REQUIRED')
+        self.operation.idle()
+        self.stage = 'identity_verification'
+        reference = self.m['previous_upgrade']
+        _, raw, _, _, _ = self.u.verify_baseline(ROOT, self.m['original_manifest_sha256'], reference, owner=0)
+        require(digest(raw) == reference['wheel_sha256'], 'INSTALLED_WHEEL_CHANGED')
+        self.operation.command(['/usr/bin/python3', '-I', str(self.work/'verify-installed-identities.py'),
+                                '--human', self.human, '--output', str(self.work/'identity-acceptance.json')], timeout=120)
+        self.a.identity_gate(decoded(read(self.work/'identity-acceptance.json')))
+        self.operation.ready()
+        self.operation.idle()
+        pins = {name: digest(read(self.work/name, limit=MAX_BACKUP if name == 'before.tar' else 1048576))
+                for name in ('before.tar', 'backup.json', 'identity-acceptance.json')}
+        validate_local_gates(self.work, pins, self.a)
+        return pins
 
     def close_failed(self):
         self.stage = 'close_failed'
+        if self.m.get('schema_version') == 6:
+            return self.preserve_failed()
         intent = self.work/'close-intent.json'
         snapshot = self.snapshot()
         already = snapshot['jobs'][0]['state'] == 'FAILED' if len(snapshot['jobs']) == 1 else False
@@ -528,11 +713,20 @@ class Recovery:
         closed = decoded(read(self.work/'close-report.json'))
         require(closed.get('status') == 'closed' and closed.get('manifest_sha256') == self.pin
                 and closed.get('failed_evidence_sha256') == self.failure_hash, 'CLOSE_RECEIPT_CHANGED')
-        self.verify_failure(self.snapshot(), cancelled=True)
+        snapshot = self.snapshot()
+        self.verify_failure(snapshot, cancelled=True)
+        if self.m.get('schema_version') == 6:
+            self.verify_preserved_receipt(closed, snapshot)
         self.operation.baseline = closed['history']
         self.operation.idle()
         paths = (self.public, Path(self.config['submission_state_directory']), Path(self.config['trusted_state_directory']))
         require(all(not os.path.lexists(path) for path in paths), 'RETRY_TARGET_EXISTS')
+        local_gates = None
+        if self.m.get('schema_version') == 6 and self.m['previous_upgrade'] == self.m['target_upgrade']:
+            local_gates = self.local_gates()
+            self.verify_failure(self.snapshot())
+            self.operation.idle()
+            self.stage = 'prepare'
         guard_name = '50-probe-calibration-retry.conf'
         marker = self.public/'prepared'
         guard = ('[Unit]\nConditionPathExists='+str(marker)+'\n').encode()
@@ -573,7 +767,7 @@ class Recovery:
                 path.mkdir(mode=0o755 if uid == 0 else 0o700)
                 os.chown(path, uid, gid)
                 os.chmod(path, 0o755 if uid == 0 else 0o700)
-            public_files = ('plan.json', 'acceptance.json', 'worker.json') if self.m.get('schema_version') == 3 else ('plan.json', 'acceptance.json')
+            public_files = ('plan.json', 'acceptance.json', 'worker.json') if self.m.get('schema_version') in {3, 6} else ('plan.json', 'acceptance.json')
             for name in public_files:
                 self.a.write_file(self.public/name, self.files[name], uid=0, gid=0, mode=0o444)
             for name in CALIBRATION:
@@ -611,6 +805,8 @@ class Recovery:
             receipt = {'schema_version': 1, 'status': 'prepared', 'manifest_sha256': self.pin,
                        'target_wheel_sha256': self.m['target_upgrade']['wheel_sha256'], 'submission': submitted,
                        'old_history_preserved': True, 'approval_issued': False, 'cloud_mutations_performed': False}
+            if local_gates is not None:
+                receipt.update(application_reinstalled=False, local_gates=local_gates)
             self.record('prepare-report.json', receipt)
             return receipt
         except BaseException:

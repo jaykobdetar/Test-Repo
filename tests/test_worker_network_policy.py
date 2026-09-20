@@ -51,7 +51,9 @@ for family, kind in ((socket.AF_INET, socket.SOCK_STREAM),
                      (socket.AF_INET6, socket.SOCK_DGRAM),
                      (socket.AF_NETLINK, socket.SOCK_RAW),
                      (socket.AF_PACKET, socket.SOCK_RAW),
-                     (socket.AF_VSOCK, socket.SOCK_STREAM)):
+                     # Some Linux Python builds omit this constant; the Linux
+                     # socket ABI still assigns AF_VSOCK the value 40.
+                     (getattr(socket, 'AF_VSOCK', 40), socket.SOCK_STREAM)):
     for flag in flags:
         denied(lambda: socket.socket(family, kind | flag))
         blocked.append([family, flag])
