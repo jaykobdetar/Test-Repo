@@ -24,10 +24,11 @@ import time
 import uuid
 
 from .audit import canonical_json
+from .compute_timing import startup_dispatch_cutoff
 from .ledger import JobState, Ledger
 from .provider import ComputeBackend, DeploymentSpec, ProviderBudgetRefused, ProviderLaunchRefused, SimulatedProvider, StopBackend, StopOnlyBackend, WorkerState
 from .rpc import UnixRPCClient, UnixRPCServer
-from .schemas import ApprovalNonce
+from .schemas import ApprovalNonce, JobSpec
 
 
 UTC = timezone.utc
@@ -502,6 +503,55 @@ class ControllerClient:
         return self.rpc.call("stop_gpu", dict(worker_id=worker_id))
 
 
+def _calibration_startup_deadline(reader, request, *, now):
+    """Recognize only the immutable single-job runner's initial startup.
+
+    Ordinary workers, infrastructure and multi-job approvals keep their existing
+    idle policy. Malformed eligibility never grants a startup exception. SQL
+    failures propagate so the watchdog stops its cached workers fail-closed.
+    """
+    try:
+        if (request['state'] not in {'STARTING', 'RUNNING'} or request['action'] not in {'CREATE', 'REPLACE'}
+                or request['infrastructure'] is not None):
+            return None
+        consumed, deadline, runtime = request['consumed_at'], request['absolute_deadline'], request['max_runtime_seconds']
+        if (type(runtime) is not int or not 1 <= runtime <= 900
+                or any(type(value) not in (int, float) or not math.isfinite(value) for value in (consumed, deadline))
+                or not 0 <= consumed <= now or not consumed < deadline <= consumed + runtime
+                or deadline != request['deadline']):
+            return None
+        deployment = DeploymentSpec.model_validate_json(request['configuration'])
+        if deployment.storage_mode != 'disposable_research' or deployment.digest != request['configuration_hash']:
+            return None
+        job_ids = json.loads(request['job_ids'])
+        if type(job_ids) is not list or len(job_ids) != 1 or type(job_ids[0]) is not str:
+            return None
+        approved = [row[0] for row in reader.execute('SELECT job_id FROM approval_jobs WHERE approval_id=?',
+                                                     (request['approval_id'],))]
+        if approved != job_ids:
+            return None
+        document = json.loads(request['approval_document'])
+        if (type(document) is not dict or document.get('purpose', 'research') != 'research'
+                or document['approval_id'] != request['approval_id'] or document['pod_id'] != request['worker_id']
+                or document['max_runtime_seconds'] != runtime or document['batch_hash'] != request['batch_hash']):
+            return None
+        job = reader.execute('SELECT * FROM jobs WHERE job_id=?', (job_ids[0],)).fetchone()
+        if (job is None or job['state'] != 'PENDING' or job['attempt_count'] != 0 or job['retry_count'] != 0
+                or any(job[key] is not None for key in ('attempt_id', 'approval_id', 'worker_id', 'lease_expires_at'))
+                or reader.execute('SELECT 1 FROM attempts WHERE approval_id=? OR job_id=? LIMIT 1',
+                                  (request['approval_id'], job_ids[0])).fetchone() is not None):
+            return None
+        spec = JobSpec.model_validate_json(job['spec_json'])
+        spec_hash = 'sha256:' + hashlib.sha256(canonical_json(spec.model_dump(mode='json')).encode()).hexdigest()
+        batch = 'sha256:' + hashlib.sha256(canonical_json([{'job_id': job_ids[0], 'spec_hash': spec_hash}]).encode()).hexdigest()
+        if (spec.experiment_stage.value != 'calibration' or spec_hash != job['spec_hash']
+                or batch != request['batch_hash'] or spec.limits.max_runtime_seconds > runtime):
+            return None
+        return startup_dispatch_cutoff(deadline, spec.limits.max_runtime_seconds)
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
 class StopWatchdog:
     """Read authoritative deadlines and stop through an independently owned adapter.
 
@@ -539,11 +589,24 @@ class StopWatchdog:
             with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=5)) as reader:
                 reader.row_factory = sqlite3.Row
                 reader.execute("PRAGMA query_only=ON")
-                requests = [dict(row) for row in reader.execute("""SELECT r.*,a.deadline AS absolute_deadline,a.consumed_at
+                reader.execute('BEGIN')
+                requests = [dict(row) for row in reader.execute("""SELECT r.*,a.deadline AS absolute_deadline,a.consumed_at,
+                    a.document AS approval_document
                     FROM compute_requests r JOIN approvals a ON a.approval_id=r.approval_id
                     WHERE a.consumed_at IS NOT NULL AND a.ended_at IS NULL
                     AND r.state NOT IN ('STOPPED','REJECTED','PENDING')""")]
                 active = {row[0] for row in reader.execute("SELECT DISTINCT approval_id FROM attempts WHERE stopped_at IS NULL")}
+                for request in requests:
+                    request['startup_deadline'] = _calibration_startup_deadline(reader, request, now=now)
+                    request.pop('approval_document')
+                    # A whole attempt can run and stop between watchdog polls.
+                    # Its persisted stop time still starts ordinary idle time;
+                    # absence of a currently active attempt cannot revive startup.
+                    stopped = [row[0] for row in reader.execute('SELECT stopped_at FROM attempts WHERE approval_id=?',
+                                                               (request['approval_id'],))]
+                    valid = [value for value in stopped if type(value) in (int, float)
+                             and math.isfinite(value) and request['consumed_at'] <= value <= now]
+                    request['latest_stopped_at'] = max(valid) if valid else None
         except Exception:
             # A DB outage must not erase deadlines already acknowledged to the
             # starter. Stop cached workers immediately and keep retrying.
@@ -567,6 +630,7 @@ class StopWatchdog:
                     old = state.execute("SELECT idle_since,last_stop_reason FROM watch_schedule WHERE request_id=?",
                                         (request["request_id"],)).fetchone()
                     idle_since = -1 if request["approval_id"] in active else (
+                        request.get('latest_stopped_at') if request.get('latest_stopped_at') is not None else
                         now if old and old[0] == -1 else
                         old[0] if old and old[0] is not None else request["consumed_at"])
                     state.execute("UPDATE watch_schedule SET idle_since=? WHERE request_id=?",
@@ -580,6 +644,9 @@ class StopWatchdog:
                         reason = "uncertain_action"
                     elif old and old[1]:
                         reason = old[1]  # Once stopping is required, activity cannot renew it.
+                    elif request.get('startup_deadline') is not None:
+                        if now >= request['startup_deadline']:
+                            reason = 'startup_deadline'
                     elif idle_since >= 0 and now - idle_since >= 300:
                         reason = "five_minute_idle"
                     if reason is None:

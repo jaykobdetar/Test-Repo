@@ -38,6 +38,7 @@ from pydantic import Field, model_validator
 
 from .audit import canonical_json
 from .controller import ControllerClient
+from .compute_timing import COLLECTION_DELETION_RESERVE_SECONDS, startup_dispatch_cutoff
 from .dispatcher import (Dispatcher, DispatcherService, SSHTunnel, WorkerClient,
                          SSH_FAILURE_PATTERNS, TransportError, ssh_failure_classification)
 from .direction_transfer import DIRECTION_SHA256, READBACK_PROGRAM, DirectionDispatcher
@@ -58,7 +59,6 @@ LEDGER = Path('/var/lib/probe-core/research.sqlite')
 RESEARCH_SOCKET = '/run/probe-research/research.sock'
 CONTROLLER_SOCKET = '/run/probe-controller/research.sock'
 BOUND = 1024 * 1024
-COLLECTION_DELETION_RESERVE_SECONDS = 120
 
 
 class RunnerError(ValueError):
@@ -1053,7 +1053,7 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
         # the full approved job runtime and time to collect/delete; never renew
         # the provider or approval deadline merely because startup was slow.
         job_runtime = plan.cases[0].spec.limits.max_runtime_seconds
-        startup_deadline = deadline - job_runtime - COLLECTION_DELETION_RESERVE_SECONDS
+        startup_deadline = startup_dispatch_cutoff(deadline, job_runtime)
         window = {'approval_deadline': deadline, 'dispatch_cutoff': startup_deadline,
                   'job_runtime_seconds': job_runtime,
                   'collection_deletion_reserve_seconds': COLLECTION_DELETION_RESERVE_SECONDS}
