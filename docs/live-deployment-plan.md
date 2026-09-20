@@ -9,6 +9,14 @@ prepared plan does not count as a passed deployment gate.
 
 ## Current status and next gate
 
+The operator has selected a simpler immediate milestone: [supervised public
+calibration](supervised-public-calibration.md). The ninth managed attempt failed
+before SSH in cgroup bootstrap; it was stopped early and deletion confirmed.
+The standalone path defers nested cgroups and repeated controller upgrades,
+while retaining the original numerical checks, pinned assets, budget, deadlines,
+result verification and Pod deletion. Passing it will establish numerical
+calibration, not completion of the original managed-worker lifecycle checklist.
+
 The installed controller is source `4b19ac6`, wheel
 `a43e336773fe21155a890aa4a545a26ab70d71a6a7d01bf5e0b0619ac86434c3`.
 Its 34 application files matched the package. After an unchanged CPU acceptance

@@ -1,0 +1,7 @@
+# Reuse verified model/dependency layers; this profile runs fixed public tests.
+ARG WORKER_IMAGE
+FROM ${WORKER_IMAGE}
+ARG SOURCE_COMMIT
+COPY deploy/gpu/public-calibration.py deploy/gpu/public-calibration-entrypoint.py /opt/probe/
+LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
+ENTRYPOINT ["/opt/probe-core/venv/bin/python", "-I", "/opt/probe/public-calibration-entrypoint.py"]
