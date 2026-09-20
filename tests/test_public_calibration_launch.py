@@ -67,7 +67,8 @@ def test_creation_failure_still_deletes_owned_intent(tmp_path,monkeypatch):
     monkeypatch.setattr(runner.DeploymentSpec,'model_validate',lambda _:object())
     deadline=time.time()+600
     (tmp_path/'guard-ready.json').write_text(json.dumps({'deadline':deadline,'pid':os.getpid()}))
-    record={'deadline':deadline,'worker_id':'worker','request_id':'request','deployment':{}}
+    key=tmp_path/'key';key.write_text('fixture');key.chmod(0o600)
+    record={'deadline':deadline,'worker_id':'worker','request_id':'request','deployment':{},'ssh_key':str(key)}
     assert runner.run(tmp_path,record,provider)==1
     report=json.loads((tmp_path/'result.json').read_text())
     assert report['status']=='failed' and report['teardown']['confirmed'] and provider.stops==1
@@ -128,3 +129,14 @@ def test_guard_loads_real_json_roundtrip(tmp_path,monkeypatch):
     monkeypatch.setattr(sys,'argv',['runner','guard',str(tmp_path)])
     assert runner.main()==0
     assert json.loads((tmp_path/'guard-stop.json').read_text())=={'confirmed':True,'created':False}
+
+
+def test_temporary_ssh_state_works_with_group_writable_documents(tmp_path):
+    import tempfile
+    from probe_core.gpu_acceptance_runner import State,read_file
+    with tempfile.TemporaryDirectory(prefix='ail-public-ssh-test-') as name:
+        directory=Path(name);key=directory/'key';key.write_text('fixture');key.chmod(0o600)
+        assert read_file(key,owner=os.geteuid(),private=True)==b'fixture'
+        with State(directory) as state:
+            state.publish('endpoint.json',{'host':'public-host'})
+            assert state.read('endpoint.json')=={'host':'public-host'}

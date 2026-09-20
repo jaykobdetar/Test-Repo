@@ -14,6 +14,9 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import shutil
+import stat
+import tempfile
 import time
 
 from types import SimpleNamespace
@@ -137,7 +140,18 @@ def run(directory, record, provider):
     report = {'profile':'supervised_public_calibration','status':'failed',
               'scientific_evidence':False,'lifecycle_acceptance_complete':False,
               'nested_cgroup_enforcement':False}
+    ssh_state = None
     try:
+        # Ordinary Documents folders may be group-writable. Keep the SSH key
+        # and verified host-key state in an actual private temporary directory.
+        source_key = Path(record['ssh_key'])
+        info = source_key.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError('SSH private key must be an owned private regular file')
+        ssh_state = Path(tempfile.mkdtemp(prefix='ail-public-ssh-'))
+        private_key = ssh_state / 'key'
+        shutil.copyfile(source_key, private_key)
+        private_key.chmod(0o600)
         deployment = DeploymentSpec.model_validate(record['deployment'])
         progress('create')
         observed = provider.create(record['worker_id'], deployment, request_key=record['request_id'],
@@ -148,12 +162,12 @@ def run(directory, record, provider):
         write(directory,'created.json',{'pod_id':pod_id,'deadline':deadline})
         progress('startup')
         expected_config = json.loads((directory/'calibration.json').read_text())
-        config = SimpleNamespace(deployment=deployment, ssh_identity_file=record['ssh_key'],
+        config = SimpleNamespace(deployment=deployment, ssh_identity_file=str(private_key),
             expected_worker_price_usd_per_hour=expected_config['live_price_usd_per_hour'])
         request = dict(worker_id=record['worker_id'], request_id=record['request_id'],
                        observed_provider_id=pod_id, deadline=deadline)
         endpoint = None
-        with State(directory) as state:
+        with State(ssh_state) as state:
             while time.time() < deadline - 340:
                 try:
                     endpoint = verified_endpoint(config, request, provider, state)
@@ -167,7 +181,7 @@ def run(directory, record, provider):
         if endpoint is None:
             raise TimeoutError('startup allowance expired')
         host, port, known = endpoint['host'], endpoint['ssh_port'], endpoint['known_hosts_file']
-        options=['-i',record['ssh_key'],'-o','IdentitiesOnly=yes','-o','BatchMode=yes',
+        options=['-i',str(private_key),'-o','IdentitiesOnly=yes','-o','BatchMode=yes',
                  '-o','StrictHostKeyChecking=yes','-o','UserKnownHostsFile='+str(known),
                  '-o','ConnectTimeout=8','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=2']
         target='root@'+host
@@ -200,6 +214,8 @@ def run(directory, record, provider):
         else:
             report['status']='failed'
         write(directory,'result.json',report)
+        if ssh_state is not None:
+            shutil.rmtree(ssh_state)
         print(json.dumps(report),flush=True)
     return 0 if report['status']=='passed' else 1
 
