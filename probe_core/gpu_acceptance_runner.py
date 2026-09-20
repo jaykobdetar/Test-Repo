@@ -22,6 +22,7 @@ from pathlib import Path
 import queue
 import re
 import selectors
+import shlex
 import signal
 import socket
 import stat
@@ -39,7 +40,8 @@ from .audit import canonical_json
 from .controller import ControllerClient
 from .dispatcher import (Dispatcher, DispatcherService, SSHTunnel, WorkerClient,
                          SSH_FAILURE_PATTERNS, TransportError, ssh_failure_classification)
-from .gpu_acceptance import AcceptancePlan, collect, fixed_plan
+from .direction_transfer import DIRECTION_SHA256, READBACK_PROGRAM, DirectionDispatcher
+from .gpu_acceptance import AcceptancePlan, collect, fixed_direction_plan, fixed_plan
 from .gpu_acceptance_actions import SSHActionClient, run_action
 from .ledger import JobState, Ledger
 from .provider import DeploymentSpec, WorkerState
@@ -252,6 +254,11 @@ def validate_plan(config, plan):
         # the four additional cases must match the existing generated recipe.
         require(case.action == 'wait' and case.expected_state == 'COMPLETED' and case.expected_failure_kind is None
                 and case.spec.operation.kind == 'backend_parity', 'FIXED_BACKEND_PARITY_REQUIRED')
+    elif case.name == 'public-direction-transfer':
+        inputs = case.spec.inputs
+        expected = fixed_direction_plan(plan.model, plan.label, inputs.dataset_revision,
+                                        inputs.prompt_set_hash, inputs.prompt_ids).cases[0]
+        require(case == expected, 'FIXED_CALIBRATION_CASE_REQUIRED')
     else:
         require(case.name in {'capture-retention', 'hard-deadline', 'output-limit', 'vram-limit',
                              'cancel-running', 'supervisor-restart'}, 'FIXED_CALIBRATION_CASE_REQUIRED')
@@ -903,10 +910,30 @@ def lifecycle_settings(settings, configuration):
             'token_path': '/workspace/probe/config/worker-token'}
 
 
+def read_worker_direction(settings, phase, *, deadline, clock=time.time, command=command_bytes):
+    """Bounded read/hash only, through this Pod's already pinned SSH identity."""
+    require(phase in {'before', 'after'} and clock() < deadline, 'DIRECTION_READBACK_DEADLINE')
+    argv = ['/usr/bin/ssh', '-F', '/dev/null', '-T', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+        '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectionAttempts=1', '-o', 'ConnectTimeout=5',
+        '-o', 'PermitLocalCommand=no', '-o', 'UserKnownHostsFile=' + str(settings['known_hosts_file']),
+        '-i', str(settings['identity_file']), '-p', str(settings['ssh_port']), 'root@' + settings['host'],
+        '/opt/probe-core/venv/bin/python', '-I', '-c', shlex.quote(READBACK_PROGRAM),
+        '/workspace/probe/tensors', DIRECTION_SHA256.removeprefix('sha256:'), '10001', phase]
+    output = command(argv, timeout=min(5, max(0.1, deadline-clock())))
+    require(clock() < deadline, 'DIRECTION_READBACK_DEADLINE')
+    require(len(output) <= 512, 'DIRECTION_READBACK_INVALID')
+    value = decode(output.encode())
+    # The staging gate compares the complete response with the pinned recipe;
+    # nothing from this remote output is published unless that comparison passes.
+    require(type(value) is dict, 'DIRECTION_READBACK_INVALID')
+    return value
+
+
 def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=time.sleep,
         endpoint=verified_endpoint, tunnel_factory=SSHTunnel, client_factory=WorkerClient,
         readiness=wait_for_worker, configure=configure_worker, progress=lambda _: None,
-        bootstrap_diagnostics=None, lifecycle_factory=SSHActionClient, action=run_action):
+        bootstrap_diagnostics=None, lifecycle_factory=SSHActionClient, action=run_action,
+        direction_readback=read_worker_direction):
     validate_plan(config, plan)
     state.publish('binding.json', {'config_sha256': digest(config.model_dump(mode='json')), 'plan_sha256': config.plan_sha256})
     previous = state.read('result.json')
@@ -929,6 +956,7 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
     action_task = None
     action_directory = state.directory / 'actions'
     action_case = plan.cases[0].action != 'wait'
+    direction_case = plan.cases[0].name == 'public-direction-transfer'
     try:
         result['stage'] = 'approval_verification'
         deadline = validate_authority(ledger, config, plan, request, now=clock())
@@ -985,9 +1013,12 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
             result['startup']['worker_ready_at'] = clock()
             result['stage'] = 'approved_dispatch'
             progress(result['stage'])
-            dispatcher = Dispatcher(ledger, client, worker_id=request['worker_id'],
+            direction_options = ({'readback': lambda phase: direction_readback(settings, phase, deadline=deadline, clock=clock),
+                                  'publish': lambda evidence: state.publish('direction-transfer.json', evidence)}
+                                 if direction_case else {})
+            dispatcher = (DirectionDispatcher if direction_case else Dispatcher)(ledger, client, worker_id=request['worker_id'],
                                     transfer_directory=state.directory / 'transfers',
-                                    input_artifact_root=LEDGER.parent / 'input-artifacts', lease_seconds=30)
+                                    input_artifact_root=LEDGER.parent / 'input-artifacts', lease_seconds=30, **direction_options)
             service = DispatcherService(dispatcher, tunnel=tunnel)
             lifecycle = lifecycle_factory(lifecycle_settings(settings, result['configuration'])) if action_case else None
             while clock() < deadline:
@@ -1016,13 +1047,17 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                 raise RunnerError('APPROVED_DEADLINE_REACHED')
             result['stage'] = 'artifact_collection'
             progress(result['stage'])
-            observation = collect(ledger, plan, client, action_directory=action_directory if action_case else None)
+            observation = collect(ledger, plan, client, action_directory=action_directory if action_case else None,
+                direction_evidence=state.read('direction-transfer.json') if direction_case else None,
+                input_artifact_root=LEDGER.parent / 'input-artifacts' if direction_case else None)
             state.publish('observations.json', observation)
             require(observation['case_results_passed'] is True, 'CALIBRATION_DID_NOT_PASS')
             if action_case:
                 require(observation['action_evidence']['complete'] is True, 'LIFECYCLE_ACTION_PROOF_MISSING')
                 result['action_evidence_sha256'] = digest(observation['action_evidence'])
             evidence = observation['cases'][0]
+            if direction_case:
+                result['direction_transfer_sha256'] = digest(evidence['direction_transfer'])
             if plan.cases[0].expected_state == 'COMPLETED':
                 manifest = ledger.get_manifest(request['job_ids'][0])
                 require(manifest.software.container_image_digest == config.deployment.image_digest

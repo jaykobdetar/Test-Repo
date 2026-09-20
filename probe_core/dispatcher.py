@@ -363,7 +363,7 @@ class Dispatcher:
     def _stage_inputs(self, job):
         operation = job.spec.operation
         references = [getattr(operation, name, None) for name in ("source", "baseline", "direction", "activations", "labels")]
-        staged = set()
+        staged = {}
         for reference in (item for item in references if item is not None):
             if self.input_artifact_root is None:
                 raise TransportError("input tensors require a controller-owned artifact registry")
@@ -378,8 +378,8 @@ class Dispatcher:
                 if source.is_symlink():
                     raise TransportError("input registry symlink rejected")
             if reference.sha256 not in staged:
-                self.client.upload_tensor(source, expected_sha256=reference.sha256)
-                staged.add(reference.sha256)
+                staged[reference.sha256] = self.client.upload_tensor(source, expected_sha256=reference.sha256)
+        return staged
 
     def dispatch_next(self, *, approval_id: str):
         with self._lock:

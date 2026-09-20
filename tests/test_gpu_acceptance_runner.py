@@ -429,7 +429,7 @@ class Endpoint:
         assert request.attempt_id == attempt_id
         summary = canonical_json({'suite': 'backend_parity_v1', 'passed': True, 'scientific_evidence': False}).encode()
         contents = {'summary.json': summary}
-        if request.spec.operation.kind == 'capture':
+        if request.spec.operation.kind in {'capture', 'steer'}:
             # Synthetic bytes test transport/hash retention, not tensor math.
             contents['tensors.safetensors'] = b'synthetic captured artifact'
         data = deepcopy(s.data)
@@ -438,7 +438,8 @@ class Endpoint:
             approval_id=request.approval_id, replicator_blinded=False)
         data['model'] = request.spec.model.model_dump(mode='json')
         data['inputs'] = request.spec.inputs.model_dump(mode='json')
-        data['experiment'].update(tool={'backend_parity': 'backend_parity', 'capture': 'capture_activation'}[request.spec.operation.kind],
+        data['experiment'].update(tool={'backend_parity': 'backend_parity', 'capture': 'capture_activation',
+                                       'steer': 'steer_direction'}[request.spec.operation.kind],
                                   intervention_hash=runner.digest(request.spec.operation.model_dump(mode='json')))
         data['results'].update(heldout=False, replication_status='not_applicable')
         data['software'].update(container_image_digest=s.config.deployment.image_digest,

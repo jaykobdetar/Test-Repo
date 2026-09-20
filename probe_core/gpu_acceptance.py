@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 from .dispatcher import TransportError, WorkerClient
+from .direction_transfer import direction_reference, verify_direction_evidence
 from .ledger import Ledger
 from .schemas import FrozenModel, Identifier, JobSpec, ModelIdentity
 from .worker import prompt_set_hash, sha256_file
@@ -89,6 +90,19 @@ def fixed_plan(model: ModelIdentity, label: str, dataset_revision: str,
     return AcceptancePlan(label=label, model=model, cases=cases)
 
 
+def fixed_direction_plan(model: ModelIdentity, label: str, dataset_revision: str,
+                         prompts_sha256: str, prompt_ids: tuple[str, ...]) -> AcceptancePlan:
+    """Preserve the separate, already prepared public e_0 transfer recipe."""
+    ordinary = fixed_plan(model, label, dataset_revision, prompts_sha256, prompt_ids).cases[1]
+    values = ordinary.spec.model_dump(mode='json')
+    values.update(idempotency_key=label, operation={'kind': 'steer',
+        'target': {'layer': 14, 'component': 'residual'}, 'positions': ['last'],
+        'direction': direction_reference(), 'strength': 0.5})
+    case = AcceptanceCase(name='public-direction-transfer', action='wait', expected_state='COMPLETED',
+                          spec=JobSpec.model_validate(values))
+    return AcceptancePlan(label=label, model=model, cases=(case,))
+
+
 def submit(ledger: Ledger, plan: AcceptancePlan):
     jobs = [ledger.submit_job(case.spec) for case in plan.cases]
     return {"job_ids": [job.job_id for job in jobs], "batch_hash": ledger.batch_hash([job.job_id for job in jobs]),
@@ -96,12 +110,14 @@ def submit(ledger: Ledger, plan: AcceptancePlan):
             "operator_actions": [{"job_id": job.job_id, "action": case.action} for case, job in zip(plan.cases, jobs)]}
 
 
-def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = None, *, action_directory: Path | None = None):
+def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = None, *, action_directory: Path | None = None,
+            direction_evidence: dict | None = None, input_artifact_root: Path | None = None):
     jobs = {job.spec.idempotency_key: job for job in ledger.list_jobs()}
     reports = []
     for case in plan.cases:
         job = jobs.get(case.spec.idempotency_key)
         row = {"case": case.name, "passed": False, "action": case.action}
+        receipt = None
         cancellation_case = case.name == "cancel-running" or case.action == "cancel_after_running"
         if cancellation_case:
             row["cancellation_observation"] = "inconclusive"
@@ -169,6 +185,17 @@ def collect(ledger: Ledger, plan: AcceptancePlan, client: WorkerClient | None = 
                 row["reason"] = "retained artifact bytes changed"
                 continue
             row["manifest"] = manifest.model_dump(mode="json")
+            if case.name == 'public-direction-transfer':
+                try:
+                    inputs = case.spec.inputs
+                    if case != fixed_direction_plan(plan.model, plan.label, inputs.dataset_revision,
+                                                    inputs.prompt_set_hash, inputs.prompt_ids).cases[0]:
+                        raise ValueError('fixed direction recipe differs')
+                    row['direction_transfer'] = verify_direction_evidence(ledger, job, direction_evidence,
+                                                                          input_artifact_root, receipt, manifest)
+                except (ValueError, OSError, KeyError, TypeError):
+                    row['reason'] = 'controller direction transfer evidence is absent or mismatched'
+                    continue
             if case.name == "backend-parity":
                 summary = json.loads((directory/"summary.json").read_text())
                 if summary.get("suite") != "backend_parity_v1" or summary.get("passed") is not True or summary.get("scientific_evidence") is not False:
