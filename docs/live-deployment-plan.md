@@ -52,8 +52,20 @@ calibrations stopped before inference. Image cold-start handling, clean
 environments and SSH diagnostics are installed. The fourth Pod reached verified
 SSH host-key discovery but configuration failed. The fifth stopped on a refused
 provider endpoint lookup before SSH; its HTTP status was not retained. Both
-Pods were deleted. The next controller update retains bounded HTTP metadata to
-identify that refusal while preserving the existing deadlines and cleanup.
+Pods were deleted. Controller source `82b950b` is now installed and retains bounded
+HTTP metadata to identify that refusal while preserving the existing deadlines
+and cleanup. Its installation passed all 16 sandbox and 26 identity checks, with
+a verified backup. The fresh Base request is waiting for compatible RTX 4090
+capacity in `EU-CZ-1`; it has not established live numerical acceptance.
+
+The existing Base worker image
+(`sha256:a795fe2eb429d5453c0687d116707cc8a1b0eeca2cea2c77f37a6dbe5248b437`)
+is unchanged; the new acceptance orchestration runs on the controller and does
+not require rebuilding that image.
+The separately pinned posttrained worker image has been published at
+`sha256:618792509a6aad88709d3ce6e1636ffc69a6a0db637202653117ee4bcc8d2152`,
+from worker source `fb7c04a0bc3d03f141934185b50283e30f221f32`. Its registry digest
+and source provenance were verified, but it has not passed live GPU acceptance.
 
 ## Selected setup
 
