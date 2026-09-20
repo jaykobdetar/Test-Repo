@@ -1,17 +1,23 @@
-# Probe-MCP
+# Auto Interpretability Lab
 
-Probe-MCP is an experimental toolkit for giving a research agent controlled
+Auto Interpretability Lab is an experimental toolkit for giving a research agent controlled
 access to a language model's internals. It combines model inspection and
 activation interventions with a persistent experiment ledger, bounded execution,
 and a separate human approval path for compute.
 
 The intended research subjects are **Qwen3-1.7B-Base** and **Qwen3-1.7B**. The
-current implementation has been tested locally with a small, randomly initialized
-Qwen3 model on CPU. It is an early research infrastructure project: live RunPod
-deployment, hidden evaluation, and the independent scientific workflow remain
-unfinished. No scientific discovery is claimed.
+implementation on `main` has been tested locally with a small, randomly initialized
+Qwen3 model on CPU. Its cloud provider is a simulator. Live RunPod deployment is
+being developed separately in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1)
+on `feat/live-deployment`; that work is not included in `main` and is not a claim
+of completed GPU acceptance. Hidden evaluation and the independent scientific
+workflow also remain unfinished. No scientific discovery is claimed.
 
-## What works today
+To try the local implementation, start with the [development tests](#install-and-run-the-development-tests).
+Read the [verification report](docs/validation.md) for what has actually been
+tested and the [service guides](#configure-the-services) before configuring a host.
+
+## What main includes
 
 - **Persistent experiments:** a local SQLite ledger with job states, leases,
   cancellation, recovery, immutable accepted manifests, and a hash-chained audit log.
@@ -28,14 +34,16 @@ unfinished. No scientific discovery is claimed.
 - **Compute-control foundation:** one-time human approvals, price/runtime checks,
   and an independent watchdog, currently connected to a persistent provider simulator.
 
-The repository is named `probe-mcp`; the Python distribution and import package
-are `probe-core` and `probe_core`, respectively.
+The repository is `auto-interpretability-lab`. The existing MCP command remains
+`probe-mcp`; the Python distribution and import package remain `probe-core` and
+`probe_core`. Service names, configuration paths and environment variables keep
+their existing `probe` identifiers so the documented commands continue to work.
 
 ## Current limits
 
 | Area | Status |
 | --- | --- |
-| Cloud provider | Simulator only; no live RunPod adapter is included |
+| Cloud provider | Simulator on `main`; live RunPod work is separate in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1) |
 | GPU execution | CUDA paths exist; real GPU limits, SSH deployment, and canonical checkpoint parity still require validation |
 | Flexible experiments | Arbitrary CPU Python plus fixed worker operations; no arbitrary agent-written GPU Python |
 | Interventions | Apply to the prompt's prefill pass; generation is a separate, unmodified operation |
@@ -44,7 +52,7 @@ are `probe-core` and `probe_core`, respectively.
 | Advanced methods | SAE/Qwen-Scope, circuit tracing, and automated novelty adjudication are not implemented |
 
 Model weights, credentials, research datasets, and built container images are not
-included. Deployment files are examples and do not install or start services.
+included. Deployment files on `main` are examples and do not install or start services.
 
 ## Architecture
 
@@ -81,8 +89,8 @@ The worker dependencies include PyTorch and require several gigabytes of disk.
 Use a maintained SQLite build; see the [core guide](docs/core-guide.md).
 
 ```sh
-git clone https://github.com/jaykobdetar/probe-mcp.git
-cd probe-mcp
+git clone https://github.com/jaykobdetar/auto-interpretability-lab.git
+cd auto-interpretability-lab
 uv python install 3.13
 uv sync --locked --all-extras
 uv run --locked python -m pytest -q
@@ -93,10 +101,12 @@ downloaded model checkpoint. Tests involving services bind local sockets. The
 nine real sandbox integration tests skip unless a suitable Podman environment
 and image are configured; a default test run does not validate containment.
 
-The full local acceptance run on September 19, 2026 passed **429 tests with no
-skips**, including the real sandbox gate. This verifies the tested engineering
-paths, not scientific calibration or production readiness. See
-[verification details](docs/validation.md).
+The recorded local acceptance run on September 19, 2026 passed **429 tests with
+no skips**, including the real sandbox gate. That is historical evidence for the
+source commit and environment recorded in [verification details](docs/validation.md),
+not a new test result for every subsequent commit or a production-readiness claim.
+To reproduce a run, retain the checked-out commit, locked dependencies and any
+sandbox image/policy pins alongside its results.
 
 To run the mandatory sandbox gate after preparing its pinned image:
 
@@ -113,7 +123,8 @@ the tests instead of skipping them.
 
 ## Configure the services
 
-Installation alone does not create a running lab. Follow these guides to prepare
+Installing the package does not create a running lab. These guides describe the
+local implementation on `main`; follow them to prepare
 private configuration, service accounts, sockets, worker assets, and directories:
 
 - [Controller, approvals, and watchdog](docs/controller-services.md)
@@ -122,6 +133,11 @@ private configuration, service accounts, sockets, worker assets, and directories
 - [Implementation scope and service boundaries](IMPLEMENTATION.md)
 - [Core API, queue, manifests, audit, and backups](docs/core-guide.md)
 
+For the separate RunPod deployment effort, follow
+[draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1).
+Its installation procedures and acceptance records belong to that branch;
+do not infer their availability from these local examples.
+
 After the research service is configured, an MCP client can launch `probe-mcp`
 with `--socket` pointing to its research socket and `--service-uid` set to the
 trusted service's actual UID. The controller approval interface belongs to the
@@ -129,7 +145,7 @@ human account, not the research agent's MCP configuration.
 
 ## Next milestones
 
-1. Implement the live RunPod adapter and deploy separate trusted services,
+1. Complete and review the separate RunPod deployment work: trusted services,
    pinned model assets, storage, backups, and verified shutdown.
 2. Validate canonical BF16/CUDA execution, resource limits, and remote recovery.
 3. Implement scientific metrics, matched controls, private held-out evaluation,

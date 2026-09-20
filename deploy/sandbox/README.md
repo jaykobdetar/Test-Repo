@@ -1,8 +1,17 @@
-# Rootless CPU experiment sandbox
+# Auto Interpretability Lab: rootless CPU experiment sandbox
 
-This is an execution layer for arbitrary researcher Python. Enable the
+This guide covers the local CPU sandbox on `main`, an execution layer for
+arbitrary researcher Python. Enable the
 researcher-facing executor only after the mandatory real containment gate below
 passes on its actual controller host with its exact pinned image and policy.
+
+For context, see the [project overview](../../README.md),
+[service boundaries](../../IMPLEMENTATION.md), and
+[recorded local verification](../../docs/validation.md). The project display
+name has changed; all `probe` service, package, path and environment identifiers
+in these instructions remain unchanged. RunPod deployment work is separate in
+[draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1);
+passing this CPU gate does not establish live GPU acceptance.
 
 ## Runtime requirements
 
@@ -142,6 +151,11 @@ Input and returned output directories are retained under the private workspace
 for provenance; retention/backup policy belongs to the controller.
 
 ## Verified environment and image
+
+The following is a historical record of the September 19 local acceptance
+environment. It does not establish containment on another host or after an
+image, runtime, policy or service-identity change. Retain the source commit and
+the image/policy pins with the results when reproducing the gate.
 
 The mandatory real gate passed on 2026-09-19: **eight real rootless-container
 checks passed**, including offline scientific analysis. The full run had 35

@@ -1,6 +1,8 @@
-# Trusted worker and dispatcher
+# Auto Interpretability Lab: trusted worker and dispatcher
 
-The worker executes fixed numerical operations using local Hugging Face weights and NNsight. The dispatcher follows the controller's already approved, consumed compute interval and publishes verified artifacts to the ledger. Neither process can authorize compute, provision a Pod, renew an allowance, or run agent-supplied Python. The shipped provider remains a simulator; these instructions do not provision or start cloud resources.
+The worker on `main` executes fixed numerical operations using local Hugging Face weights and NNsight. The dispatcher follows the controller's already approved, consumed compute interval and publishes verified artifacts to the ledger. Neither process can authorize compute, provision a Pod, renew an allowance, or run agent-supplied Python. The shipped provider remains a simulator; these instructions do not provision or start cloud resources.
+
+Start with the [project overview](../README.md) and [controller guide](controller-services.md), then use this guide for worker configuration, numerical contracts and artifact transfer. The [local verification report](validation.md) records the evidence for this implementation. Live RunPod installation and GPU acceptance are separate work in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1) on `feat/live-deployment`. The new project display name does not rename any `probe` commands, services or paths below.
 
 ## Deployment identities and configuration
 

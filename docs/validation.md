@@ -1,9 +1,19 @@
-# Local implementation verification
+# Auto Interpretability Lab: local implementation verification
+
+This is the retained acceptance record for the local implementation described
+in [the project overview](../README.md) and [implementation scope](../IMPLEMENTATION.md).
+It covers real CPU model execution and a simulated cloud provider. The separate
+RunPod deployment effort lives in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1)
+on `feat/live-deployment`; its live acceptance requires its own evidence.
 
 The full local acceptance run on September 19, 2026 completed with **429 passed,
 0 failed, 0 errors, and 0 skipped** in 157.41 seconds. It tested source commit
 `a639716cec57ecc5c4afd82a4baf25ebb74ce4e9`, before the public README and MIT license
 were added. All 277 original core tests are included in this count.
+
+This count belongs to that source commit and environment, not every later
+checkout. The project rebrand does not change the recorded results or the
+existing `probe` runtime identifiers.
 
 | Area | Evidence |
 | --- | --- |
@@ -18,6 +28,12 @@ were added. All 277 original core tests are included in this count.
 The native environment used Python 3.13.13, SQLite 3.53.1, Pydantic 2.13.5,
 PyTorch 2.14.0, Transformers 5.17.0, NNsight 0.7.0, safetensors 0.8.0, MCP 2.2.0,
 and pytest 9.1.1. The dependency graph is pinned in `uv.lock`.
+
+To run the current checkout's suite, follow the
+[development commands](../README.md#install-and-run-the-development-tests).
+Record its source commit, lock file and test output separately. A different
+checkout or host may produce a different count, especially when sandbox
+integration tests are skipped.
 
 The full gate required the real sandbox environment using
 `PROBE_SANDBOX_REQUIRED=1`. It ran in a temporary unprivileged user service with

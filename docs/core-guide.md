@@ -1,11 +1,17 @@
-# Core API and persistence guide
+# Auto Interpretability Lab: core API and persistence guide
 
-Probe's durable research foundation and the Phase 3–5 implementation: controller
-and independent watchdog, trusted experiment execution, local stdio MCP, and a
-rootless CPU sandbox. The provider supplied here is a persistent simulator;
-real RunPod provisioning belongs to Phase 6. See [IMPLEMENTATION.md](../IMPLEMENTATION.md)
-for service boundaries and verification status. The Phase 2 core remains usable
-without loading the worker or MCP modules.
+This guide covers the durable research foundation and Phase 3–5 implementation
+on `main`: controller and independent watchdog, trusted experiment execution,
+local stdio MCP, and a rootless CPU sandbox. The supplied provider is a persistent
+simulator. Real RunPod integration is separate Phase 6 work in
+[draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1).
+
+See the [project overview](../README.md) for setup,
+[implementation scope](../IMPLEMENTATION.md) for service boundaries, and
+[local verification](validation.md) for recorded evidence. The Phase 2 core
+remains usable without loading the worker or MCP modules. The project name is
+Auto Interpretability Lab; distribution, import and CLI identifiers remain
+`probe-core`, `probe_core` and `probe-mcp`.
 
 ## Install and test
 

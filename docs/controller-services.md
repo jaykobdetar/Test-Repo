@@ -1,6 +1,8 @@
-# Trusted controller and independent stop service
+# Auto Interpretability Lab: controller and independent stop service
 
-The included implementation is a persistent provider simulator. It performs no cloud requests and reads no cloud credentials. Initial creation, replacement, and restart all require the human administrative socket. Research clients can submit a request, inspect its status, or stop compute.
+This guide describes the implementation on `main`, which uses a persistent provider simulator. It performs no cloud requests and reads no cloud credentials. Initial creation, replacement, and restart all require the human administrative socket. Research clients can submit a request, inspect its status, or stop compute.
+
+Live RunPod integration is separate work in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1) on `feat/live-deployment`; its installation and acceptance status do not apply to these simulator instructions. Start with the [project overview](../README.md), then use the [core guide](core-guide.md) for ledger semantics and the [worker guide](worker-dispatcher.md) for execution. Existing `probe` commands, account names and paths remain unchanged.
 
 ## Process and identity boundaries
 

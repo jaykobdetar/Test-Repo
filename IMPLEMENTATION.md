@@ -1,8 +1,15 @@
-# Phase 3–5 implementation and acceptance
+# Auto Interpretability Lab: local implementation and acceptance
 
-This is the local implementation milestone, before Phase 6 RunPod deployment.
-The supplied compute backend is explicitly simulated. No paid GPU is provisioned
-by these services. The worker executes real HF/PyTorch models on CPU for acceptance.
+This document describes the Phase 3–5 implementation on `main`. The supplied
+compute backend is explicitly simulated: these services provision no paid GPU.
+The worker executes real HF/PyTorch models on CPU for acceptance. The separate
+Phase 6 RunPod work is in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1)
+on `feat/live-deployment`, outside the implementation described here.
+
+Start with the [project overview](README.md) for setup and navigation. Use the
+[local verification report](docs/validation.md) to distinguish recorded test
+results from the requirements and remaining work below. The project display
+name does not change existing `probe-core`, `probe_core` or `probe-mcp` identifiers.
 
 ## Boundaries
 
@@ -107,12 +114,18 @@ The dispatcher verifies and transfers those retained tensor inputs before execut
 
 ## Remaining deployment stages
 
-After these acceptance gates, Phase 6 supplies the real RunPod adapter, secured
+The separate Phase 6 deployment work must supply and verify the real RunPod adapter, secured
 service identities and credential provisioning on the chosen host, pinned worker
-image, network volume and exact scientific checkpoint revisions, real GPU parity,
+image, reviewed storage strategy and exact scientific checkpoint revisions, real GPU parity,
 and a verified stopped state. Phase 7 supplies the private evaluator and its
 scientific promotion rules. Neither is represented as implemented by the local
 simulator or CPU acceptance tests.
+
+Track deployment progress and its branch-specific acceptance evidence in
+[draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1).
+That branch's current storage choice uses disposable Pod disks and baked immutable
+public assets, without a network volume.
+The requirements above do not certify that deployment or its GPU results.
 
 The agreed v1 CPU sandbox plus fixed GPU primitives deliberately does not execute
 arbitrary agent-written Python on the GPU. That original report capability needs
