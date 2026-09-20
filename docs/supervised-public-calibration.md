@@ -30,8 +30,9 @@ The general research worker and its stricter checks remain available unchanged.
 This profile accepts no arbitrary operation, user-provided dataset, model code,
 or private data. Both the Base and separately pinned posttrained checkpoint passed on September
 20, 2026. See the [results and exact scope](calibration-results.md). The next
-step is a [fixed public experiment](first-public-experiment.md); broader service
-and sandbox acceptance remain separate milestones.
+step is to connect this simpler worker to the installed ledger and prove its
+cancellation, limits, and recovery behavior. The [fixed public experiment](first-public-experiment.md)
+remains a later proposed run; it has not been executed.
 
 The derived image includes a C compiler because the pinned PyTorch/Triton stack
 compiles GPU kernels during inference. The build compiles and executes a small C
@@ -50,3 +51,38 @@ Keep the run configuration and provider state in a private directory. Start the
 consumed creation marker must never be replayed. Reserve the run's maximum cost
 in the project budget before creation, and do not start another Pod until
 provider deletion is confirmed.
+
+## Connecting the simplified worker to the ledger
+
+The SSH adapter is implemented and locally tested. Its installed GPU acceptance
+is still pending. The two successful standalone calibrations above are not
+evidence that this new path has passed.
+
+`probe_core/supervised_runner.py` retains the existing controller, approvals,
+ledger, dispatcher, watchdog, and artifact validation. It replaces the worker
+HTTP server and SSH tunnel with short SSH commands through
+`probe_core/ssh_job_client.py`. The controller approves one exact job on one
+disposable Pod. The runner cannot issue approvals or create a Pod itself.
+
+The host stages a SHA-pinned `deploy/gpu/public-job.py` into the existing image.
+This helper accepts only the fixed public acceptance recipes. It records an
+exclusive attempt claim before launching a detached root monitor and a clean
+UID10001 numerical child. Reconnecting reads the same attempt and original
+deadline; it does not submit another execution. The monitor uses process
+descriptors to stop only its own child tree. A cancellation pass requires a
+running observation followed by evidence that the original child was signalled
+and its descendants stopped.
+
+This is a trusted, fixed-code execution profile. It does not claim per-job
+cgroups, hard host-RAM limits, network denial, or hostile-code isolation. The
+remaining GPU tests must separately prove the original execution deadline,
+output limit, CUDA allocator limit, artifact retention, and provider deletion.
+CPU process tests and simulated ledger tests do not substitute for those GPU
+results. Connection recovery, coordinator restart, and fresh-Pod replacement
+also remain acceptance requirements.
+
+The additive sidecar installation uses the existing Python environment and
+service identities. It does not replace the application wheel or change the
+provider credentials. A pinned suite can queue several independent proposals;
+each still requires its own approval. The runner stops the suite on a failed
+case. Neither service is enabled to start at boot.
