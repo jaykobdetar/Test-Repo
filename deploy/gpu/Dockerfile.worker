@@ -17,4 +17,4 @@ RUN uv sync --locked --extra worker --no-dev --no-editable && uv cache clean && 
     groupadd --gid 10001 probe-worker && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash probe-worker
 ENV PATH=/opt/probe-core/venv/bin:$PATH HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 TOKENIZERS_PARALLELISM=false CUBLAS_WORKSPACE_CONFIG=:4096:8
 LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
-ENTRYPOINT ["python", "-m", "probe_core.gpu_launch"]
+ENTRYPOINT ["/opt/probe-core/venv/bin/python", "-I", "-m", "probe_core.gpu_launch"]

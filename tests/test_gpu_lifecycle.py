@@ -280,6 +280,17 @@ def test_bootstrap_pid_one_is_valid_but_supervisor_pid_one_is_not(execution):
         inspect(execution)
 
 
+@pytest.mark.parametrize('extra', [None, '-c', '--unexpected'])
+def test_isolated_bootstrap_and_supervisor_require_exact_fixed_arguments(execution, extra):
+    execution['processes'][20003]['args'] = [sys.executable, '-I', '-m', 'probe_core.gpu_launch']
+    execution['processes'][20002]['args'].insert(1, '-I')
+    assert inspect(execution)['snapshot']['child_alive'] is True
+    if extra is not None:
+        execution['processes'][20002]['args'].append(extra)
+        with pytest.raises(lifecycle.LifecycleError, match='WRONG_SUPERVISOR_COMMAND'):
+            inspect(execution)
+
+
 def test_natural_replacement_since_authorized_snapshot_is_not_signalled(execution):
     execution["expected_before"] = json.loads(json.dumps(inspect(execution)["snapshot"]))
     execution["processes"][20002] = {**execution["processes"][20002], "identity": "987654"}

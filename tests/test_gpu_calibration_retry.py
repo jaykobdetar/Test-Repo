@@ -358,3 +358,180 @@ def test_schema2_manifest_requires_canonical_record_pin_and_allowlisted_reason(t
     if fault:
         with pytest.raises(r.RetryError):r.inputs(path,r.digest(path.read_bytes()))
     else:assert r.inputs(path,r.digest(path.read_bytes()))[1]==manifest
+
+
+def next_inputs(old, retry_id, *, new_worker=False):
+    new = dict(old)
+    plan = json.loads(old['plan.json'])
+    plan['label'] += '-next'
+    plan['cases'][0]['spec']['idempotency_key'] += '-next'
+    new['plan.json'] = r.encoded(plan)
+    config = json.loads(old['acceptance.json'])
+    old_path = str(Path(config['plan_path']).parent/'acceptance.json')
+    public = r.PUBLIC/('retry-'+retry_id)
+    config.update(plan_path=str(public/'plan.json'), plan_sha256='sha256:'+r.digest(new['plan.json']),
+                  submission_state_directory=str(r.SUBMIT/('retry-'+retry_id)),
+                  trusted_state_directory=str(r.STATE/('retry-'+retry_id)))
+    if new_worker:
+        worker = json.loads(old['worker.json'])
+        worker.update(code_git_commit='d'*40, container_image_digest='sha256:'+'e'*64)
+        new['worker.json'] = r.encoded(worker)
+        config.update(source_commit=worker['code_git_commit'], worker_config_path=str(public/'worker.json'),
+                      worker_config_sha256='sha256:'+r.digest(new['worker.json']))
+        config['deployment']['image_digest'] = worker['container_image_digest']
+    new['acceptance.json'] = r.encoded(config)
+    for name in r.CALIBRATION:
+        new[name] = old[name].replace(('--config '+old_path).encode(), ('--config '+str(public/'acceptance.json')).encode())
+    return new
+
+
+@pytest.fixture
+def third_retry(prior_retry):
+    s = prior_retry
+    old = next_inputs(s.old, s.manifest['retry_id'])
+    previous = deepcopy(s.manifest)
+    previous['files'] = {name:r.digest(old[name]) for name in ('plan.json','acceptance.json',*r.CALIBRATION)}
+    original_raw = (json.dumps(previous, indent=2)+'\n').encode()
+    previous_pin = r.digest(original_raw)
+    capsule = r.ROOT/'calibration-retries'/previous_pin
+    put(capsule/'manifest-original.json', original_raw)
+    put(capsule/'manifest.json', r.encoded(previous))
+    failed = dict(job_id='third-job', request_id='third-request', worker_id='third-worker', provider_id='third-pod')
+    report = dict(schema_version=1, status='prepared', manifest_sha256=previous_pin,
+                  target_wheel_sha256=previous['target_upgrade']['wheel_sha256'], old_history_preserved=True,
+                  approval_issued=False, cloud_mutations_performed=False,
+                  submission={**failed,'approval_consumed_by_runner':False})
+    put(capsule/'prepare-report.json',r.encoded(report))
+    put(capsule/'close-report.json',r.encoded(dict(status='closed',manifest_sha256=previous_pin,
+                                                original_job_cancelled=True,attempts_created=False,approval_issued=False)))
+    for name in previous['files']:put(capsule/name,old[name])
+    manifest = dict(previous, schema_version=3, previous_upgrade=previous['target_upgrade'],
+                    target_upgrade={'wheel_sha256':'c'*64,'release_manifest_sha256':'d'*64},
+                    previous_retry_manifest_sha256=previous_pin, previous_retry_record_sha256=r.digest(r.encoded(previous)),
+                    expected_failure_reason='REQUEST_CHANGED', failed_result_canonical_sha256='e'*64,
+                    retry_id='c'*32, failed=failed)
+    new = next_inputs(old,manifest['retry_id'],new_worker=True)
+    manifest['files'] = {name:r.digest(new[name]) for name in r.FILES|{'worker.json'} if name in new}
+    operation = r.Recovery(s.operation.a,None,manifest,new,'f'*64)
+    return SimpleNamespace(operation=operation, original=s.original, first=s.capsule, capsule=capsule,
+                           previous=previous, manifest=manifest, old=old, new=new)
+
+
+def test_third_retry_revalidates_entire_chain_and_pins_new_worker_without_mutating_prior_inputs(third_retry):
+    s = third_retry
+    before = {str(path):path.read_bytes() for folder in (s.first,s.capsule) for path in folder.iterdir()}
+    old = s.operation.previous_inputs(s.original)
+    assert old == {name:s.old[name] for name in ('plan.json','acceptance.json','worker.json',*r.CALIBRATION)}
+    public, config = r.validate_replacement(old,s.new,s.manifest['retry_id'],schema_version=3)
+    assert config['worker_config_path'] == str(public/'worker.json')
+    assert config['worker_config_sha256'] == 'sha256:'+r.digest(s.new['worker.json'])
+    assert config['source_commit'] == 'd'*40 and config['deployment']['image_digest'] == 'sha256:'+'e'*64
+    assert before == {str(path):path.read_bytes() for folder in (s.first,s.capsule) for path in folder.iterdir()}
+    with pytest.raises(r.RetryError,match='RUNNER_SCOPE_CHANGED'):
+        r.validate_replacement(old,s.new,s.manifest['retry_id'],schema_version=2)
+
+
+@pytest.mark.parametrize('fault',['original_missing','original_hash','original_content','earlier_file','earlier_report','previous_report'])
+def test_third_retry_refuses_broken_original_or_intermediate_chain(third_retry,fault):
+    s = third_retry
+    if fault == 'original_missing':(s.capsule/'manifest-original.json').unlink()
+    elif fault == 'original_hash':put(s.capsule/'manifest-original.json',b'{}\n')
+    elif fault == 'original_content':
+        changed=deepcopy(s.previous);changed['retry_id']='9'*32
+        raw=r.encoded(changed);put(s.capsule/'manifest.json',raw)
+        s.manifest['previous_retry_record_sha256']=r.digest(raw)
+    elif fault == 'earlier_file':put(s.first/'plan.json',b'{}\n')
+    else:
+        folder=s.first if fault=='earlier_report' else s.capsule
+        body=json.loads((folder/'prepare-report.json').read_bytes());body['submission']['job_id']='unrelated'
+        put(folder/'prepare-report.json',r.encoded(body))
+    with pytest.raises((r.RetryError,FileNotFoundError)):s.operation.previous_inputs(s.original)
+
+
+@pytest.mark.parametrize('fault',['model','dataset','ram','price','region','launch','worker_price','worker_path',
+                                 'worker_hash','same_image','same_source','source_mismatch'])
+def test_schema3_allows_software_provenance_only(third_retry,fault):
+    s=third_retry
+    config=json.loads(s.new['acceptance.json']);worker=json.loads(s.new['worker.json']);plan=json.loads(s.new['plan.json'])
+    if fault=='model':worker['model']['revision_sha']='1'*40
+    elif fault=='dataset':worker['datasets'][0]['sha256']='sha256:'+'1'*64
+    elif fault=='ram':
+        plan['cases'][0]['spec']['limits']['max_ram_bytes']=JobSpec.model_validate(plan['cases'][0]['spec']).limits.max_ram_bytes+1
+    elif fault=='price':config['expected_worker_price_usd_per_hour']=.79
+    elif fault=='region':config['deployment']['region']='EU-RO-1'
+    elif fault=='launch':config['deployment']['launch_config_hash']='sha256:'+'1'*64
+    elif fault=='worker_price':worker['live_price_usd_per_hour']=.79
+    elif fault=='worker_path':config['worker_config_path']='/etc/probe-calibration/worker.json'
+    elif fault=='same_image':worker['container_image_digest']=json.loads(s.old['worker.json'])['container_image_digest']
+    elif fault=='same_source':worker['code_git_commit']=json.loads(s.old['worker.json'])['code_git_commit']
+    elif fault=='source_mismatch':config['source_commit']='1'*40
+    s.new['plan.json']=r.encoded(plan);config['plan_sha256']='sha256:'+r.digest(s.new['plan.json'])
+    s.new['worker.json']=r.encoded(worker);config['worker_config_sha256']='sha256:'+r.digest(s.new['worker.json'])
+    if fault=='worker_hash':config['worker_config_sha256']='sha256:'+'1'*64
+    s.new['acceptance.json']=r.encoded(config)
+    with pytest.raises((r.RetryError,ValueError)):
+        r.validate_replacement(s.old,s.new,s.manifest['retry_id'],schema_version=3)
+
+
+def test_schema3_operator_stop_requires_exact_complete_result_and_real_closed_zero_attempt_case(real_failed):
+    f=real_failed
+    result=dict(f.result,reason='REQUEST_CHANGED',startup={'endpoint_attempts':187,'dispatch_cutoff':12345.0})
+    m={'schema_version':3,'failed':f.failed,'expected_failure_reason':'REQUEST_CHANGED',
+       'failed_result_canonical_sha256':r.digest(r.encoded(result))}
+    operation=r.Recovery(SimpleNamespace(Activation=lambda:None),None,m,{},'a'*64)
+    operation.old={'plan.json':r.encoded(f.plan)}
+    operation.result,operation.bound,operation.submitted=result,f.bound,f.submitted
+    operation.verify_failure(f.snapshot())
+    # Exact parsed result is pinned; formatting does not matter, observations do.
+    operation.result=json.loads(json.dumps(result,indent=4))
+    operation.verify_result_pin()
+    operation.result['startup']['endpoint_attempts']+=1
+    with pytest.raises(r.RetryError,match='FAILED_RESULT_PIN_CHANGED'):operation.verify_failure(f.snapshot())
+    operation.result=result
+    altered=f.snapshot();altered['attempts']=[{'attempt_id':'unexpected'}]
+    with pytest.raises(r.RetryError,match='FAILED_CASE_EXECUTED_OR_CHANGED'):operation.verify_failure(altered)
+    altered=f.snapshot();altered['provider_absent']=False
+    with pytest.raises(r.RetryError,match='PROVIDER_DELETION_UNCONFIRMED'):operation.verify_failure(altered)
+    f.s.rpc.call('cancel_job',{'job_id':f.failed['job_id']})
+    operation.verify_failure(f.snapshot(),cancelled=True)
+
+
+@pytest.mark.parametrize('fault',[None,'missing_worker','bad_worker_pin','missing_result_pin','old_reason'])
+def test_schema3_manifest_requires_seven_pins_and_exact_reason(tmp_path,monkeypatch,fault):
+    files={name:b'# pinned '+name.encode() for name in r.FILES|{'worker.json'}}
+    for name,raw in files.items():put(tmp_path/name,raw)
+    m=dict(schema_version=3,original_manifest_sha256='a'*64,
+           previous_upgrade={'wheel_sha256':'b'*64,'release_manifest_sha256':'c'*64},
+           target_upgrade={'wheel_sha256':'d'*64,'release_manifest_sha256':'e'*64},
+           previous_activation_manifest_sha256='f'*64,previous_retry_manifest_sha256='1'*64,
+           previous_retry_record_sha256='2'*64,expected_failure_reason='REQUEST_CHANGED',retry_id='3'*32,
+           failed_result_canonical_sha256='4'*64,
+           failed={'job_id':'job','request_id':'request','worker_id':'worker','provider_id':'pod'},
+           files={name:r.digest(raw) for name,raw in files.items()})
+    if fault=='missing_worker':del m['files']['worker.json']
+    elif fault=='bad_worker_pin':m['files']['worker.json']='0'*64
+    elif fault=='missing_result_pin':del m['failed_result_canonical_sha256']
+    elif fault=='old_reason':m['expected_failure_reason']='WORKER_STARTUP_DEADLINE'
+    path=tmp_path/'manifest.json';put(path,r.encoded(m))
+    monkeypatch.setattr(r,'read',lambda path,**_:Path(path).read_bytes())
+    if fault:
+        with pytest.raises(r.RetryError):r.inputs(path,r.digest(path.read_bytes()))
+    else:assert r.inputs(path,r.digest(path.read_bytes()))[2]==files
+
+
+def test_schema3_prepare_publishes_separate_public_worker_before_submission(prepare_case):
+    s=prepare_case
+    s.operation.m['schema_version']=3
+    expected=s.operation.files['worker.json']
+    original=s.operation.a.write_file
+    writes=[]
+    def write(path,raw,**kwargs):
+        writes.append((path,raw,kwargs));original(path,raw,**kwargs)
+    s.operation.a.write_file=write
+    original_ctl=s.operation.operation.ctl
+    def ctl(*args):
+        if args==('start',r.CALIBRATION[0]):assert (s.public/'worker.json').read_bytes()==expected
+        return original_ctl(*args)
+    s.operation.operation.ctl=ctl
+    s.operation.prepare()
+    assert (s.public/'worker.json',expected,{'uid':0,'gid':0,'mode':0o444}) in writes

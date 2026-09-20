@@ -257,14 +257,17 @@ def _snapshot(config_path, token_path, expected, config_sha256, policy):
     supervisor = inspector(int(pid_bytes))
     _worker_identity(supervisor, policy)
     interpreter = str(Path(policy.interpreter).resolve(strict=True))
+    worker_arguments = ["-m", "probe_core.worker", "--config", str(config_path),
+                        "--token-file", str(token_path), "--port", "8080"]
     _require(supervisor["executable"] == interpreter
-             and supervisor["args"] == [policy.interpreter, "-m", "probe_core.worker", "--config", str(config_path),
-                                        "--token-file", str(token_path), "--port", "8080"], "WRONG_SUPERVISOR_COMMAND")
+             and supervisor["args"] in ([policy.interpreter, *worker_arguments],
+                                          [policy.interpreter, "-I", *worker_arguments]), "WRONG_SUPERVISOR_COMMAND")
     bootstrap = inspector(supervisor["ppid"])
     _require(bootstrap is not None and bootstrap["uids"] == [policy.root_uid] * 4
              and bootstrap["executable"] == interpreter
              and bootstrap["args"] in (["python", "-m", "probe_core.gpu_launch"],
-                                         [policy.interpreter, "-m", "probe_core.gpu_launch"])
+                                         [policy.interpreter, "-m", "probe_core.gpu_launch"],
+                                         [policy.interpreter, "-I", "-m", "probe_core.gpu_launch"])
              and bootstrap["boot_id"] == supervisor["boot_id"] == child["boot_id"], "WRONG_BOOTSTRAP_IDENTITY")
     _require(child["pid"] not in {supervisor["pid"], bootstrap["pid"]}, "OVERLAPPING_PROCESS_IDENTITIES")
     _require(inspector(supervisor["pid"]) == supervisor

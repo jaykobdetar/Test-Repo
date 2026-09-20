@@ -29,6 +29,112 @@ CONFIG_ROOT = Path('/workspace/probe/config')
 BAKED_ROOT = Path('/opt/probe-assets')
 BAKED_MANIFEST = Path('/opt/probe-core/public-assets.json')
 PROVENANCE = Path('/opt/probe-core/build-provenance.json')
+SUPERVISOR_PID = Path('/run/probe-worker-supervisor.pid')
+TRUSTED_PYTHON = '/opt/probe-core/venv/bin/python'
+FIXED_PATH = '/opt/probe-core/venv/bin:/usr/local/nvidia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+GPU_LIBRARY_DIRECTORIES = ('/usr/local/nvidia/lib', '/usr/local/nvidia/lib64',
+                           '/usr/local/cuda/lib64', '/usr/local/cuda/compat',
+                           '/usr/lib/x86_64-linux-gnu')
+BOOTSTRAP_BINDINGS = ('PROBE_ABSOLUTE_DEADLINE', 'PROBE_WORKER_ID',
+                      'PROBE_REQUEST_ID', 'PROBE_CONFIGURATION_HASH', 'PUBLIC_KEY')
+
+
+def _mode(arguments):
+    if not arguments:
+        return 'bootstrap'
+    if len(arguments) == 2 and arguments[0] == '--configure':
+        return 'configure'
+    if len(arguments) == 3 and arguments[0] == '--check-paths':
+        return 'check-paths'
+    raise ValueError('unsupported bootstrap command')
+
+
+def _gpu_environment(source):
+    result = {}
+    visible = source.get('CUDA_VISIBLE_DEVICES')
+    if visible is not None:
+        if not re.fullmatch(r'(?:0|[1-9][0-9]{0,3}|GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})', visible):
+            raise ValueError('invalid single-GPU device selector')
+        result['CUDA_VISIBLE_DEVICES'] = visible
+    # NVIDIA's runtime has already mounted the devices and driver libraries.
+    # Preserve only standard root-controlled library locations, never an
+    # inherited preload/search path or pre-start NVIDIA runtime directives.
+    libraries = []
+    for value in GPU_LIBRARY_DIRECTORIES:
+        path = Path(value)
+        if not path.exists():
+            continue
+        resolved = path.resolve(strict=True)
+        for parent in (resolved, *resolved.parents):
+            info = parent.stat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != ROOT_UID or info.st_mode & 0o022:
+                raise ValueError('GPU library directory is not root controlled')
+        libraries.append(str(resolved))
+    if libraries:
+        result['LD_LIBRARY_PATH'] = ':'.join(dict.fromkeys(libraries))
+    return result
+
+
+def _environment(mode, source=None):
+    source = os.environ if source is None else source
+    worker = mode == 'check-paths' or mode == 'worker'
+    result = {'PATH': FIXED_PATH, 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8',
+              'HOME': '/home/probe-worker' if worker else '/root',
+              'USER': 'probe-worker' if worker else 'root',
+              'LOGNAME': 'probe-worker' if worker else 'root'}
+    if mode != 'ssh':
+        result.update(_gpu_environment(source))
+    if mode == 'bootstrap':
+        result.update({key: source[key] for key in BOOTSTRAP_BINDINGS if key in source})
+    if worker:
+        result.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1',
+                      TOKENIZERS_PARALLELISM='false', WANDB_MODE='disabled', CUBLAS_WORKSPACE_CONFIG=':4096:8')
+    return result
+
+
+def _initial_environment():
+    with open('/proc/self/environ', 'rb') as stream:
+        raw = stream.read(262145)
+    if len(raw) > 262144:
+        raise ValueError('initial process environment exceeds bound')
+    fields = [entry.split(b'=', 1) for entry in raw.split(b'\0') if entry]
+    if any(len(entry) != 2 for entry in fields):
+        raise ValueError('invalid initial process environment')
+    result = {os.fsdecode(key): os.fsdecode(value) for key, value in fields}
+    if len(result) != len(fields):
+        raise ValueError('duplicate initial process environment key')
+    return result
+
+
+def _fresh_environment(mode, arguments):
+    clean = _environment(mode)
+    # unsetenv alone leaves the original bytes readable through /proc. A fresh
+    # exec also removes them from the root bootstrap's inherited memory. There
+    # is no environment marker that can bypass this equality check.
+    if (dict(os.environ) != clean or _initial_environment() != clean or
+            sys.executable != TRUSTED_PYTHON or not sys.flags.isolated):
+        os.execve(TRUSTED_PYTHON, [TRUSTED_PYTHON, '-I', '-m', 'probe_core.gpu_launch', *arguments], clean)
+        raise RuntimeError('clean bootstrap exec unexpectedly returned')
+    _credential_guard(os.environ)
+
+
+def _credential_guard(environment):
+    if any(key.startswith(('RUNPOD_', 'AWS_')) or key in {'HF_TOKEN', 'HUGGING_FACE_HUB_TOKEN'}
+           for key in environment):
+        raise ValueError('unexpected provider or download credential residue')
+
+
+def _root_parent_environment_private():
+    parent = Path('/proc') / str(os.getppid())
+    if parent.stat().st_uid != ROOT_UID:
+        raise ValueError('path preflight requires its root bootstrap parent')
+    try:
+        descriptor = os.open(parent / 'environ', os.O_RDONLY | os.O_NOFOLLOW)
+    except PermissionError:
+        return
+    else:
+        os.close(descriptor)
+        raise ValueError('worker can read root bootstrap environment')
 
 
 def _root_file(path, *, maximum=1024*1024):
@@ -236,11 +342,12 @@ def _run_numerical_worker(scope, deadline, ssh, stopped):
             or marker['bundle_sha256'] != _configuration_digest({'schema_version': 1, 'worker_config': body, 'bearer_token': token})
             or marker['bootstrap'] != json.loads(_root_file(BOOTSTRAP_STATE))):
         raise ValueError('staged configuration changed before worker startup')
-    worker_environment = dict(os.environ, HOME='/home/probe-worker', USER='probe-worker', LOGNAME='probe-worker')
+    worker_environment = _environment('worker')
+    _credential_guard(worker_environment)
     gates = [
-        ([sys.executable, '-m', 'probe_core.gpu_launch', '--check-paths', str(config_path), str(token_path)], 30),
-        ([sys.executable, '/opt/probe/diagnose.py', '--cgroup-root', config.cgroup_directory], 45),
-        ([sys.executable, '/opt/probe/accept-resources.py', '--cgroup-root', config.cgroup_directory], 40),
+        ([TRUSTED_PYTHON, '-I', '-m', 'probe_core.gpu_launch', '--check-paths', str(config_path), str(token_path)], 30),
+        ([TRUSTED_PYTHON, '-I', '/opt/probe/diagnose.py', '--cgroup-root', config.cgroup_directory], 45),
+        ([TRUSTED_PYTHON, '-I', '/opt/probe/accept-resources.py', '--cgroup-root', config.cgroup_directory], 40),
     ]
     for command, maximum in gates:
         remaining = deadline - time.time() - 15
@@ -252,10 +359,10 @@ def _run_numerical_worker(scope, deadline, ssh, stopped):
             raise ValueError('worker permissions or real resource acceptance failed before inference')
 
     def start_worker():
-        process = subprocess.Popen([sys.executable, '-m', 'probe_core.worker', '--config', str(config_path),
+        process = subprocess.Popen([TRUSTED_PYTHON, '-I', '-m', 'probe_core.worker', '--config', str(config_path),
                                     '--token-file', str(token_path), '--port', '8080'],
                                    preexec_fn=worker_identity, env=worker_environment, start_new_session=True)
-        Path('/run/probe-worker-supervisor.pid').write_text(str(process.pid)+'\n')
+        SUPERVISOR_PID.write_text(str(process.pid)+'\n')
         print(json.dumps({'worker_supervisor_pid': process.pid, 'execution_authority_renewed': False}), flush=True)
         return process
 
@@ -280,12 +387,15 @@ def _run_numerical_worker(scope, deadline, ssh, stopped):
 
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] == '--configure':
+    mode = _mode(sys.argv[1:])
+    _fresh_environment(mode, sys.argv[1:])
+    if mode == 'configure':
         print(canonical_json(configure(Path(sys.argv[2]))), flush=True)
         return
-    if len(sys.argv) == 4 and sys.argv[1] == '--check-paths':
+    if mode == 'check-paths':
         if os.geteuid() != WORKER_UID:
             raise SystemExit('path preflight must actually run as UID10001')
+        _root_parent_environment_private()
         config_path, token_path = Path(sys.argv[2]), Path(sys.argv[3])
         _private_worker_file(config_path)
         _private_worker_file(token_path)
@@ -294,8 +404,7 @@ def main():
         return
     if os.geteuid() != ROOT_UID:
         raise SystemExit('the image bootstrap needs container root to separate SSH and worker identities')
-    if any(os.environ.get(key) for key in ('RUNPOD_API_KEY', 'HF_TOKEN', 'AWS_SECRET_ACCESS_KEY')):
-        raise SystemExit('management or download credentials do not belong on the execution image')
+    _credential_guard(os.environ)
     deadline = _bootstrap_deadline()
     from types import SimpleNamespace
     scope = _prepare_worker_cgroups(SimpleNamespace(cgroup_directory='/sys/fs/cgroup/probe-jobs'))
@@ -308,9 +417,10 @@ def main():
     authorized = directory / 'authorized_keys'
     authorized.write_text(public_key+'\n')
     authorized.chmod(0o600)
-    subprocess.run(['ssh-keygen', '-l', '-f', str(authorized)], check=True)
-    subprocess.run(['ssh-keygen', '-A'], check=True)
-    subprocess.run(['ssh-keygen', '-l', '-f', '/etc/ssh/ssh_host_ed25519_key.pub'], check=True)
+    ssh_environment = _environment('ssh')
+    subprocess.run(['/usr/bin/ssh-keygen', '-l', '-f', str(authorized)], check=True, env=ssh_environment)
+    subprocess.run(['/usr/bin/ssh-keygen', '-A'], check=True, env=ssh_environment)
+    subprocess.run(['/usr/bin/ssh-keygen', '-l', '-f', '/etc/ssh/ssh_host_ed25519_key.pub'], check=True, env=ssh_environment)
     ssh_config = Path('/etc/ssh/sshd_config.probe-worker')
     ssh_config.write_text('Port 22\nHostKey /etc/ssh/ssh_host_ed25519_key\nPermitRootLogin prohibit-password\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nUsePAM yes\nAllowTcpForwarding local\nPermitOpen 127.0.0.1:8080\nAllowAgentForwarding no\nX11Forwarding no\nSubsystem sftp internal-sftp\n')
     stopped = False
@@ -319,7 +429,7 @@ def main():
         stopped = True
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
-    ssh = subprocess.Popen(['/usr/sbin/sshd', '-D', '-e', '-f', str(ssh_config)], start_new_session=True)
+    ssh = subprocess.Popen(['/usr/sbin/sshd', '-D', '-e', '-f', str(ssh_config)], start_new_session=True, env=ssh_environment)
     try:
         _run_numerical_worker(scope, deadline, ssh, lambda: stopped)
     finally:
@@ -332,9 +442,20 @@ def main():
             ssh.wait(timeout=5)
 
 
+def _failure_receipt(error):
+    line = None
+    trace = error.__traceback__
+    while trace is not None:
+        if trace.tb_frame.f_code.co_filename == __file__:
+            line = trace.tb_lineno
+        trace = trace.tb_next
+    return {'status': 'failed', 'code': 'WORKER_BOOTSTRAP_FAILED',
+            'error_type': type(error).__name__, 'bootstrap_line': line}
+
+
 if __name__ == '__main__':
     try:
         main()
     except Exception as error:
-        print(canonical_json({'status': 'failed', 'error_type': type(error).__name__}), flush=True)
+        print(canonical_json(_failure_receipt(error)), flush=True)
         raise SystemExit(1) from None

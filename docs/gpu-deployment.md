@@ -169,19 +169,36 @@ for result collection and deletion. For the current 900-second approval and
 240-second job, this gives up to 540 seconds from approval consumption to worker
 readiness and dispatch. It does not extend the paid allowance. Connection,
 configuration and readiness must all finish before that cutoff; a late worker
-cannot start a job. This change still needs live GPU validation.
+cannot start a job. A subsequent live attempt loaded the image after about three
+and a half minutes, then failed before SSH or inference at the credential guard.
+
+[RunPod automatically supplies a Pod-scoped API key](https://docs.runpod.io/pods/templates/environment-variables),
+even though the controller does not send its management credential in the launch
+environment. The observed credential-guard failure is consistent with this
+injection; the guard did not log the triggering key or value.
+The corrected launcher re-executes its fixed interpreter in isolated mode with
+an allowlisted environment before any cgroup, SSH or model work. SSH and every
+worker process also receive explicitly constructed environments. This removes
+inherited credentials from their exec-time environment, including the bytes
+exposed through [Linux process environment files](https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html).
+The next immutable image still needs live acceptance; the failed Pod was deleted
+and produced no numerical evidence.
 
 The incident-specific `deploy/retry-gpu-calibration.py` helper has two phases
 around the normal wheel upgrade. It first verifies the stopped request, closed
 allowance, provider absence and zero execution attempts, then cancels only that
 pending job through the research service. After a verified upgrade, it preserves
 the original state directories and prepares a new calibration in separate
-subdirectories. Its pinned inputs allow only a new plan label, idempotency key
-and state/configuration paths; the model, worker image, limits and service
-permissions remain fixed. Neither phase issues a compute approval.
+subdirectories. The first two recovery schemas allow only a new plan label,
+idempotency key and state/configuration paths; the model, worker image, limits
+and service permissions remain fixed. Neither phase issues a compute approval.
 The second recovery also pins the completed first recovery's manifest, receipts
 and nested configuration paths, and verifies the exact startup-timeout result.
 Each failed job and consumed approval remains in the ledger; none is replayed.
+The third recovery additionally pins the complete canonical failed result and
+the previous two completed recoveries. It may replace only the worker image and
+software provenance, with the same model, data, operations, limits and deployment
+scope. Its fresh public worker configuration contains no bearer token or key.
 
 ## Local verification
 

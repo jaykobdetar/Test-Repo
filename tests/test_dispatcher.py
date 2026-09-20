@@ -283,7 +283,11 @@ def test_daemon_runs_controller_approved_job_with_independent_watchdog(service,m
             assert health.exists()
             daemon=subprocess.Popen([sys.executable,"-m","probe_core.dispatcher","--config",str(config)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             controller.approve_and_start(request["request_id"])
-            deadline=time.monotonic()+45
+            # Completion may use the whole approved job budget. Allow bounded
+            # receipt/reconciliation time without shortening that contract in
+            # the test observer; the worker's enforced limit stays unchanged.
+            observation_seconds = 45 if stop_while_running else job.spec.limits.max_runtime_seconds + 10
+            deadline=time.monotonic()+observation_seconds
             while time.monotonic()<deadline:
                 record=ledger.get_job(job.job_id)
                 if record.state.value in ({"RUNNING", "COMPLETED", "FAILED"} if stop_while_running else {"COMPLETED","FAILED"}):break
