@@ -25,6 +25,10 @@ STATE = Path('/var/lib/probe-core/gpu-acceptance')
 UNITS = Path('/etc/systemd/system')
 CALIBRATION = ('probe-calibration-submit.service', 'probe-calibration-run.service')
 FILES = {'activate-gpu-calibration.py', 'upgrade-controller.py', 'plan.json', 'acceptance.json', *CALIBRATION}
+RETARGET_INPUTS = {'plan.json', 'acceptance.json', 'worker.json', *CALIBRATION}
+RETARGET_FILES = {'activate-gpu-calibration.py', 'upgrade-controller.py', 'retarget-gpu-calibration.py'} | {
+    prefix + name for prefix in ('old/', 'new/') for name in RETARGET_INPUTS}
+RETARGET_GUARD = '50-probe-calibration-retarget.conf'
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 IDENT = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z')
 FAILURES = {'ACCEPTANCE_RUNTIME_UNAVAILABLE', 'WORKER_STARTUP_DEADLINE', 'REQUEST_CHANGED'}
@@ -100,6 +104,10 @@ def inputs(path, pin, *, owner=0):
         fields.add('expected_failure_stage')
         require(type(body.get('expected_failure_stage')) is str
                 and body['expected_failure_stage'] in STARTUP_STAGES, 'FAILED_STAGE_INVALID')
+        if 'previous_retarget_manifest_sha256' in body:
+            fields.add('previous_retarget_manifest_sha256')
+            require(type(body['previous_retarget_manifest_sha256']) is str
+                    and HEX.fullmatch(body['previous_retarget_manifest_sha256']), 'PREVIOUS_RETARGET_PIN_INVALID')
     require(set(body) == fields, 'MANIFEST_SCHEMA')
     require(HEX.fullmatch(body['original_manifest_sha256']) and HEX.fullmatch(body['previous_activation_manifest_sha256'])
             and re.fullmatch(r'[0-9a-f]{32}', body['retry_id']), 'MANIFEST_IDENTITY')
@@ -271,6 +279,7 @@ class Recovery:
         self.operation = activation.Activation()
         self.work = ROOT/'calibration-retries'/pin
         self.stage = 'validation'
+        self.retarget_guard = None
 
     def record(self, name, value):
         raw = value if isinstance(value, bytes) else encoded(value)
@@ -310,10 +319,7 @@ class Recovery:
             require(read(path) == self.old[name], 'PREVIOUS_PUBLIC_CONFIGURATION_CHANGED')
         for name in CALIBRATION:
             require(read(UNITS/name) == self.old[name], 'INSTALLED_UNIT_CHANGED')
-            values = self.unit_state(name)
-            require(values.get('ActiveState') in {'inactive', 'failed'} and values.get('MainPID') == '0'
-                    and values.get('ControlPID') == '0' and values.get('DropInPaths') == '',
-                    'CALIBRATION_PROCESS_OR_OVERRIDE_PRESENT')
+            self.verify_inactive_unit(name)
         self.public, self.config = validate_replacement(self.old, self.files, self.m['retry_id'], schema_version=self.m['schema_version'])
         require((self.config['service_uid'], self.config['research_uid'], self.config['admin_uid']) == self.operation.users,
                 'RUNNER_IDENTITIES_CHANGED')
@@ -336,6 +342,8 @@ class Recovery:
             return original
         previous_pin = current['previous_retry_manifest_sha256']
         require(previous_pin not in _seen and len(_seen) < 32, 'PREVIOUS_RETRY_CHAIN_LIMIT')
+        retarget = self.retarget_inputs(current) if 'previous_retarget_manifest_sha256' in current else None
+        submitted_identity = retarget[0]['pending'] if retarget else current['failed']
         capsule = ROOT/'calibration-retries'/previous_pin
         self.a.trusted(capsule)
         raw = read(capsule/'manifest.json')
@@ -360,7 +368,7 @@ class Recovery:
                 and report.get('target_wheel_sha256') == current['previous_upgrade']['wheel_sha256']
                 and report.get('old_history_preserved') is True and report.get('approval_issued') is False
                 and report.get('cloud_mutations_performed') is False
-                and all(report.get('submission', {}).get(key) == current['failed'][key]
+                and all(report.get('submission', {}).get(key) == submitted_identity[key]
                         for key in ('job_id', 'request_id', 'worker_id'))
                 and report.get('submission', {}).get('approval_consumed_by_runner') is False,
                 'PREVIOUS_RETRY_NOT_COMPLETED')
@@ -377,7 +385,90 @@ class Recovery:
         validate_replacement(earlier, old, previous['retry_id'], schema_version=previous['schema_version'])
         if previous['schema_version'] != 3:
             old['worker.json'] = earlier['worker.json']
+        if retarget:
+            old = self.apply_retarget(current, retarget, old, report['submission'])
+            if manifest is None:
+                marker = Path(decoded(old['acceptance.json'])['plan_path']).parent/'prepared'
+                require(read(marker) == b'Pinned region retarget prepared; compute requires human approval.\n',
+                        'PREVIOUS_RETARGET_MARKER_CHANGED')
+                self.retarget_guard = ('[Unit]\nConditionPathExists='+str(marker)+'\n').encode()
         return old
+
+    def retarget_inputs(self, current):
+        """Read one pinned region-only overlay on the completed retry chain."""
+        pin = current['previous_retarget_manifest_sha256']
+        require(current['schema_version'] == 5 and type(pin) is str and HEX.fullmatch(pin),
+                'PREVIOUS_RETARGET_PIN_INVALID')
+        capsule = ROOT/'calibration-retargets'/pin
+        self.a.trusted(capsule)
+        raw = read(capsule/'manifest.json')
+        require(digest(raw) == pin, 'PREVIOUS_RETARGET_MANIFEST_CHANGED')
+        body = decoded(raw)
+        require(set(body) == {'schema_version', 'original_manifest_sha256', 'installed_upgrade', 'retarget_id',
+                             'from_region', 'to_region', 'pending', 'files'}
+                and type(body['schema_version']) is int and body['schema_version'] == 1
+                and body['original_manifest_sha256'] == current['original_manifest_sha256']
+                and body['installed_upgrade'] == current['previous_upgrade']
+                and type(body['retarget_id']) is str and re.fullmatch(r'[0-9a-f]{32}', body['retarget_id'])
+                and body['from_region'] == 'EU-CZ-1' and body['to_region'] == 'EU-RO-1',
+                'PREVIOUS_RETARGET_SCOPE_CHANGED')
+        require(type(body['pending']) is dict and set(body['pending']) == {'job_id', 'request_id', 'worker_id'}
+                and all(type(value) is str and IDENT.fullmatch(value) for value in body['pending'].values()),
+                'PREVIOUS_RETARGET_IDENTITY_INVALID')
+        require(type(body['files']) is dict and set(body['files']) == RETARGET_FILES
+                and all(type(value) is str and HEX.fullmatch(value) for value in body['files'].values()),
+                'PREVIOUS_RETARGET_FILE_PINS_INVALID')
+        files = {name: read(capsule/name) for name in sorted(RETARGET_FILES)}
+        require(all(digest(value) == body['files'][name] for name, value in files.items()),
+                'PREVIOUS_RETARGET_INPUT_CHANGED')
+        return body, files, capsule
+
+    def apply_retarget(self, current, retarget, old, submitted):
+        body, files, capsule = retarget
+        pin = current['previous_retarget_manifest_sha256']
+        require(all(files['old/'+name] == old[name] for name in RETARGET_INPUTS),
+                'PREVIOUS_RETARGET_HISTORY_CHANGED')
+        new = {name: files['new/'+name] for name in RETARGET_INPUTS}
+        # This exact helper was included in the pinned, root-owned retarget
+        # capsule. Reuse its strict transformation and never-approved gates;
+        # no executable path, command or provider operation is invoked here.
+        validator = helper(files['retarget-gpu-calibration.py'], 'pinned_previous_retarget')
+        validator.validate_retarget(old, new, body['retarget_id'], body['from_region'], body['to_region'])
+        require(decoded(read(capsule/'cancel-intent.json')) == {'manifest_sha256': pin, **body['pending']},
+                'PREVIOUS_RETARGET_CANCEL_INTENT_CHANGED')
+        validator.validate_pending(decoded(read(capsule/'cancelled.json')), body['pending'],
+                                   decoded(old['plan.json']), decoded(old['acceptance.json']), submitted, cancelled=True)
+        report = decoded(read(capsule/'prepare-report.json'))
+        require(type(report.get('schema_version')) is int and report['schema_version'] == 1
+                and report.get('status') == 'prepared' and report.get('manifest_sha256') == pin
+                and report.get('installed_wheel_sha256') == current['previous_upgrade']['wheel_sha256']
+                and report.get('original_job_cancelled') is True and report.get('old_history_preserved') is True
+                and report.get('application_reinstalled') is False and report.get('approval_issued') is False
+                and report.get('cloud_mutations_performed') is False
+                and all(report.get('submission', {}).get(key) == current['failed'][key]
+                        and current['failed'][key] != body['pending'][key] for key in body['pending'])
+                and report.get('submission', {}).get('approval_consumed_by_runner') is False,
+                'PREVIOUS_RETARGET_NOT_COMPLETED')
+        return new
+
+    def verify_inactive_unit(self, name, *, retry_guard=None):
+        directory = UNITS/(name+'.d')
+        expected = {}
+        if self.retarget_guard is not None:
+            expected[directory/RETARGET_GUARD] = self.retarget_guard
+        if retry_guard is not None:
+            expected[directory/'50-probe-calibration-retry.conf'] = retry_guard
+        if directory.exists():
+            self.a.trusted(directory)
+            require(set(directory.iterdir()) == set(expected), 'CALIBRATION_OVERRIDE_PRESENT')
+        else:
+            require(not expected, 'CALIBRATION_OVERRIDE_PRESENT')
+        require(all(read(path) == raw for path, raw in expected.items()), 'CALIBRATION_GUARD_CHANGED')
+        values = self.unit_state(name)
+        require(values.get('ActiveState') in {'inactive', 'failed'} and values.get('MainPID') == '0'
+                and values.get('ControlPID') == '0'
+                and values.get('DropInPaths', '').split() == sorted(map(str, expected)),
+                'CALIBRATION_PROCESS_OR_OVERRIDE_PRESENT')
 
     def unit_state(self, name):
         raw = self.operation.command(['/usr/bin/systemctl', 'show', name,
@@ -450,16 +541,33 @@ class Recovery:
                 directory = UNITS/(name+'.d')
                 directory.mkdir(mode=0o755, exist_ok=True)
                 self.a.trusted(directory)
-                require(set(directory.iterdir()) <= {directory/guard_name}, 'CALIBRATION_OVERRIDE_PRESENT')
+                allowed = {directory/guard_name}
+                if self.retarget_guard is not None:
+                    allowed.add(directory/RETARGET_GUARD)
+                    if (directory/RETARGET_GUARD).exists():
+                        require(read(directory/RETARGET_GUARD) == self.retarget_guard, 'CALIBRATION_GUARD_CHANGED')
+                require(set(directory.iterdir()) <= allowed, 'CALIBRATION_OVERRIDE_PRESENT')
                 self.a.write_file(directory/guard_name, guard, uid=0, gid=0, mode=0o644)
             self.operation.ctl('daemon-reload')
         try:
             for name in CALIBRATION:
                 directory = UNITS/(name+'.d')
-                require(not directory.exists(), 'CALIBRATION_OVERRIDE_PRESENT')
-                directory.mkdir(mode=0o755)
+                if self.retarget_guard is not None:
+                    self.verify_inactive_unit(name)
+                else:
+                    require(not directory.exists(), 'CALIBRATION_OVERRIDE_PRESENT')
+                    directory.mkdir(mode=0o755)
                 self.a.write_file(directory/guard_name, guard, uid=0, gid=0, mode=0o644)
             self.operation.ctl('daemon-reload')
+            if self.retarget_guard is not None:
+                # Both units are inactive and both new blocking guards are
+                # installed before either prior guard can be removed.
+                for name in CALIBRATION:
+                    self.verify_inactive_unit(name, retry_guard=guard)
+                for name in CALIBRATION:
+                    (UNITS/(name+'.d')/RETARGET_GUARD).unlink()
+                self.retarget_guard = None
+                self.operation.ctl('daemon-reload')
             for path, uid, gid in ((paths[0], 0, 0), (paths[1], self.operation.users[1], grp.getgrnam('probe-research').gr_gid),
                                    (paths[2], self.operation.users[0], grp.getgrnam('probe-trusted').gr_gid)):
                 path.mkdir(mode=0o755 if uid == 0 else 0o700)

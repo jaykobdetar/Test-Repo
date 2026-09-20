@@ -877,3 +877,212 @@ def test_schema5_manifest_requires_six_files_exact_stage_reason_and_result_pin(t
     if fault:
         with pytest.raises(r.RetryError):r.inputs(path,r.digest(path.read_bytes()))
     else:assert r.inputs(path,r.digest(path.read_bytes()))[2]==files
+
+
+@pytest.fixture
+def retarget_retry(fifth_retry, monkeypatch):
+    from test_gpu_calibration_retarget import changed
+    s = completed_retry_then_next(fifth_retry, 'f'*32)
+    old = s.operation.previous_inputs(s.original)
+    new = changed(old, '1'*32)
+    pending = {name:s.manifest['failed'][name] for name in ('job_id','request_id','worker_id')}
+    config = runner.RunnerConfig.model_validate_json(old['acceptance.json'])
+    submitted = dict(pending,approval_id='unused-approval',batch_hash='sha256:'+'b'*64,
+        configuration_hash=config.deployment.digest,approval_consumed_by_runner=False)
+    report = json.loads((s.capsule/'prepare-report.json').read_bytes())
+    report['submission'] = submitted
+    put(s.capsule/'prepare-report.json',r.encoded(report))
+    cancelled = dict(other_unfinished_jobs=0,unconfirmed_attempts=0,open_approvals=0,unresolved_requests=0,pods=0,
+        attempts=[],approvals=[],approval_jobs=[],intents=[],
+        jobs=[dict(job_id=pending['job_id'],spec_json=JobSpec.model_validate(json.loads(old['plan.json'])['cases'][0]['spec']).model_dump_json(),
+            attempt_id=None,worker_id=None,approval_id=None,lease_expires_at=None,attempt_count=0,retry_count=0,
+            state='FAILED',failure_kind='cancelled',failure_reason='research client cancellation')],
+        requests=[dict(request_id=pending['request_id'],worker_id=pending['worker_id'],state='PENDING',action='CREATE',
+            job_ids=json.dumps([pending['job_id']]),infrastructure=None,replaces_worker_id=None,deadline=None,
+            observed_provider_id=None,last_error_code=None,configuration=config.deployment.model_dump_json(),
+            configuration_hash=config.deployment.digest,max_runtime_seconds=config.max_runtime_seconds,
+            approval_id=submitted['approval_id'],batch_hash=submitted['batch_hash'])])
+    files = {name:(PROJECT/'deploy'/name).read_bytes() for name in
+             ('activate-gpu-calibration.py','upgrade-controller.py','retarget-gpu-calibration.py')}
+    files.update({'old/'+name:raw for name,raw in old.items()})
+    files.update({'new/'+name:raw for name,raw in new.items()})
+    manifest = dict(schema_version=1,original_manifest_sha256=s.manifest['original_manifest_sha256'],
+        installed_upgrade=s.manifest['previous_upgrade'],retarget_id='1'*32,from_region='EU-CZ-1',to_region='EU-RO-1',
+        pending=pending,files={name:r.digest(raw) for name,raw in files.items()})
+    pin = r.digest(r.encoded(manifest))
+    capsule = r.ROOT/'calibration-retargets'/pin
+    put(capsule/'manifest.json',r.encoded(manifest))
+    for name,raw in files.items():put(capsule/name,raw)
+    failed = {name:'retarget-'+name for name in ('job_id','request_id','worker_id','provider_id')}
+    prepared = dict(schema_version=1,status='prepared',manifest_sha256=pin,
+        installed_wheel_sha256=s.manifest['previous_upgrade']['wheel_sha256'],
+        original_job_cancelled=True,old_history_preserved=True,application_reinstalled=False,
+        approval_issued=False,cloud_mutations_performed=False,submission={**failed,'approval_consumed_by_runner':False})
+    put(capsule/'prepare-report.json',r.encoded(prepared))
+    put(capsule/'cancel-intent.json',r.encoded({'manifest_sha256':pin,**pending}))
+    put(capsule/'cancelled.json',r.encoded(cancelled))
+    s.manifest.update(previous_retarget_manifest_sha256=pin,failed=failed,expected_failure_reason='REQUEST_CHANGED')
+    s.new = next_inputs(new,s.manifest['retry_id'])
+    s.manifest['files'] = {name:r.digest(s.new[name]) for name in r.FILES if name in s.new}
+    s.operation.files = s.new
+    marker = Path(json.loads(new['acceptance.json'])['plan_path']).parent/'prepared'
+    marker_raw = b'Pinned region retarget prepared; compute requires human approval.\n'
+    monkeypatch.setattr(r,'read',lambda path,**_:marker_raw if Path(path)==marker else Path(path).read_bytes())
+    return SimpleNamespace(**vars(s),retarget_old=old,retarget_new=new,retarget_manifest=manifest,
+                           retarget_capsule=capsule,retarget_report=prepared,retarget_cancelled=cancelled,
+                           marker=marker,marker_raw=marker_raw)
+
+
+def test_schema5_reuses_completed_retry_then_pinned_region_retarget_without_replaying_history(retarget_retry):
+    s = retarget_retry
+    folders = (*s.prior_capsules,s.retarget_capsule)
+    before = {str(p):p.read_bytes() for folder in folders for p in folder.rglob('*') if p.is_file()}
+    old = s.operation.previous_inputs(s.original)
+    assert old == s.retarget_new
+    _, config = r.validate_replacement(old,s.new,s.manifest['retry_id'],schema_version=5)
+    before_config = json.loads(old['acceptance.json'])
+    assert config['deployment'] == before_config['deployment']
+    assert config['deployment']['region'] == 'EU-RO-1'
+    for key in ('source_commit','worker_config_path','worker_config_sha256','max_runtime_seconds','expected_worker_price_usd_per_hour'):
+        assert config[key] == before_config[key]
+    assert s.operation.retarget_guard == ('[Unit]\nConditionPathExists='+str(s.marker)+'\n').encode()
+    assert before == {str(p):p.read_bytes() for folder in folders for p in folder.rglob('*') if p.is_file()}
+
+
+@pytest.mark.parametrize('fault',['manifest','file','helper','receipt_missing','receipt_status','receipt_wheel',
+    'receipt_identity','receipt_approval','receipt_history','cancel_intent','cancelled_authority','prior_submission','marker'])
+def test_retarget_predecessor_refuses_changed_pins_receipts_or_prior_authority(retarget_retry,monkeypatch,fault):
+    s = retarget_retry
+    if fault=='manifest':put(s.retarget_capsule/'manifest.json',b'{}\n')
+    elif fault=='file':put(s.retarget_capsule/'new/plan.json',b'{}\n')
+    elif fault=='helper':put(s.retarget_capsule/'retarget-gpu-calibration.py',b'raise AssertionError("must not execute")')
+    elif fault=='receipt_missing':(s.retarget_capsule/'prepare-report.json').unlink()
+    elif fault.startswith('receipt_'):
+        report=deepcopy(s.retarget_report)
+        if fault=='receipt_status':report['status']='failed'
+        elif fault=='receipt_wheel':report['installed_wheel_sha256']='0'*64
+        elif fault=='receipt_identity':report['submission']['job_id']='unrelated'
+        elif fault=='receipt_approval':report['approval_issued']=True
+        else:report['old_history_preserved']=False
+        put(s.retarget_capsule/'prepare-report.json',r.encoded(report))
+    elif fault=='cancel_intent':put(s.retarget_capsule/'cancel-intent.json',b'{}\n')
+    elif fault=='cancelled_authority':
+        snapshot=deepcopy(s.retarget_cancelled);snapshot['approvals']=[{'approval_id':'unexpected'}]
+        put(s.retarget_capsule/'cancelled.json',r.encoded(snapshot))
+    elif fault=='prior_submission':
+        report=json.loads((s.capsule/'prepare-report.json').read_bytes());report['submission']['job_id']='unrelated'
+        put(s.capsule/'prepare-report.json',r.encoded(report))
+    else:monkeypatch.setattr(r,'read',lambda path,**_:b'changed' if Path(path)==s.marker else Path(path).read_bytes())
+    with pytest.raises((ValueError,FileNotFoundError)):s.operation.previous_inputs(s.original)
+
+
+@pytest.mark.parametrize('fault',['old_history','model','region','deadline','image'])
+def test_even_repinned_retarget_cannot_change_scientific_scope_or_previous_retry_history(retarget_retry,fault):
+    s=retarget_retry
+    name='old/plan.json' if fault=='old_history' else 'new/worker.json' if fault in {'model','region'} else 'new/acceptance.json'
+    body=json.loads((s.retarget_capsule/name).read_bytes())
+    if fault=='old_history':body['label']='different old history'
+    elif fault=='model':body['model']['revision_sha']='0'*40
+    elif fault=='region':body['region']='another-region'
+    elif fault=='deadline':body['max_runtime_seconds']-=1
+    else:body['deployment']['image_digest']='sha256:'+'0'*64
+    raw=r.encoded(body);put(s.retarget_capsule/name,raw)
+    manifest=deepcopy(s.retarget_manifest);manifest['files'][name]=r.digest(raw)
+    raw=r.encoded(manifest);new_pin=r.digest(raw)
+    new_capsule=s.retarget_capsule.with_name(new_pin)
+    s.retarget_capsule.rename(new_capsule);put(new_capsule/'manifest.json',raw)
+    s.manifest['previous_retarget_manifest_sha256']=new_pin
+    with pytest.raises(ValueError):s.operation.previous_inputs(s.original)
+
+
+def test_next_ordinary_schema5_retry_can_revalidate_historical_retarget(retarget_retry):
+    s=completed_retry_then_next(retarget_retry,'2'*32)
+    del s.manifest['previous_retarget_manifest_sha256']
+    old=s.operation.previous_inputs(s.original)
+    assert old['worker.json']==retarget_retry.retarget_new['worker.json']
+    assert s.operation.retarget_guard is None
+    r.validate_replacement(old,s.new,s.manifest['retry_id'],schema_version=5)
+
+
+@pytest.mark.parametrize('pin',[None,'not-a-pin',True,'1'*63,'1'*64])
+def test_optional_retarget_pin_is_strict_and_keeps_six_existing_inputs(tmp_path,monkeypatch,pin):
+    files={name:b'# pinned '+name.encode() for name in r.FILES}
+    for name,raw in files.items():put(tmp_path/name,raw)
+    manifest=dict(schema_version=5,original_manifest_sha256='a'*64,
+        previous_upgrade={'wheel_sha256':'b'*64,'release_manifest_sha256':'c'*64},
+        target_upgrade={'wheel_sha256':'d'*64,'release_manifest_sha256':'e'*64},
+        previous_activation_manifest_sha256='f'*64,previous_retry_manifest_sha256='1'*64,
+        previous_retry_record_sha256='2'*64,expected_failure_reason='REQUEST_CHANGED',
+        expected_failure_stage='verified_worker_startup',failed_result_canonical_sha256='3'*64,retry_id='4'*32,
+        failed={'job_id':'job','request_id':'request','worker_id':'worker','provider_id':'pod'},
+        files={name:r.digest(raw) for name,raw in files.items()},previous_retarget_manifest_sha256=pin)
+    path=tmp_path/'manifest.json';put(path,r.encoded(manifest))
+    monkeypatch.setattr(r,'read',lambda path,**_:Path(path).read_bytes())
+    if pin=='1'*64:assert r.inputs(path,r.digest(path.read_bytes()))[2]==files
+    else:
+        with pytest.raises(r.RetryError,match='PREVIOUS_RETARGET_PIN_INVALID'):r.inputs(path,r.digest(path.read_bytes()))
+
+
+@pytest.fixture
+def guarded_retarget_prepare(prepare_case):
+    s=prepare_case
+    old_guard=b'[Unit]\nConditionPathExists=/etc/probe-calibration/retarget-111/prepared\n'
+    s.operation.retarget_guard=old_guard
+    for name in r.CALIBRATION:put(s.units/(name+'.d')/r.RETARGET_GUARD,old_guard)
+    prior_ctl=s.operation.operation.ctl
+    started=set()
+    def ctl(*args):
+        if args[0]=='start':started.add(args[1])
+        if args==('daemon-reload',):
+            s.events.append(('guard-files',tuple(tuple(sorted(p.name for p in (s.units/(n+'.d')).iterdir()))
+                                                if (s.units/(n+'.d')).exists() else () for n in r.CALIBRATION)))
+        prior_ctl(*args)
+    s.operation.operation.ctl=ctl
+    def unit(name):
+        directory=s.units/(name+'.d')
+        return dict(ActiveState='active' if name in started else 'inactive',MainPID='42' if name in started else '0',
+                    ControlPID='0',DropInPaths=' '.join(sorted(str(p) for p in directory.iterdir())) if directory.exists() else '')
+    s.operation.unit_state=unit
+    return s
+
+
+def test_retarget_guards_replaced_only_after_both_new_guards_loaded_and_units_inactive(guarded_retarget_prepare):
+    s=guarded_retarget_prepare
+    receipt=s.operation.prepare()
+    observed=[event[1] for event in s.events if isinstance(event,tuple) and event[0]=='guard-files']
+    both=tuple(sorted((r.RETARGET_GUARD,'50-probe-calibration-retry.conf')))
+    assert observed[0]==(both,both)
+    assert observed[1]==(('50-probe-calibration-retry.conf',),)*2
+    assert not any((s.units/(name+'.d')).exists() for name in r.CALIBRATION)
+    assert receipt['approval_issued'] is False and receipt['cloud_mutations_performed'] is False
+
+
+@pytest.mark.parametrize('fault',['changed','missing','extra','active','wrong_readback'])
+def test_retarget_guard_or_inactivity_mismatch_never_replaces_units_or_submits(guarded_retarget_prepare,fault):
+    s=guarded_retarget_prepare
+    directory=s.units/(r.CALIBRATION[0]+'.d')
+    before={name:(s.units/name).read_bytes() for name in r.CALIBRATION}
+    if fault=='changed':put(directory/r.RETARGET_GUARD,b'[Unit]\nConditionPathExists=/unrelated\n')
+    elif fault=='missing':(directory/r.RETARGET_GUARD).unlink()
+    elif fault=='extra':put(directory/'99-unrelated.conf',b'[Service]\n')
+    else:
+        old=s.operation.unit_state
+        s.operation.unit_state=lambda name:dict(old(name),**({'ActiveState':'active','MainPID':'123'} if fault=='active' else {'DropInPaths':''}))
+    with pytest.raises(r.RetryError):s.operation.prepare()
+    assert before=={name:(s.units/name).read_bytes() for name in r.CALIBRATION}
+    assert not any(event==('start',r.CALIBRATION[0]) for event in s.events)
+    assert not s.public.exists()
+
+
+def test_partial_retarget_guard_removal_preserves_new_blocking_guards(guarded_retarget_prepare,monkeypatch):
+    s=guarded_retarget_prepare
+    original_unlink=Path.unlink
+    def unlink(path,*args,**kwargs):
+        if path==s.units/(r.CALIBRATION[1]+'.d')/r.RETARGET_GUARD:raise OSError('synthetic removal failure')
+        return original_unlink(path,*args,**kwargs)
+    monkeypatch.setattr(Path,'unlink',unlink)
+    with pytest.raises(OSError):s.operation.prepare()
+    assert all((s.units/(name+'.d')/'50-probe-calibration-retry.conf').exists() for name in r.CALIBRATION)
+    assert not (s.public/'prepared').exists()
+    assert s.events[-1]==('stop',*r.CALIBRATION)
+    assert not any(event==('start',r.CALIBRATION[0]) for event in s.events)
