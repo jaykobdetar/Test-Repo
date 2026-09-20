@@ -1,5 +1,12 @@
 name: Build supervised public calibration image
 on:
+  push:
+    branches: [feat/live-deployment]
+    paths:
+      - deploy/gpu/public-calibration.py
+      - deploy/gpu/public-calibration-entrypoint.py
+      - deploy/gpu/Dockerfile.public-calibration
+      - .github/workflows/public-calibration-image.yml
   workflow_dispatch:
     inputs:
       worker_image:
@@ -17,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check immutable parent
         env:
-          WORKER_IMAGE: ${{ inputs.worker_image }}
+          WORKER_IMAGE: ${{ inputs.worker_image || 'ghcr.io/jaykobdetar/probe-mcp-worker@sha256:97a87f0ccf7baae5a77dd6dabaf1f7de1d476396449b40da4e96c8bef7140e41' }}
         run: |
           python3 - <<'PY'
           import os,re
@@ -39,12 +46,12 @@ jobs:
           provenance: mode=max
           tags: ghcr.io/jaykobdetar/probe-mcp-worker:public-calibration-${{ github.sha }}
           build-args: |
-            WORKER_IMAGE=${{ inputs.worker_image }}
+            WORKER_IMAGE=${{ inputs.worker_image || 'ghcr.io/jaykobdetar/probe-mcp-worker@sha256:97a87f0ccf7baae5a77dd6dabaf1f7de1d476396449b40da4e96c8bef7140e41' }}
             SOURCE_COMMIT=${{ github.sha }}
       - name: Record image identity
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-          PARENT: ${{ inputs.worker_image }}
+          PARENT: ${{ inputs.worker_image || 'ghcr.io/jaykobdetar/probe-mcp-worker@sha256:97a87f0ccf7baae5a77dd6dabaf1f7de1d476396449b40da4e96c8bef7140e41' }}
         run: |
           python3 - <<'PY'
           import json,os
