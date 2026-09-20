@@ -643,7 +643,27 @@ def _rss(pid: int) -> int:
 
 
 def _output_size(path: Path) -> int:
-    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file() and not item.is_symlink()) if path.exists() else 0
+    def scan_error(error):
+        if not isinstance(error, FileNotFoundError):
+            raise error
+
+    try:
+        if not stat.S_ISDIR(path.lstat().st_mode):
+            return 0
+    except FileNotFoundError:
+        return 0
+    total = 0
+    for directory, _, files in path.walk(on_error=scan_error, follow_symlinks=False):
+        for name in files:
+            try:
+                # An atomic publish can rename .partial between enumeration
+                # and inspection. Use one non-following metadata snapshot.
+                info = (directory / name).lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+    return total
 
 
 def _cpu_time_exceeded(_signum, _frame):
