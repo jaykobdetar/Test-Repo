@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Administrator-only, offline application-wheel upgrade before the first job.
+"""Administrator-only, offline application-wheel upgrade while execution is idle.
 
 Run with /usr/bin/python3 -I. The independently pinned release manifest binds
 the wheel, source commit, and identity checker. Dependencies, credentials,
@@ -10,6 +10,7 @@ This helper deliberately does not resume a failed upgrade automatically.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import csv
 from datetime import datetime, timezone
@@ -145,7 +146,7 @@ def verify_installed(wheel, site, *, owner=0):
         require(read_file(site / name, owner=owner) == wheel["members"][name], "INSTALLED_PROJECT_BYTES_DIFFER")
 
 
-def verify_original(root, digest, *, owner=0):
+def verify_runtime(root, digest, *, owner=0):
     trusted_directory(root, owner=owner)
     raw = read_file(root / "release-manifest.json", owner=owner)
     require(HEX.fullmatch(digest) and hashlib.sha256(raw).hexdigest() == digest, "ORIGINAL_MANIFEST_HASH")
@@ -182,19 +183,139 @@ def verify_original(root, digest, *, owner=0):
     old = read_file(root / wheels[0], owner=owner)
     wheel = inspect_wheel(old)
     site = root / "venv/lib/python3.13/site-packages"
-    verify_installed(wheel, site, owner=owner)
     return wheels[0], old, wheel, site
+
+
+def verify_original(root, digest, *, owner=0):
+    result = verify_runtime(root, digest, owner=owner)
+    verify_installed(result[2], result[3], owner=owner)
+    return result
+
+
+def release_body(raw):
+    body = json.loads(raw)
+    fields = {"schema_version", "source_commit", "wheel_filename", "wheel_sha256", "identity_checker_sha256"}
+    require(type(body) is dict and type(body.get("schema_version")) is int
+            and body["schema_version"] in {1, 2}, "TARGET_MANIFEST_SCHEMA")
+    if body["schema_version"] == 2:
+        fields.add("previous_upgrade")
+        previous = body.get("previous_upgrade")
+        require(type(previous) is dict and set(previous) == {"wheel_sha256", "release_manifest_sha256"}
+                and all(type(value) is str and HEX.fullmatch(value) for value in previous.values()), "PREVIOUS_UPGRADE_SCHEMA")
+    require(set(body) == fields and type(body.get("source_commit")) is str
+            and re.fullmatch(r"[0-9a-f]{40}", body["source_commit"])
+            and type(body.get("wheel_filename")) is str
+            and re.fullmatch(r"probe_core-[A-Za-z0-9_.-]+\.whl", body["wheel_filename"])
+            and all(type(body.get(name)) is str and HEX.fullmatch(body[name])
+                    for name in ("wheel_sha256", "identity_checker_sha256")), "TARGET_MANIFEST_SCHEMA")
+    return body
 
 
 def read_release(path, digest):
     raw = read_file(path, owner=None, limit=65536)
     require(HEX.fullmatch(digest) and hashlib.sha256(raw).hexdigest() == digest, "TARGET_MANIFEST_HASH")
-    body = json.loads(raw)
-    require(type(body) is dict and set(body) == {"schema_version", "source_commit", "wheel_filename", "wheel_sha256", "identity_checker_sha256"}
-            and body["schema_version"] == 1 and re.fullmatch(r"[0-9a-f]{40}", body["source_commit"])
-            and re.fullmatch(r"probe_core-[A-Za-z0-9_.-]+\.whl", body["wheel_filename"])
-            and HEX.fullmatch(body["wheel_sha256"]) and HEX.fullmatch(body["identity_checker_sha256"]), "TARGET_MANIFEST_SCHEMA")
-    return raw, body
+    return raw, release_body(raw)
+
+
+def completed_upgrade(directory, release, previous_raw, *, owner=0):
+    """Accept one durable success receipt, including the reviewed legacy repair.
+
+    The recovery path is intentionally restricted to schema-1 upgrades; it is
+    not an automatic resume or a general substitute for a failed upgrade gate.
+    No saved helper or installed application code is executed to read evidence.
+    """
+    candidates = []
+    normal = directory / "upgrade-report.json"
+    if normal.exists():
+        candidates.append((normal, False))
+    recoveries = list(directory.glob("identity-recovery-*"))
+    require(len(recoveries) <= 16, "TOO_MANY_UPGRADE_RECOVERIES")
+    for recovery in recoveries:
+        require(re.fullmatch(r"identity-recovery-[0-9a-f]{32}", recovery.name), "UPGRADE_RECOVERY_PATH")
+        trusted_directory(recovery, owner=owner)
+        receipt = recovery / "recovery-receipt.json"
+        if receipt.exists():
+            candidates.append((receipt, True))
+    require(len(candidates) == 1, "PRIOR_UPGRADE_COMPLETION_MISSING_OR_AMBIGUOUS")
+    path, recovered = candidates[0]
+    raw = read_file(path, owner=owner, limit=65536)
+    receipt = json.loads(raw)
+    require(type(receipt) is dict and receipt.get("schema_version") == 1 and receipt.get("status") == "passed"
+            and receipt.get("source_commit") == release["source_commit"]
+            and receipt.get("wheel_sha256") == release["wheel_sha256"]
+            and receipt.get("sandbox_checks") == len(SANDBOX_CHECKS)
+            and type(receipt.get("identity_checks")) is int and receipt["identity_checks"] >= 26
+            and receipt.get("cloud_mutations_performed") is False, "PRIOR_UPGRADE_RECEIPT_INVALID")
+    if recovered:
+        require(release["schema_version"] == 1 and receipt.get("application_reinstalled") is False
+                and all(receipt.get(name) is True for name in
+                        ("cause_confirmed", "research_parent_group_correct", "normal_research_reads_audited"))
+                and all(type(receipt.get(name)) is str and HEX.fullmatch(receipt[name])
+                        for name in ("unit_before_sha256", "unit_after_sha256"))
+                and receipt["unit_before_sha256"] != receipt["unit_after_sha256"], "PRIOR_UPGRADE_RECOVERY_INVALID")
+    else:
+        require(receipt.get("previous_wheel_sha256") == hashlib.sha256(previous_raw).hexdigest()
+                and receipt.get("dependencies_unchanged") is True, "PRIOR_UPGRADE_CHAIN_INVALID")
+    identity_raw = read_file(path.parent / "identity-acceptance.json", owner=owner, limit=65536)
+    identity = json.loads(identity_raw)
+    checks = identity.get("checks", {})
+    require(identity.get("schema_version") == 1 and identity.get("passed") is True
+            and type(checks) is dict and len(checks) == receipt["identity_checks"]
+            and all(value is True for value in checks.values()) and identity.get("failure_codes") == []
+            and identity.get("check_count") == identity.get("passed_count") == len(checks)
+            and type(identity.get("normal_research_audit_events")) is int and identity["normal_research_audit_events"] >= 2
+            and identity.get("paid_actions_performed") is False, "PRIOR_IDENTITY_GATE_INVALID")
+    sandbox_raw = read_file(directory / "sandbox-acceptance.json", owner=owner, limit=65536)
+    sandbox = json.loads(sandbox_raw)
+    require(type(sandbox.get("service_uid")) is int and sandbox["service_uid"] >= 0
+            and type(sandbox.get("image")) is str and re.fullmatch(r"sha256:[0-9a-f]{64}", sandbox["image"]), "PRIOR_SANDBOX_GATE_INVALID")
+    validate_acceptance(sandbox, sandbox["image"], sandbox["service_uid"], datetime.fromisoformat(sandbox["started_at"]))
+    dates = [datetime.fromisoformat(item) for item in
+             (sandbox["started_at"], sandbox["finished_at"], identity["checked_at"], receipt["finished_at"])]
+    require(all(item.tzinfo is not None for item in dates) and dates == sorted(dates)
+            and dates[-1] <= datetime.now(timezone.utc), "PRIOR_UPGRADE_REPORT_ORDER")
+    return {"completion_receipt": str(path.relative_to(directory)),
+            "completion_receipt_sha256": hashlib.sha256(raw).hexdigest(),
+            "identity_report_sha256": hashlib.sha256(identity_raw).hexdigest(),
+            "sandbox_report_sha256": hashlib.sha256(sandbox_raw).hexdigest()}
+
+
+def verify_baseline(root, digest, previous_upgrade=None, *, owner=0):
+    original_name, original_raw, original, site = verify_runtime(root, digest, owner=owner)
+    evidence, seen = [], set()
+
+    def previous(reference):
+        if reference is None:
+            return original_name, original_raw, original
+        require(type(reference) is dict and set(reference) == {"wheel_sha256", "release_manifest_sha256"}
+                and all(type(value) is str and HEX.fullmatch(value) for value in reference.values()), "PREVIOUS_UPGRADE_SCHEMA")
+        wheel_hash = reference["wheel_sha256"]
+        require(wheel_hash not in seen and len(seen) < 16, "PRIOR_UPGRADE_CHAIN_CYCLE_OR_LIMIT")
+        seen.add(wheel_hash)
+        trusted_directory(root / "upgrades", owner=owner)
+        directory = root / "upgrades" / wheel_hash
+        trusted_directory(directory, owner=owner)
+        release_raw = read_file(directory / "upgrade-release.json", owner=owner, limit=65536)
+        require(hashlib.sha256(release_raw).hexdigest() == reference["release_manifest_sha256"], "PRIOR_UPGRADE_MANIFEST_HASH")
+        release = release_body(release_raw)
+        require(release["wheel_sha256"] == wheel_hash, "PRIOR_UPGRADE_WHEEL_IDENTITY")
+        raw = read_file(directory / release["wheel_filename"], owner=owner)
+        require(hashlib.sha256(raw).hexdigest() == wheel_hash, "PRIOR_UPGRADE_WHEEL_HASH")
+        wheel = inspect_wheel(raw)
+        require(wheel["requirements"] == original["requirements"]
+                and wheel["requires_python"] == original["requires_python"], "PRIOR_UPGRADE_DEPENDENCY_CHANGE")
+        checker = read_file(directory / "verify-installed-identities.py", owner=owner, limit=1024 * 1024)
+        require(hashlib.sha256(checker).hexdigest() == release["identity_checker_sha256"], "PRIOR_UPGRADE_CHECKER_HASH")
+        previous_name, previous_raw, _ = previous(release.get("previous_upgrade"))
+        trusted_directory(directory / "rollback", owner=owner)
+        require(read_file(directory / "rollback" / previous_name, owner=owner) == previous_raw, "PRIOR_UPGRADE_ROLLBACK_HASH")
+        completion = completed_upgrade(directory, release, previous_raw, owner=owner)
+        evidence.append({**reference, **completion})
+        return release["wheel_filename"], raw, wheel
+
+    name, raw, wheel = previous(previous_upgrade)
+    verify_installed(wheel, site, owner=owner)
+    return name, raw, wheel, site, evidence
 
 
 def pin_bytes(path, expected):
@@ -204,25 +325,32 @@ def pin_bytes(path, expected):
 
 
 def check_idle_counts(counts):
-    require(type(counts) is dict and set(counts) == {"jobs", "attempts", "approvals", "compute_requests", "runpod_intents", "audit_events", "pods", "network_volumes", "local_containers"}
-            and all(type(value) is int and value >= 0 for value in counts.values()), "IDLE_RESPONSE_INVALID")
-    require(all(value == 0 for name, value in counts.items() if name != "audit_events"), "PRE_FIRST_JOB_STATE_REQUIRED")
+    counters = {"jobs", "attempts", "approvals", "compute_requests", "runpod_intents", "audit_events", "pods", "network_volumes", "local_containers"}
+    hashes = {"history_sha256", "audit_tip", "audit_prefix_sha256"}
+    require(type(counts) is dict and set(counts) == counters | hashes | {"idle", "audit_valid"}
+            and all(type(counts[name]) is int and counts[name] >= 0 for name in counters)
+            and all(type(counts[name]) is str and HEX.fullmatch(counts[name]) for name in hashes), "IDLE_RESPONSE_INVALID")
+    require(counts["idle"] is True and counts["audit_valid"] is True
+            and counts["pods"] == counts["local_containers"] == 0, "IDLE_EXECUTION_REQUIRED")
+
+
+def history_reader(checker_raw):
+    """Extract only the literal from checker bytes already bound by release SHA."""
+    tree = ast.parse(checker_raw)
+    values = [node.value for node in tree.body if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "STATE_READER" for target in node.targets)]
+    require(len(values) == 1 and isinstance(values[0], ast.Constant) and type(values[0].value) is str,
+            "PINNED_HISTORY_READER_MISSING")
+    value = values[0].value
+    require(0 < len(value) <= 65536, "PINNED_HISTORY_READER_INVALID")
+    return value
 
 
 READ_IDLE = r'''
 import json, sqlite3
 from pathlib import Path
 from probe_core.runpod_provider import RunPodConfig, RunPodHTTP
-counts = {}
-for path, tables in (("/var/lib/probe-core/research.sqlite", ("jobs", "attempts", "approvals", "compute_requests", "audit_events")),
-                     ("/var/lib/probe-provider/runpod.sqlite", ("runpod_intents",))):
-    connection = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True, timeout=5)
-    try:
-        connection.execute("PRAGMA query_only=ON")
-        for table in tables:
-            counts[table] = connection.execute("SELECT count(*) FROM " + table).fetchone()[0]
-    finally:
-        connection.close()
+counts = idle_history_snapshot("/var/lib/probe-core/research.sqlite", "/var/lib/probe-provider/runpod.sqlite", expected=_expected_history)
 config = RunPodConfig.load("/etc/probe-core/runpod.json")
 if config.state_path != "/var/lib/probe-provider/runpod.sqlite" or config.api_key_file != "/etc/probe-core/runpod-api-key":
     raise RuntimeError("provider paths changed")
@@ -285,6 +413,8 @@ class Upgrade:
         self.changed = False
         self.work = None
         self.closed_after_failure = False
+        self.history_reader = None
+        self.history_baseline = None
 
     def command(self, arguments, *, timeout=60):
         result = self.run(arguments, cwd=self.root, env=ENV, stdin=subprocess.DEVNULL,
@@ -312,8 +442,10 @@ class Upgrade:
         wait_ready(lambda: all(socket_ready(Path(path), users["probe-trusted"], groups[group]) for path, group in expected))
 
     def idle(self):
+        require(type(self.history_reader) is str, "PINNED_HISTORY_READER_MISSING")
+        script = self.history_reader + "\n_expected_history = json.loads(" + repr(json.dumps(self.history_baseline)) + ")\n" + READ_IDLE
         raw = self.command(["/usr/sbin/runuser", "-u", "probe-trusted", "-g", "probe-trusted", "--",
-                            str(self.root / "venv/bin/python"), "-I", "-c", READ_IDLE], timeout=60)
+                            str(self.root / "venv/bin/python"), "-I", "-c", script], timeout=60)
         require(len(raw) < 65536, "IDLE_RESPONSE_TOO_LARGE")
         result = json.loads(raw)
         # CPU exec_code runs do not occupy the GPU job queue. Refuse any live
@@ -328,6 +460,12 @@ class Upgrade:
         require(all(re.fullmatch(r"[0-9a-f]{64}", value) for value in ids), "CONTAINER_INVENTORY_INVALID")
         result["local_containers"] = len(ids)
         check_idle_counts(result)
+        if self.history_baseline is None:
+            self.history_baseline = result.copy()
+        else:
+            require(result["history_sha256"] == self.history_baseline["history_sha256"]
+                    and result["audit_events"] >= self.history_baseline["audit_events"]
+                    and result["audit_prefix_sha256"] == self.history_baseline["audit_tip"], "HISTORICAL_STATE_CHANGED")
         return result
 
     def guard(self, enabled):
@@ -366,11 +504,13 @@ class Upgrade:
 
     def execute(self, args):
         self.phase("validation", "verifying the installed release and pinned upgrade")
-        original_name, old_raw, old_wheel, site = verify_original(self.root, args.original_manifest_sha256, owner=self.owner)
         manifest_raw, release = read_release(args.release_manifest, args.release_manifest_sha256)
+        original_name, old_raw, old_wheel, site, baseline_evidence = verify_baseline(
+            self.root, args.original_manifest_sha256, release.get("previous_upgrade"), owner=self.owner)
         require(args.wheel.name == release["wheel_filename"], "TARGET_WHEEL_FILENAME")
         new_raw = pin_bytes(args.wheel, release["wheel_sha256"])
         checker_raw = pin_bytes(args.identity_checker, release["identity_checker_sha256"])
+        self.history_reader = history_reader(checker_raw)
         new_wheel = inspect_wheel(new_raw)
         require(new_wheel["requirements"] == old_wheel["requirements"]
                 and new_wheel["requires_python"] == old_wheel["requires_python"], "DEPENDENCY_CHANGE_REFUSED")
@@ -468,6 +608,7 @@ class Upgrade:
                        "wheel_sha256": release["wheel_sha256"], "previous_wheel_sha256": hashlib.sha256(old_raw).hexdigest(),
                        "dependencies_unchanged": True, "sandbox_checks": len(report["checks"]),
                        "identity_checks": identity["check_count"], "cloud_mutations_performed": False,
+                       "previous_upgrade_evidence": baseline_evidence,
                        "finished_at": datetime.now(timezone.utc).isoformat()}
             atomic_file(self.work / "upgrade-report.json", json.dumps(receipt, indent=2).encode() + b"\n",
                         uid=self.owner, gid=os.getegid(), mode=0o600)

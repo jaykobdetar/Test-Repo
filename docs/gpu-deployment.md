@@ -22,7 +22,7 @@ python -m probe_core.model_assets inventory --root /path/to/canonical-models --r
 python -m probe_core.model_assets inventory --root /path/to/canonical-models --repo Qwen/Qwen3-1.7B --thinking false > posttrained-assets.json
 ```
 
-The download is resumable at verified whole-file boundaries. An existing `.partial` is preserved for explicit inspection rather than silently overwritten. A repeated download needs only the missing bytes. Published files are read-only regular files, with no symlinks or shared hardlinks. Transfer them to the network volume without changing their bytes, then rerun inventory there.
+The download is resumable at verified whole-file boundaries. An existing `.partial` is preserved for explicit inspection rather than silently overwritten. A repeated download needs only the missing bytes. Published files are read-only regular files, with no symlinks or shared hardlinks. The default worker image bakes the Base inventory and two synthetic public prompts into root-owned, read-only paths. A separately managed persistent deployment can instead transfer a reviewed inventory without changing its bytes.
 
 Base uses raw text or explicit token IDs. Posttrained inventories require `--thinking true` or `--thinking false`; the selected mode is bound into `ModelIdentity`, and the actual tokenizer template is hashed. The worker applies the template with that flag. Qwen documents this switch in its [official model card](https://huggingface.co/Qwen/Qwen3-1.7B#switching-between-thinking-and-non-thinking-mode). The worker caps context at 32,768 tokens even though the pinned posttrained config advertises a larger positional limit.
 
@@ -63,7 +63,7 @@ local tests or reading configured limits does not substitute for this live resul
 
 ## Full worker image
 
-The `.github/workflows/worker-image.yml` workflow requires the reviewed diagnostic image **including its digest**. Manual runs accept that reference as an input; changes to the image recipe or workflow on the configured branches use the digest pinned in the workflow. It builds `deploy/gpu/Dockerfile.worker` for Linux/amd64, installs the exact worker dependency graph from `uv.lock`, and records the actual source commit and lock hash inside the image. The uv bootstrap wheel is hash-pinned in `bootstrap-requirements.txt`. The final registry digest is recorded by the workflow. Model assets stay on the volume, outside the image. This follows [uv's locked Docker deployment pattern](https://docs.astral.sh/uv/guides/integration/docker/).
+The `.github/workflows/worker-image.yml` workflow requires the reviewed diagnostic image **including its digest**. Manual runs accept that reference as an input; changes to the image recipe or workflow on the configured branches use the digest pinned in the workflow. It builds `deploy/gpu/Dockerfile.worker` for Linux/amd64, installs the exact worker dependency graph from `uv.lock`, and records the actual source commit and lock hash inside the image. The uv bootstrap wheel is hash-pinned in `bootstrap-requirements.txt`. The final registry digest is recorded by the workflow. The build-time `public-assets.json` inventory binds each public asset by byte count and SHA256. `bake-assets.py` downloads only frozen public Hugging Face URLs and verifies every file before publishing the image. These assets are cached under `/opt/probe-assets`; model license files are retained. This follows [uv's locked Docker deployment pattern](https://docs.astral.sh/uv/guides/integration/docker/).
 
 The equivalent reviewed local build is:
 
@@ -77,17 +77,23 @@ The image bootstrap runs trusted SSH as container root, then the worker supervis
 
 Before the GPU diagnostic, a separate no-model subprocess under UID10001 must traverse/read every declared model and dataset asset, read its private config/token, and create/fsync/remove small probes in the private tensor/output directories. It also rejects model/dataset files owned by or writable by the worker. A root-owned `0440` file in a root-only directory is insufficient: staged parent traversal and GID10001 read access must both be correct. The bootstrap performs no automatic recursive ownership changes.
 
-Prepare volume permissions before launch:
+The disposable worker uses these fixed permissions:
 
 | Volume path | Owner/access |
 |---|---|
-| `/workspace/probe/models` and `/workspace/probe/datasets` | Trusted root ownership; group 10001 can traverse/read; worker cannot modify files |
+| `/opt/probe-assets/models` and `/opt/probe-assets/datasets` | Root-owned image assets; directories `0755`, files `0444`; worker cannot modify them |
 | `/workspace/probe/tensors` and `/workspace/probe/attempts` | UID/GID 10001, directories `0700` |
 | `/workspace/probe/config/worker.json` and `worker-token` | UID/GID 10001, files `0600`, private parent directory |
 
-Build `worker.json` from the verified inventory's `model` and `assets`, registered dataset hashes, actual live price/region, exact image digest and source commit, `device: "cuda:0"`, `backend: "nnsight"`, and `cgroup_directory: "/sys/fs/cgroup/probe-jobs"`. The default config/token paths are shown above; trusted startup variables `PROBE_WORKER_CONFIG` and `PROBE_WORKER_TOKEN_FILE` may override them. The execution API binds only to loopback port 8080. The SSH server permits forwarding to that port; the controller still supplies its separate bearer secret.
+Build `worker.json` from the verified inventory's `model` and `assets`, registered dataset hashes, actual live price/region, exact image digest and source commit, `device: "cuda:0"`, `backend: "nnsight"`, and `cgroup_directory: "/sys/fs/cgroup/probe-jobs"`. The config/token paths are fixed as shown above. After validating the Pod cgroup namespace, bootstrap starts authenticated SSH and waits under the original approval deadline. The trusted controller stages a bounded data-only config/token bundle through pinned SSH, then invokes `gpu_launch --configure` at a fixed path. A root-owned ready record binds that exact bundle; an uncertain reply cannot authorize a different configuration or a second provisioning request. Configuration validation, actual worker file access and all live resource gates precede the numerical supervisor. The execution API binds only to loopback port 8080. The SSH server permits forwarding to that port; the controller still supplies its separate bearer secret.
 
 The bootstrap restarts a crashed **local supervisor** at most three times while SSH remains available. It neither restarts a Pod nor resubmits a job. The replacement supervisor adopts persisted PID/start-time/boot identity and the same attempt/deadline. Graceful SIGTERM closes the supervisor and terminates its children. The trusted lifecycle helper verifies `/run/probe-worker-supervisor.pid` against the actual process, its credentials, command and bootstrap parent before a restart test.
+
+## Installed single-job calibration
+
+`gpu_acceptance_runner` provides a narrow installed path for one public backend-parity case. A `probe-research` one-shot submits the fixed job and compute request through the existing facade; a separate trusted process waits for the existing human approval, binds the observed Pod and SSH host key, stages the configuration, dispatches the exact job, seals its artifacts and deletes the Pod with independent absence readback. Neither runner mode approves compute.
+
+The two calibration units are started explicitly, never enabled for automatic boot. `activate-gpu-calibration.py` installs their pinned inputs only after a verified application upgrade, idle history checks and installed identity acceptance. The public plan and worker config contain no bearer token; private SSH/token files remain accessible only to the trusted account. An interrupted or failed calibration is not silently replayed.
 
 ## Approved numerical and runtime acceptance
 
@@ -136,7 +142,7 @@ python -m probe_core.gpu_acceptance collect --plan base-plan.json --ledger /var/
 
 The collector refuses missing/mismatched jobs, missing stop acknowledgments, wrong terminal outcomes, changed artifact bytes, and absent canonical GPU/image provenance. It includes observed usage receipts when the endpoint is supplied. Without that endpoint it can still inspect the authoritative ledger after shutdown, but the receipt-level cancellation case remains inconclusive: the ledger does not retain the actual worker outcome. Cancellation requires an exact job/attempt receipt showing `CANCELLED`, `failure_kind=cancelled` and positive stop evidence. A job that finished before cancellation arrived cannot pass that check. When an action directory is supplied, the collector separately revalidates its retained cancellation and restart transcripts without issuing any action. Missing or malformed transcripts do not pass. It deliberately leaves `lifecycle_acceptance_complete: false` until separate provider replacement and storage readback evidence is available.
 
-Complete the lifecycle gate with actual before/after supervisor PID and same-attempt records, provider-confirmed stopped state, and a separately approved restart/replacement. Keep the same network volume. Re-read all pinned model hashes and retained artifact hashes after the new worker starts, and rerun its bounded parity job under the new allowance. Preserve the previous accepted manifests and cloud identity readbacks. A simulated provider result or a copied success JSON is not replacement evidence.
+Complete the lifecycle gate with actual before/after supervisor PID and same-attempt records, provider-confirmed stopped state, and a separately approved restart/replacement. For disposable research, use the same verified public image and preserve canonical artifacts on the controller. Re-read all pinned model hashes and retained controller artifact hashes after the new worker starts, and rerun its bounded parity job under the new allowance. Preserve the previous accepted manifests and cloud identity readbacks. A simulated provider result or a copied success JSON is not replacement evidence.
 
 Use separate bounded allowances for Base and posttrained workers; `WorkerConfig` intentionally binds one model identity at a time. Stop and read back the old resource before replacement. Additional thinking/non-thinking contrasts require their explicit model identities and their own reviewed batches. These are engineering calibration checks, not hidden-holdout evaluation, independent scientific replication or a discovery claim.
 

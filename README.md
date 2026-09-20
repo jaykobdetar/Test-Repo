@@ -36,9 +36,10 @@ unfinished. No scientific discovery is claimed.
 - **Worker preparation:** pinned model inventories, a no-model GPU diagnostic,
   and an immutable worker image.
 
-Cloud diagnostics confirmed the expected hardware but did not pass
-the worker resource-control prerequisite. The test resources were removed;
-canonical GPU execution remains blocked. See the [deployment status](docs/live-deployment-plan.md#first-gpu-diagnostic).
+Live resource acceptance has passed on a compatible RunPod host: CPU throttling,
+memory and process limits, and cleanup of detached descendants. Canonical model
+parity remains a separate pending gate. RunPod hosts vary, so each worker repeats
+the containment checks before inference. See the [GPU deployment guide](docs/gpu-deployment.md).
 
 The repository is named `probe-mcp`; the Python distribution and import package
 are `probe-core` and `probe_core`, respectively.
@@ -48,15 +49,16 @@ are `probe-core` and `probe_core`, respectively.
 | Area | Status |
 | --- | --- |
 | Cloud provider | RunPod adapter uses price-capped creation and separate stop authority; unattended starts and direct resumes are disabled pending provider guarantees |
-| GPU execution | CUDA paths exist; real GPU limits, SSH deployment, and canonical checkpoint parity still require validation |
+| GPU execution | Real resource limits passed on a compatible host; controller-to-worker canonical checkpoint parity still requires validation |
 | Flexible experiments | Arbitrary CPU Python plus fixed worker operations; no arbitrary agent-written GPU Python |
 | Interventions | Apply to the prompt's prefill pass; generation is a separate, unmodified operation |
 | Scientific evaluation | Confirmation/replication execution is refused until a private evaluator is implemented |
 | Research workflow | Hypothesis storage and freezing exist; Explorer/Skeptic/Replicator orchestration and blind calibration remain pending |
 | Advanced methods | SAE/Qwen-Scope, circuit tracing, and automated novelty adjudication are not implemented |
 
-Model weights, credentials, and research datasets are not included. Image recipes
-and service installation tooling are provided; reading or installing the Python
+Model weights and credentials are not stored in this repository. The worker image
+recipe downloads hash-pinned public Base weights and includes two synthetic calibration
+prompts; it contains no hidden evaluation data. Reading or installing the Python
 package does not create a running lab or approve paid compute.
 
 ## Architecture

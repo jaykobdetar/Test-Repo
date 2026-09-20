@@ -4,19 +4,156 @@ Root supervises SSH. The numerical supervisor runs as the fixed unprivileged
 worker UID. No provider credential or paid action exists in this entry point.
 """
 import json
+from datetime import datetime, timezone
 from functools import partial
+import hashlib
 import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 
 from .worker_contracts import WorkerConfig
+from .audit import canonical_json
 
+ROOT_UID = 0
 WORKER_UID = 10001
+BOOTSTRAP_STATE = Path('/run/probe-bootstrap-state.json')
+CONFIGURED = Path('/run/probe-worker-configured.json')
+CONFIG_BUNDLE = Path('/run/probe-worker-bootstrap.json')
+CONFIG_ROOT = Path('/workspace/probe/config')
+BAKED_ROOT = Path('/opt/probe-assets')
+BAKED_MANIFEST = Path('/opt/probe-core/public-assets.json')
+PROVENANCE = Path('/opt/probe-core/build-provenance.json')
+
+
+def _root_file(path, *, maximum=1024*1024):
+    path = Path(path)
+    if any(p.is_symlink() for p in path.parents):
+        raise ValueError('bootstrap input has a symlink parent')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != ROOT_UID or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > maximum:
+            raise ValueError('bootstrap input is not a bounded root-owned file')
+        return stream.read(maximum + 1)
+
+
+def _publish(path, raw, *, uid=None, gid=None, mode=0o600):
+    uid = ROOT_UID if uid is None else uid
+    gid = ROOT_UID if gid is None else gid
+    fd, temporary = tempfile.mkstemp(prefix='.probe-config-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchmod(stream.fileno(), mode)
+            os.fchown(stream.fileno(), uid, gid)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        fd = os.open(path.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _configuration_digest(value):
+    return 'sha256:' + hashlib.sha256(canonical_json(value).encode()).hexdigest()
+
+
+def validate_baked_config(body, provenance, manifest):
+    """The authenticated bootstrap may select only assets baked in this image."""
+    config = WorkerConfig.model_validate_json(canonical_json(body))
+    if (config.device != 'cuda:0' or config.backend != 'nnsight' or config.provider_backend != 'runpod'
+            or config.code_git_commit != provenance['source_commit']
+            or config.environment_lock_path != '/opt/probe-core/uv.lock'
+            or config.cgroup_directory != '/sys/fs/cgroup/probe-jobs'
+            or config.tensor_directory != '/workspace/probe/tensors'
+            or config.output_directory != '/workspace/probe/attempts'):
+        raise ValueError('configuration differs from the reviewed disposable worker profile')
+    assets = {item['path']: item['sha256'] for item in manifest['assets']}
+    root = Path(config.model_directory)
+    if not root.is_relative_to(BAKED_ROOT / 'models') or '..' in root.parts:
+        raise ValueError('model must come from the baked public asset directory')
+    requested = {str((root / item.path).relative_to(BAKED_ROOT)): item.sha256 for item in config.assets}
+    for dataset in config.datasets:
+        path = Path(dataset.path)
+        if not path.is_relative_to(BAKED_ROOT / 'datasets') or '..' in path.parts:
+            raise ValueError('dataset must come from the baked public asset directory')
+        requested[str(path.relative_to(BAKED_ROOT))] = dataset.sha256
+    if requested != assets:
+        raise ValueError('configuration asset hashes differ from the immutable baked manifest')
+    return config
+
+
+def configure(path=CONFIG_BUNDLE):
+    """Install one data-only config over authenticated SSH, without executing a job."""
+    if os.geteuid() != ROOT_UID or Path(path) != CONFIG_BUNDLE:
+        raise ValueError('configuration requires the fixed root-only staging file')
+    raw = _root_file(path)
+    if Path(path).stat().st_mode & 0o077:
+        raise ValueError('configuration bundle must be private')
+    body = json.loads(raw)
+    if set(body) != {'schema_version', 'worker_config', 'bearer_token'} or body['schema_version'] != 1:
+        raise ValueError('invalid configuration envelope')
+    token = body['bearer_token']
+    if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_+=/-]{32,512}', token):
+        raise ValueError('invalid worker token')
+    state = json.loads(_root_file(BOOTSTRAP_STATE))
+    if time.time() >= state['deadline'] - 30:
+        raise ValueError('the original Pod deadline is too close or expired')
+    validate_baked_config(body['worker_config'], json.loads(_root_file(PROVENANCE)), json.loads(_root_file(BAKED_MANIFEST)))
+    receipt = {'schema_version': 1, 'configured': True,
+               'worker_config_sha256': _configuration_digest(body['worker_config']),
+               'bundle_sha256': _configuration_digest(body)}
+    if CONFIGURED.exists():
+        previous = json.loads(_root_file(CONFIGURED))
+        if previous != {**receipt, 'bootstrap': state}:
+            raise ValueError('worker is already bound to a different configuration')
+        Path(path).unlink()
+        return receipt
+    # Root retains the parent; only the numerical identity owns its private
+    # execution files. Atomic ready publication is the sole startup signal.
+    parent = CONFIG_ROOT.parent
+    for directory in (parent.parent, parent):
+        if not directory.exists():
+            directory.mkdir(mode=0o755)
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != ROOT_UID or info.st_mode & 0o022 or directory.is_symlink():
+            raise ValueError('worker workspace parent is not trusted')
+    for name in ('config', 'tensors', 'attempts'):
+        directory = parent / name
+        directory.mkdir(mode=0o700)
+        os.chown(directory, WORKER_UID, WORKER_UID)
+    _publish(CONFIG_ROOT / 'worker.json', canonical_json(body['worker_config']).encode(), uid=WORKER_UID, gid=WORKER_UID)
+    _publish(CONFIG_ROOT / 'worker-token', (token+'\n').encode(), uid=WORKER_UID, gid=WORKER_UID)
+    _publish(CONFIGURED, canonical_json({**receipt, 'bootstrap': state}).encode())
+    Path(path).unlink()
+    return receipt
+
+
+def _bootstrap_deadline():
+    deadline = datetime.fromisoformat(os.environ['PROBE_ABSOLUTE_DEADLINE'])
+    if deadline.tzinfo is None or not 0 < deadline.timestamp() - time.time() <= 900:
+        raise ValueError('bootstrap requires the original bounded controller deadline')
+    state = {'deadline': deadline.timestamp()}
+    for name in ('PROBE_WORKER_ID', 'PROBE_REQUEST_ID', 'PROBE_CONFIGURATION_HASH'):
+        value = os.environ[name]
+        if not re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', value):
+            raise ValueError('invalid controller binding')
+        state[name] = value
+    if BOOTSTRAP_STATE.exists():
+        raise ValueError('bootstrap was already initialized')
+    _publish(BOOTSTRAP_STATE, canonical_json(state).encode())
+    return deadline.timestamp()
 
 
 def _prepare_worker_cgroups(config: WorkerConfig):
@@ -81,99 +218,123 @@ def check_worker_paths(config: WorkerConfig, *, token_path: Path):
             "model_loaded": False, "model_assets_checked": len(config.assets), "datasets_checked": len(config.datasets)}
 
 
+def _run_numerical_worker(scope, deadline, ssh, stopped):
+    from .pod_bootstrap import enter_supervisor_and_drop
+    worker_identity = partial(enter_supervisor_and_drop, scope)
+    while not CONFIGURED.exists():
+        if stopped() or ssh.poll() is not None or time.time() >= deadline - 30:
+            raise ValueError("configuration was not staged within the original allowance")
+        time.sleep(0.1)
+    config_path, token_path = CONFIG_ROOT / 'worker.json', CONFIG_ROOT / 'worker-token'
+    _private_worker_file(config_path)
+    _private_worker_file(token_path)
+    body = json.loads(config_path.read_text())
+    config = validate_baked_config(body, json.loads(_root_file(PROVENANCE)), json.loads(_root_file(BAKED_MANIFEST)))
+    marker = json.loads(_root_file(CONFIGURED))
+    token = token_path.read_text().strip()
+    if (marker['worker_config_sha256'] != _configuration_digest(body)
+            or marker['bundle_sha256'] != _configuration_digest({'schema_version': 1, 'worker_config': body, 'bearer_token': token})
+            or marker['bootstrap'] != json.loads(_root_file(BOOTSTRAP_STATE))):
+        raise ValueError('staged configuration changed before worker startup')
+    worker_environment = dict(os.environ, HOME='/home/probe-worker', USER='probe-worker', LOGNAME='probe-worker')
+    gates = [
+        ([sys.executable, '-m', 'probe_core.gpu_launch', '--check-paths', str(config_path), str(token_path)], 30),
+        ([sys.executable, '/opt/probe/diagnose.py', '--cgroup-root', config.cgroup_directory], 45),
+        ([sys.executable, '/opt/probe/accept-resources.py', '--cgroup-root', config.cgroup_directory], 40),
+    ]
+    for command, maximum in gates:
+        remaining = deadline - time.time() - 15
+        if remaining <= 0 or stopped():
+            raise ValueError('original allowance expired before resource acceptance')
+        result = subprocess.run(command, preexec_fn=worker_identity, env=worker_environment,
+                                timeout=min(maximum, remaining), check=False)
+        if result.returncode != 0:
+            raise ValueError('worker permissions or real resource acceptance failed before inference')
+
+    def start_worker():
+        process = subprocess.Popen([sys.executable, '-m', 'probe_core.worker', '--config', str(config_path),
+                                    '--token-file', str(token_path), '--port', '8080'],
+                                   preexec_fn=worker_identity, env=worker_environment, start_new_session=True)
+        Path('/run/probe-worker-supervisor.pid').write_text(str(process.pid)+'\n')
+        print(json.dumps({'worker_supervisor_pid': process.pid, 'execution_authority_renewed': False}), flush=True)
+        return process
+
+    worker = start_worker()
+    restarts = 0
+    try:
+        while not stopped() and ssh.poll() is None and time.time() < deadline:
+            if worker.poll() is not None:
+                if restarts >= 3:
+                    break
+                restarts += 1
+                worker = start_worker()
+            time.sleep(0.1)
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+        try:
+            worker.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            worker.kill()
+            worker.wait(timeout=5)
+
+
 def main():
-    if len(sys.argv) == 4 and sys.argv[1] == "--check-paths":
+    if len(sys.argv) == 3 and sys.argv[1] == '--configure':
+        print(canonical_json(configure(Path(sys.argv[2]))), flush=True)
+        return
+    if len(sys.argv) == 4 and sys.argv[1] == '--check-paths':
         if os.geteuid() != WORKER_UID:
-            raise SystemExit("path preflight must actually run as UID10001")
+            raise SystemExit('path preflight must actually run as UID10001')
         config_path, token_path = Path(sys.argv[2]), Path(sys.argv[3])
         _private_worker_file(config_path)
         _private_worker_file(token_path)
         config = WorkerConfig.model_validate_json(config_path.read_text())
         print(json.dumps(check_worker_paths(config, token_path=token_path)), flush=True)
         return
-    if os.geteuid() != 0:
-        raise SystemExit("the image bootstrap needs container root to separate SSH and worker identities")
-    if any(os.environ.get(key) for key in ("RUNPOD_API_KEY", "HF_TOKEN", "AWS_SECRET_ACCESS_KEY")):
-        raise SystemExit("management or download credentials do not belong on the execution image")
-    config_path = Path(os.environ.get("PROBE_WORKER_CONFIG", "/workspace/probe/config/worker.json"))
-    token_path = Path(os.environ.get("PROBE_WORKER_TOKEN_FILE", "/workspace/probe/config/worker-token"))
-    _private_worker_file(config_path)
-    _private_worker_file(token_path)
-    config = WorkerConfig.model_validate_json(config_path.read_text())
-    provenance = json.loads(Path("/opt/probe-core/build-provenance.json").read_text())
-    if config.device != "cuda:0" or config.provider_backend != "runpod" or config.code_git_commit != provenance["source_commit"]:
-        raise SystemExit("worker configuration must match this reviewed CUDA image and actual source commit")
-    from .pod_bootstrap import enter_supervisor_and_drop
-    scope = _prepare_worker_cgroups(config)
-    worker_identity = partial(enter_supervisor_and_drop, scope)
-    public_key = os.environ.pop("PUBLIC_KEY", "").strip()
-    if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: [^\r\n]+)?", public_key):
-        raise SystemExit("PUBLIC_KEY must be one trusted Ed25519 public key")
-    directory = Path("/root/.ssh")
+    if os.geteuid() != ROOT_UID:
+        raise SystemExit('the image bootstrap needs container root to separate SSH and worker identities')
+    if any(os.environ.get(key) for key in ('RUNPOD_API_KEY', 'HF_TOKEN', 'AWS_SECRET_ACCESS_KEY')):
+        raise SystemExit('management or download credentials do not belong on the execution image')
+    deadline = _bootstrap_deadline()
+    from types import SimpleNamespace
+    scope = _prepare_worker_cgroups(SimpleNamespace(cgroup_directory='/sys/fs/cgroup/probe-jobs'))
+    public_key = os.environ.pop('PUBLIC_KEY', '').strip()
+    if not re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/]+={0,2}(?: [^\r\n]+)?', public_key):
+        raise SystemExit('PUBLIC_KEY must be one trusted Ed25519 public key')
+    directory = Path('/root/.ssh')
     directory.mkdir(exist_ok=True, mode=0o700)
     directory.chmod(0o700)
-    authorized = directory / "authorized_keys"
-    authorized.write_text(public_key+"\n")
+    authorized = directory / 'authorized_keys'
+    authorized.write_text(public_key+'\n')
     authorized.chmod(0o600)
-    subprocess.run(["ssh-keygen", "-l", "-f", str(authorized)], check=True)
-    subprocess.run(["ssh-keygen", "-A"], check=True)
-    subprocess.run(["ssh-keygen", "-l", "-f", "/etc/ssh/ssh_host_ed25519_key.pub"], check=True)
-    ssh_config = Path("/etc/ssh/sshd_config.probe-worker")
-    ssh_config.write_text("Port 22\nHostKey /etc/ssh/ssh_host_ed25519_key\nPermitRootLogin prohibit-password\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nUsePAM yes\nAllowTcpForwarding local\nPermitOpen 127.0.0.1:8080\nAllowAgentForwarding no\nX11Forwarding no\nSubsystem sftp internal-sftp\n")
-    # Run the exact diagnostic as the worker identity, not root: root write
-    # access would not prove that the numerical supervisor can enforce limits.
-    worker_environment = dict(os.environ, HOME="/home/probe-worker", USER="probe-worker", LOGNAME="probe-worker")
-    paths = subprocess.run([sys.executable, "-m", "probe_core.gpu_launch", "--check-paths", str(config_path), str(token_path)],
-                           preexec_fn=worker_identity, env=worker_environment, timeout=30, check=False)
-    if paths.returncode != 0:
-        raise SystemExit("worker asset permissions failed before model loading; external controller must stop the Pod")
-    preflight = subprocess.run([sys.executable, "/opt/probe/diagnose.py", "--cgroup-root", config.cgroup_directory],
-                               preexec_fn=worker_identity, env=worker_environment, timeout=45, check=False)
-    if preflight.returncode != 0:
-        raise SystemExit("worker prerequisites failed; the external controller must stop this paid Pod")
-    containment = subprocess.run([sys.executable, "/opt/probe/accept-resources.py", "--cgroup-root", config.cgroup_directory],
-                                 preexec_fn=worker_identity, env=worker_environment, timeout=40, check=False)
-    if containment.returncode != 0:
-        raise SystemExit("worker resource enforcement failed under load; external controller must delete the Pod")
+    subprocess.run(['ssh-keygen', '-l', '-f', str(authorized)], check=True)
+    subprocess.run(['ssh-keygen', '-A'], check=True)
+    subprocess.run(['ssh-keygen', '-l', '-f', '/etc/ssh/ssh_host_ed25519_key.pub'], check=True)
+    ssh_config = Path('/etc/ssh/sshd_config.probe-worker')
+    ssh_config.write_text('Port 22\nHostKey /etc/ssh/ssh_host_ed25519_key\nPermitRootLogin prohibit-password\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nUsePAM yes\nAllowTcpForwarding local\nPermitOpen 127.0.0.1:8080\nAllowAgentForwarding no\nX11Forwarding no\nSubsystem sftp internal-sftp\n')
     stopped = False
     def terminate(*_):
         nonlocal stopped
         stopped = True
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
-    ssh = subprocess.Popen(["/usr/sbin/sshd", "-D", "-e", "-f", str(ssh_config)], start_new_session=True)
-    def start_worker():
-        process = subprocess.Popen([sys.executable, "-m", "probe_core.worker", "--config", str(config_path), "--token-file", str(token_path), "--port", "8080"],
-                                   preexec_fn=worker_identity, env=worker_environment, start_new_session=True)
-        Path("/run/probe-worker-supervisor.pid").write_text(str(process.pid)+"\n")
-        print(json.dumps({"worker_supervisor_pid": process.pid, "execution_authority_renewed": False}), flush=True)
-        return process
-    worker = start_worker()
-    restarts = 0
+    ssh = subprocess.Popen(['/usr/sbin/sshd', '-D', '-e', '-f', str(ssh_config)], start_new_session=True)
     try:
-        while not stopped and ssh.poll() is None:
-            if worker.poll() is not None:
-                if restarts >= 3:
-                    break
-                # Restart only the local supervisor. Its persisted exact attempt
-                # is adopted; no job POST or provider start is replayed.
-                restarts += 1
-                worker = start_worker()
-            time.sleep(0.1)
+        _run_numerical_worker(scope, deadline, ssh, lambda: stopped)
     finally:
-        # Worker SIGTERM runs Supervisor.close(), which kills each execution's
-        # separate process group before the supervisor exits.
-        for process in (worker, ssh):
-            if process.poll() is None:
-                process.terminate()
-        for process in (worker, ssh):
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-    raise SystemExit(0 if stopped else 1)
+        if ssh.poll() is None:
+            ssh.terminate()
+        try:
+            ssh.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            ssh.kill()
+            ssh.wait(timeout=5)
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as error:
+        print(canonical_json({'status': 'failed', 'error_type': type(error).__name__}), flush=True)
+        raise SystemExit(1) from None

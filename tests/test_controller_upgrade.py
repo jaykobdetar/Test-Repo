@@ -83,7 +83,7 @@ def make_release(directory, raw=None):
     raw = raw or wheel_bytes(b"VERSION = 'new'\n")
     wheel, checker, manifest = (directory / name for name in (NAME, "identity.py", "upgrade-release.json"))
     write(wheel, raw)
-    write(checker, b"# pinned synthetic checker\n")
+    write(checker, (SCRIPT.parent / "verify-installed-identities.py").read_bytes())
     body = {"schema_version": 1, "source_commit": "b" * 40, "wheel_filename": NAME,
             "wheel_sha256": hashlib.sha256(raw).hexdigest(), "identity_checker_sha256": hashlib.sha256(checker.read_bytes()).hexdigest()}
     write(manifest, json.dumps(body).encode())
@@ -140,16 +140,32 @@ def test_wheel_record_tampering_and_replaced_offered_input(tmp_path):
 
 
 def counts():
-    return dict(jobs=0, attempts=0, approvals=0, compute_requests=0, runpod_intents=0, audit_events=17, pods=0, network_volumes=0, local_containers=0)
+    return dict(jobs=0, attempts=0, approvals=0, compute_requests=0, runpod_intents=0, audit_events=17,
+                pods=0, network_volumes=0, local_containers=0, history_sha256="a" * 64,
+                audit_tip="b" * 64, audit_prefix_sha256="b" * 64, idle=True, audit_valid=True)
 
 
-@pytest.mark.parametrize("key", ["jobs", "attempts", "approvals", "compute_requests", "runpod_intents", "pods", "network_volumes", "local_containers"])
-def test_pre_first_job_scope_allows_audit_but_refuses_work_and_resources(key):
+@pytest.mark.parametrize("key", ["pods", "local_containers", "idle", "audit_valid"])
+def test_idle_scope_refuses_execution_resources_or_invalid_history(key):
     value = counts()
     upgrade.check_idle_counts(value)
-    value[key] = 1
-    with pytest.raises(upgrade.UpgradeError, match="PRE_FIRST_JOB_STATE_REQUIRED"):
+    value[key] = False if key in {"idle", "audit_valid"} else 1
+    with pytest.raises(upgrade.UpgradeError, match="IDLE_EXECUTION_REQUIRED"):
         upgrade.check_idle_counts(value)
+
+
+def test_idle_scope_allows_verified_completed_history_and_retained_storage():
+    value = counts()
+    value.update(jobs=3, attempts=4, approvals=5, compute_requests=6, runpod_intents=5, network_volumes=1)
+    upgrade.check_idle_counts(value)
+
+
+def test_history_reader_requires_one_pinned_literal_and_does_not_execute_offered_code():
+    with pytest.raises(upgrade.UpgradeError, match="MISSING"):
+        upgrade.history_reader(b"STATE_READER = dangerous_call()")
+    with pytest.raises(upgrade.UpgradeError, match="MISSING"):
+        upgrade.history_reader(b"STATE_READER = 'a'\nSTATE_READER = 'b'")
+    assert upgrade.history_reader(b"raise RuntimeError('must not execute')\nSTATE_READER = 'reviewed reader'") == "reviewed reader"
 
 
 def acceptance():
@@ -157,6 +173,146 @@ def acceptance():
     return {"status": "passed", "stage": "complete", "image": IMAGE, "service_uid": OWNER, "started_at": now, "finished_at": now,
             "checks": {name: True for name in upgrade.SANDBOX_CHECKS},
             "lifecycle": {key: True for key in ("program_started", "host_timer_excluded", "launchers_killed", "container_processes_stopped", "container_removed")}}
+
+
+def identity_acceptance():
+    return {"schema_version": 1, "passed": True, "check_count": 26, "passed_count": 26,
+            "checks": {"check_" + str(index): True for index in range(26)}, "failure_codes": [],
+            "normal_research_audit_events": 2, "paid_actions_performed": False,
+            "checked_at": datetime.now(timezone.utc).isoformat()}
+
+
+def save_prior_upgrade(root, previous_raw, raw, *, previous=None, recovered=False):
+    digest = hashlib.sha256(raw).hexdigest()
+    directory = root / "upgrades" / digest
+    checker = (SCRIPT.parent / "verify-installed-identities.py").read_bytes()
+    manifest = {"schema_version": 2 if previous else 1, "source_commit": "c" * 40,
+                "wheel_filename": NAME, "wheel_sha256": digest,
+                "identity_checker_sha256": hashlib.sha256(checker).hexdigest()}
+    if previous:
+        manifest["previous_upgrade"] = previous
+    manifest_raw = json.dumps(manifest).encode()
+    write(directory / "upgrade-release.json", manifest_raw)
+    write(directory / NAME, raw)
+    write(directory / "verify-installed-identities.py", checker)
+    write(directory / "rollback" / NAME, previous_raw)
+    write(directory / "sandbox-acceptance.json", json.dumps(acceptance()).encode())
+    report_directory = directory / ("identity-recovery-" + "a" * 32) if recovered else directory
+    write(report_directory / "identity-acceptance.json", json.dumps(identity_acceptance()).encode())
+    receipt = {"schema_version": 1, "status": "passed", "source_commit": manifest["source_commit"],
+               "wheel_sha256": digest, "sandbox_checks": 16, "identity_checks": 26,
+               "cloud_mutations_performed": False, "finished_at": datetime.now(timezone.utc).isoformat()}
+    if recovered:
+        receipt.update(cause_confirmed=True, research_parent_group_correct=True, normal_research_reads_audited=True,
+                       unit_before_sha256="d" * 64, unit_after_sha256="e" * 64, application_reinstalled=False)
+    else:
+        receipt.update(previous_wheel_sha256=hashlib.sha256(previous_raw).hexdigest(), dependencies_unchanged=True)
+    report_name = "recovery-receipt.json" if recovered else "upgrade-report.json"
+    write(report_directory / report_name, json.dumps(receipt).encode())
+    return {"wheel_sha256": digest, "release_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest()}, directory, report_directory / report_name
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_verified_prior_upgrade_is_the_installed_and_rollback_baseline(tmp_path, recovered):
+    root = tmp_path / "root"
+    old, digest, site = make_original(root)
+    current = wheel_bytes(b"VERSION = 'accepted-first-upgrade'\n")
+    previous, directory, receipt = save_prior_upgrade(root, old, current, recovered=recovered)
+    install_members(current, site)
+    name, raw, wheel, actual_site, evidence = upgrade.verify_baseline(root, digest, previous, owner=OWNER)
+    assert name == NAME and raw == current and actual_site == site and wheel == upgrade.inspect_wheel(current)
+    assert evidence == [{**previous, "completion_receipt": str(receipt.relative_to(directory)),
+        "completion_receipt_sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
+        "identity_report_sha256": hashlib.sha256((receipt.parent / "identity-acceptance.json").read_bytes()).hexdigest(),
+        "sandbox_report_sha256": hashlib.sha256((directory / "sandbox-acceptance.json").read_bytes()).hexdigest()}]
+    with pytest.raises(upgrade.UpgradeError, match="INSTALLED_PROJECT_BYTES_DIFFER"):
+        upgrade.verify_original(root, digest, owner=OWNER)
+
+
+def test_prior_upgrade_chain_is_rooted_in_original_and_checks_every_transition(tmp_path):
+    root = tmp_path / "root"
+    old, digest, site = make_original(root)
+    first, second = wheel_bytes(b"first\n"), wheel_bytes(b"second\n")
+    first_ref, first_dir, _ = save_prior_upgrade(root, old, first, recovered=True)
+    second_ref, _, _ = save_prior_upgrade(root, first, second, previous=first_ref)
+    install_members(second, site)
+    result = upgrade.verify_baseline(root, digest, second_ref, owner=OWNER)
+    assert result[1] == second and [item["wheel_sha256"] for item in result[4]] == [first_ref["wheel_sha256"], second_ref["wheel_sha256"]]
+    write(first_dir / "rollback" / NAME, first)
+    with pytest.raises(upgrade.UpgradeError, match="ROLLBACK_HASH"):
+        upgrade.verify_baseline(root, digest, second_ref, owner=OWNER)
+
+
+@pytest.mark.parametrize("fault", ["unconfirmed_cause", "wrong_identity_count", "legacy_only", "original_runtime_changed"])
+def test_recovery_receipt_does_not_bypass_original_runtime_or_completed_repair(tmp_path, fault):
+    root = tmp_path / "root"
+    old, digest, site = make_original(root)
+    current = wheel_bytes(b"recovered-upgrade\n")
+    reference, directory, receipt_path = save_prior_upgrade(root, old, current, recovered=True)
+    install_members(current, site)
+    if fault == "original_runtime_changed":
+        write(root / "python/lib/module.py", b"changed runtime")
+    elif fault == "legacy_only":
+        manifest = json.loads((directory / "upgrade-release.json").read_bytes())
+        manifest["schema_version"] = 2
+        with pytest.raises(upgrade.UpgradeError, match="PRIOR_UPGRADE_RECOVERY_INVALID"):
+            upgrade.completed_upgrade(directory, manifest, old, owner=OWNER)
+        return
+    else:
+        body = json.loads(receipt_path.read_bytes())
+        body.update({"unconfirmed_cause": {"cause_confirmed": False}, "wrong_identity_count": {"identity_checks": 25}}[fault])
+        write(receipt_path, json.dumps(body).encode())
+    with pytest.raises(upgrade.UpgradeError):
+        upgrade.verify_baseline(root, digest, reference, owner=OWNER)
+
+
+@pytest.mark.parametrize("fault", ["manifest", "wheel", "checker", "rollback", "installed", "receipt_missing", "receipt_failed",
+                                  "wrong_receipt_wheel", "wrong_previous_wheel", "identity_failed", "sandbox_failed", "report_order",
+                                  "receipt_writable", "receipt_symlink", "ambiguous_success", "dependency_change"])
+def test_prior_upgrade_evidence_failure_never_falls_back_to_original(tmp_path, fault):
+    root = tmp_path / "root"
+    old, digest, site = make_original(root)
+    current = wheel_bytes(b"accepted-upgrade\n", dependency="pydantic==999" if fault == "dependency_change" else "pydantic==2.13.5")
+    reference, directory, receipt_path = save_prior_upgrade(root, old, current)
+    install_members(current, site)
+    if fault in {"manifest", "wheel", "checker", "rollback", "installed"}:
+        path = {"manifest": directory / "upgrade-release.json", "wheel": directory / NAME,
+                "checker": directory / "verify-installed-identities.py", "rollback": directory / "rollback" / NAME,
+                "installed": site / "probe_core/__init__.py"}[fault]
+        write(path, b"changed")
+    elif fault == "receipt_missing":
+        receipt_path.unlink()
+    elif fault in {"receipt_failed", "wrong_receipt_wheel", "wrong_previous_wheel", "report_order"}:
+        body = json.loads(receipt_path.read_bytes())
+        body.update({"receipt_failed": {"status": "failed"}, "wrong_receipt_wheel": {"wheel_sha256": "f" * 64},
+                     "wrong_previous_wheel": {"previous_wheel_sha256": "f" * 64},
+                     "report_order": {"finished_at": "2000-01-01T00:00:00+00:00"}}[fault])
+        write(receipt_path, json.dumps(body).encode())
+    elif fault in {"identity_failed", "sandbox_failed"}:
+        path = directory / ("identity-acceptance.json" if fault == "identity_failed" else "sandbox-acceptance.json")
+        body = json.loads(path.read_bytes())
+        body["checks"][next(iter(body["checks"]))] = False
+        write(path, json.dumps(body).encode())
+    elif fault == "receipt_writable":
+        receipt_path.chmod(0o666)
+    elif fault == "receipt_symlink":
+        receipt_path.rename(directory / "other-receipt.json")
+        receipt_path.symlink_to("other-receipt.json")
+    elif fault == "ambiguous_success":
+        write(directory / ("identity-recovery-" + "a" * 32) / "recovery-receipt.json", receipt_path.read_bytes())
+    with pytest.raises((upgrade.UpgradeError, OSError)):
+        upgrade.verify_baseline(root, digest, reference, owner=OWNER)
+
+
+@pytest.mark.parametrize("previous", [None, {}, {"wheel_sha256": "a" * 64},
+                                    {"wheel_sha256": "../escape", "release_manifest_sha256": "b" * 64}])
+def test_second_upgrade_manifest_requires_exact_pinned_previous_release(tmp_path, previous):
+    args, manifest = make_release(tmp_path / "release")
+    manifest.update(schema_version=2, previous_upgrade=previous)
+    raw = json.dumps(manifest).encode()
+    write(args.release_manifest, raw)
+    with pytest.raises(upgrade.UpgradeError, match="PREVIOUS_UPGRADE_SCHEMA"):
+        upgrade.read_release(args.release_manifest, hashlib.sha256(raw).hexdigest())
 
 
 @pytest.mark.parametrize("change", ["old14", "stale", "launchers_alive", "host_timer", "wrong_image"])
@@ -216,7 +372,7 @@ class FakeHost:
                     if name in upgrade.SERVICES or name.endswith(".timer"):
                         self.state[name] = "inactive" if action == "stop" else "active"
                 if action == "stop" and "probe-controller.service" in command and self.race:
-                    self.counts["compute_requests"] = 1
+                    self.counts["idle"] = False
                 if action == "start" and "probe-sandbox-acceptance.service" in command:
                     assert self.state["probe-research.service"] == "inactive"
                     if self.fail == "sandbox":
@@ -228,7 +384,7 @@ class FakeHost:
                 assert "HOME=/var/lib/probe-sandbox" in command and command[-4:] == ["ps", "--all", "--quiet", "--no-trunc"]
                 output = (("0" * 64 + "\n") * self.counts["local_containers"]).encode()
             else:
-                assert command[-1] == upgrade.READ_IDLE
+                assert command[-1].endswith(upgrade.READ_IDLE) and "def idle_history_snapshot(" in command[-1]
                 output = json.dumps(self.counts).encode()
         elif command[-1] == upgrade.DEPENDENCIES:
             output = b'[["pydantic", "2.13.5"]]\n'
@@ -241,7 +397,7 @@ class FakeHost:
             if self.fail == "identity":
                 return SimpleNamespace(returncode=1, stdout=b"", stderr=b"identity failed")
             self.counts["audit_events"] += 2
-            write(Path(command[-1]), json.dumps({"passed": True, "paid_actions_performed": False, "check_count": 27, "passed_count": 27}).encode())
+            write(Path(command[-1]), json.dumps(identity_acceptance()).encode())
         return SimpleNamespace(returncode=0, stdout=output, stderr=b"")
 
 
@@ -297,6 +453,52 @@ def test_success_preserves_dependencies_and_enables_only_after_both_gates(host):
     assert stat.S_IMODE((host.operation.work / NAME).stat().st_mode) == 0o600
 
 
+def test_second_upgrade_uses_verified_recovered_wheel_for_rollback(host):
+    current = wheel_bytes(b"VERSION = 'recovered-current'\n")
+    reference, _, _ = save_prior_upgrade(host.root, host.old, current, recovered=True)
+    install_members(current, host.site)
+    release = {**host.release, "schema_version": 2, "previous_upgrade": reference}
+    raw = json.dumps(release).encode()
+    write(host.args.release_manifest, raw)
+    host.args.release_manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    result = host.operation.execute(host.args)
+    assert result["previous_wheel_sha256"] == hashlib.sha256(current).hexdigest()
+    assert (host.operation.work / "rollback" / NAME).read_bytes() == current
+    assert (host.root / NAME).read_bytes() == host.old
+    assert result["previous_upgrade_evidence"][0]["wheel_sha256"] == reference["wheel_sha256"]
+    selected = {"wheel_sha256": release["wheel_sha256"], "release_manifest_sha256": host.args.release_manifest_sha256}
+    assert upgrade.verify_baseline(host.root, host.args.original_manifest_sha256, selected, owner=OWNER)[1] == host.args.wheel.read_bytes()
+
+
+def test_second_upgrade_gate_failure_retains_current_rollback_and_guards(host):
+    current = wheel_bytes(b"VERSION = 'recovered-current'\n")
+    reference, _, _ = save_prior_upgrade(host.root, host.old, current, recovered=True)
+    install_members(current, host.site)
+    raw = json.dumps({**host.release, "schema_version": 2, "previous_upgrade": reference}).encode()
+    write(host.args.release_manifest, raw)
+    host.args.release_manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    host.fake.fail = "identity"
+    with pytest.raises(upgrade.UpgradeError):
+        host.operation.execute(host.args)
+    assert host.operation.closed_after_failure and (host.config / "upgrade-blocked").exists()
+    assert (host.operation.work / "rollback" / NAME).read_bytes() == current
+    assert all(host.fake.state[name] == "inactive" for name in upgrade.GUARDED)
+
+
+def test_failed_previous_completion_refuses_before_any_service_or_installed_code(host):
+    current = wheel_bytes(b"VERSION = 'incomplete'\n")
+    reference, _, receipt = save_prior_upgrade(host.root, host.old, current)
+    receipt.unlink()
+    install_members(current, host.site)
+    raw = json.dumps({**host.release, "schema_version": 2, "previous_upgrade": reference}).encode()
+    write(host.args.release_manifest, raw)
+    host.args.release_manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    with pytest.raises(upgrade.UpgradeError, match="COMPLETION_MISSING"):
+        host.operation.execute(host.args)
+    assert host.fake.commands == [] and not host.operation.changed
+    assert (host.config / "research.json").read_bytes() == host.original_config
+
+
 @pytest.mark.parametrize("failure", ["pip", "sandbox", "identity", "final_restart"])
 def test_failures_leave_persistent_guard_and_disabled_config(host, failure):
     host.fake.fail = failure
@@ -313,10 +515,10 @@ def test_failures_leave_persistent_guard_and_disabled_config(host, failure):
     assert not (host.operation.work / "upgrade-report.json").exists()
 
 
-@pytest.mark.parametrize("failure", ["jobs", "pods", "network_volumes", "local_containers", "manifest", "dependencies"])
+@pytest.mark.parametrize("failure", ["idle", "pods", "local_containers", "manifest", "dependencies"])
 def test_preflight_refusal_does_not_stop_services_or_change_config(host, failure):
     if failure in host.fake.counts:
-        host.fake.counts[failure] = 1
+        host.fake.counts[failure] = False if failure == "idle" else 1
     elif failure == "manifest":
         write(host.args.release_manifest, b"{}")
     else:
@@ -331,10 +533,28 @@ def test_preflight_refusal_does_not_stop_services_or_change_config(host, failure
 
 def test_racing_work_keeps_old_watchdog_and_broker_alive(host):
     host.fake.race = True
-    with pytest.raises(upgrade.UpgradeError, match="PRE_FIRST_JOB_STATE_REQUIRED"):
+    with pytest.raises(upgrade.UpgradeError, match="IDLE_EXECUTION_REQUIRED"):
         host.operation.execute(host.args)
     assert all(host.fake.state[n] == "active" for n in ("probe-watchdog.service", "probe-provider-stop.service"))
     assert not any("pip" in c for c in host.fake.commands)
+
+
+@pytest.mark.parametrize("changed", ["history_sha256", "audit_prefix_sha256"])
+def test_same_count_history_or_audit_changes_abort_before_replacement(host, changed):
+    original_run = host.operation.run
+
+    def mutate_after_stop(command, **kwargs):
+        result = original_run(command, **kwargs)
+        if command[:2] == ["/usr/bin/systemctl", "stop"] and "probe-controller.service" in command:
+            host.fake.counts[changed] = "f" * 64
+        return result
+
+    host.operation.run = mutate_after_stop
+    with pytest.raises(upgrade.UpgradeError, match="HISTORICAL_STATE_CHANGED"):
+        host.operation.execute(host.args)
+    assert host.operation.closed_after_failure
+    assert all(host.fake.state[name] == "active" for name in ("probe-watchdog.service", "probe-provider-stop.service"))
+    assert not any("pip" in command for command in host.fake.commands)
 
 
 def test_failed_persistence_cannot_prevent_both_guard_and_stop_attempts(host):

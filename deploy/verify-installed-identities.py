@@ -4,7 +4,7 @@
 No services, jobs, approvals, provider resources or credentials are modified.
 Harmless research RPC reads append their normal audit records. Only the private
 JSON report is written. Run with /usr/bin/python3 -I, --human and --output.
-This initial-deployment gate requires no jobs, approvals or provider intents.
+Completed history is permitted; active or unresolved execution is refused.
 """
 from __future__ import annotations
 
@@ -158,21 +158,154 @@ def validate_config(users, groups, human, *, config_root=Path("/etc/probe-core")
                 and info.st_gid == groups[group] and stat.S_IMODE(info.st_mode) == 0o660, "SOCKET_METADATA")
 
 
-def state_counts(*, ledger=LEDGER, provider=PROVIDER, worker_id=None):
-    result = {}
-    for path, tables in ((ledger, ("jobs", "approvals", "compute_requests", "audit_events")), (provider, ("runpod_intents",))):
-        connection = sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=3)
-        try:
-            connection.execute("PRAGMA query_only=ON")
-            for table in tables:
-                result[table] = connection.execute("SELECT count(*) FROM " + table).fetchone()[0]
-            if worker_id is not None and path == provider:
-                require(connection.execute("SELECT count(*) FROM runpod_intents WHERE worker_id=?", (worker_id,)).fetchone()[0] == 0,
-                        "PROBE_WORKER_ALREADY_REGISTERED")
-        finally:
-            connection.close()
-    require(all(result[table] == 0 for table in ("jobs", "approvals", "compute_requests", "runpod_intents")), "INITIAL_STATE_NOT_EMPTY")
+# The upgrader extracts this literal from the independently hash-verified checker
+# bytes. Both gates therefore use the same reader, even before a new wheel is
+# installed. It imports no application code and never opens SQLite for writing.
+STATE_READER = r'''
+import base64, hashlib, json, re, sqlite3, time
+from datetime import datetime, timezone
+from pathlib import Path
+
+def _history_require(condition, code):
+    if not condition:
+        raise ValueError(code)
+
+def _history_json(value):
+    def pairs(items):
+        result = {}
+        for key, item in items:
+            _history_require(key not in result, "HISTORY_DUPLICATE_JSON_KEY")
+            result[key] = item
+        return result
+    return json.loads(value, object_pairs_hook=pairs,
+                      parse_constant=lambda _: (_ for _ in ()).throw(ValueError("HISTORY_NONFINITE_JSON")))
+
+def _history_canonical(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+def _history_database(path):
+    connection = sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=3)
+    connection.row_factory = sqlite3.Row
+    until = time.monotonic() + 10
+    connection.set_progress_handler(lambda: int(time.monotonic() > until), 10000)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        _history_require([row[0] for row in connection.execute("PRAGMA integrity_check")] == ["ok"], "DATABASE_INTEGRITY_FAILED")
+        _history_require(not connection.execute("PRAGMA foreign_key_check").fetchall(), "DATABASE_FOREIGN_KEY_FAILED")
+        schema = [list(row) for row in connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")]
+        tables = {}
+        for kind, name, _table, _sql in schema:
+            if kind != "table":
+                continue
+            quoted = '"' + name.replace('"', '""') + '"'
+            rows = [dict(row) for row in connection.execute("SELECT * FROM " + quoted).fetchmany(100001)]
+            _history_require(len(rows) <= 100000, "HISTORY_TOO_LARGE")
+            tables[name] = rows
+        # These are separate database snapshots, not an atomic multi-DB backup.
+        return schema, tables
+    finally:
+        connection.close()
+
+def idle_history_snapshot(ledger, provider, *, worker_id=None, expected=None):
+    schema, tables = _history_database(ledger)
+    provider_schema, provider_tables = _history_database(provider)
+    _history_require({"jobs", "attempts", "approvals", "approval_jobs", "hypotheses", "manifests", "compute_requests", "audit_events"} <= set(tables)
+                     and "runpod_intents" in provider_tables, "HISTORY_SCHEMA_MISSING")
+    jobs, attempts, approvals, requests = (tables[key] for key in ("jobs", "attempts", "approvals", "compute_requests"))
+    intents = provider_tables["runpod_intents"]
+    if worker_id is not None:
+        _history_require(not any(row["worker_id"] == worker_id for row in intents), "PROBE_WORKER_ALREADY_REGISTERED")
+    _history_require(all(row["state"] in {"COMPLETED", "FAILED"} for row in jobs), "NONTERMINAL_JOB_EXISTS")
+    _history_require(all(row["stopped_at"] is not None for row in attempts), "UNSTOPPED_ATTEMPT_EXISTS")
+    approval_by_id = {row["approval_id"]: row for row in approvals}
+    request_by_id = {row["request_id"]: row for row in requests}
+    now = datetime.now(timezone.utc).timestamp()
+    for row in approvals:
+        document = _history_json(row["document"])
+        _history_require(document.get("approval_id") == row["approval_id"], "APPROVAL_DOCUMENT_MISMATCH")
+        if row["consumed_at"] is not None:
+            _history_require(row["ended_at"] is not None and row["deadline"] is not None
+                             and row["ended_at"] >= row["consumed_at"], "UNCLOSED_APPROVAL_EXISTS")
+        else:
+            expiry = datetime.fromisoformat(document["expires_at"].replace("Z", "+00:00"))
+            _history_require(expiry.tzinfo is not None and expiry.timestamp() <= now
+                             and row["deadline"] is None, "UNCONSUMED_AUTHORITY_EXISTS")
+    for row in attempts:
+        _history_require(row["approval_id"] in approval_by_id, "ATTEMPT_APPROVAL_MISSING")
+    for row in requests:
+        state = row["state"]
+        approval = approval_by_id.get(row["approval_id"])
+        linked = [item for item in intents if item["request_key"] == row["request_id"]]
+        if state == "PENDING":
+            # A proposal without a nonce or provider intent is not execution
+            # authority. Preserve it; changing the launch config cannot approve it.
+            _history_require(approval is None and not linked and row["deadline"] is None
+                             and row["observed_provider_id"] is None, "PENDING_REQUEST_HAS_AUTHORITY")
+        else:
+            _history_require(state in {"STOPPED", "REJECTED"}, "UNRESOLVED_COMPUTE_REQUEST")
+            if state == "STOPPED":
+                _history_require(approval is not None and approval["consumed_at"] is not None
+                                 and approval["ended_at"] is not None, "STOPPED_REQUEST_APPROVAL_MISSING")
+        if approval is not None:
+            _history_require(_history_json(approval["document"]).get("pod_id") == row["worker_id"], "REQUEST_APPROVAL_WORKER_MISMATCH")
+    for row in intents:
+        request = request_by_id.get(row["request_key"])
+        _history_require(request is not None and request["state"] == "STOPPED"
+                         and request["worker_id"] == row["worker_id"] and row["provider_id"] is not None
+                         and request["observed_provider_id"] == row["provider_id"]
+                         and request["configuration_hash"] == row["configuration_hash"]
+                         and request["deadline"] == row["deadline"], "UNRESOLVED_PROVIDER_INTENT")
+        configuration = _history_json(row["configuration"])
+        _history_require(configuration == {key: value for key, value in _history_json(request["configuration"]).items() if value is not None}
+                         and "sha256:" + hashlib.sha256(_history_canonical(configuration).encode()).hexdigest() == row["configuration_hash"],
+                         "PROVIDER_CONFIGURATION_MISMATCH")
+    previous = "0" * 64
+    audit = sorted(tables["audit_events"], key=lambda row: row["sequence"])
+    prefix_sequence = expected["audit_events"] if expected is not None else len(audit)
+    prefix = previous if prefix_sequence == 0 else None
+    for sequence, row in enumerate(audit, 1):
+        record = _history_json(row["record"])
+        _history_require(set(record) == {"sequence", "timestamp", "event_type", "payload", "previous_hash", "hash"}
+                         and type(record["sequence"]) is int and row["sequence"] == record["sequence"] == sequence
+                         and record["previous_hash"] == previous and type(record["payload"]) is dict
+                         and type(record["event_type"]) is str
+                         and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}", record["event_type"]), "AUDIT_CHAIN_INVALID")
+        timestamp = datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00"))
+        _history_require(timestamp.tzinfo is not None and record["timestamp"] == timestamp.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"), "AUDIT_TIMESTAMP_INVALID")
+        digest = hashlib.sha256(_history_canonical({key: value for key, value in record.items() if key != "hash"}).encode()).hexdigest()
+        _history_require(row["hash"] == record["hash"] == digest, "AUDIT_HASH_INVALID")
+        previous = digest
+        if sequence == prefix_sequence:
+            prefix = digest
+    def serial(value):
+        if isinstance(value, bytes):
+            return {"sqlite_blob_base64": base64.b64encode(value).decode("ascii")}
+        if isinstance(value, dict):
+            return {key: serial(item) for key, item in value.items()}
+        return value
+    def content(source, *, exclude_audit=False):
+        return {name: sorted(_history_canonical(serial(row)) for row in rows)
+                for name, rows in source.items() if not (exclude_audit and name == "audit_events")}
+    history_hash = hashlib.sha256(_history_canonical({"ledger_schema": schema, "ledger": content(tables, exclude_audit=True),
+                        "provider_schema": provider_schema, "provider": content(provider_tables)}).encode()).hexdigest()
+    result = {key: len(tables[key]) for key in ("jobs", "attempts", "approvals", "compute_requests", "audit_events")}
+    result.update(runpod_intents=len(intents), history_sha256=history_hash, audit_tip=previous,
+                  audit_prefix_sha256=prefix, idle=True, audit_valid=True)
+    if expected is not None:
+        _history_require(result["history_sha256"] == expected["history_sha256"]
+                         and len(audit) >= expected["audit_events"] and prefix == expected["audit_tip"], "HISTORICAL_STATE_CHANGED")
     return result
+'''
+exec(STATE_READER)
+
+
+def state_counts(*, ledger=LEDGER, provider=PROVIDER, worker_id=None, expected=None):
+    try:
+        return idle_history_snapshot(ledger, provider, worker_id=worker_id, expected=expected)
+    except (ValueError, KeyError, TypeError, sqlite3.Error) as error:
+        code = str(error)
+        raise CheckFailure(code if re.fullmatch(r"[A-Z_]{1,80}", code) else "HISTORY_VERIFICATION_FAILED") from None
 
 
 def completed_archive(*, outbox=Path("/var/lib/probe-backups/outbox"), receipts=Path("/var/lib/probe-backups/receipts"), trusted_uid, backup_uid):
@@ -227,8 +360,10 @@ def rpc(check):
         if kind == "lab_status":
             return (type(result) is dict and result.get("gpu_start_authority") is False
                     and result.get("evaluation_authority") is False and type(result.get("jobs")) is list)
-        if kind in ("discovery", "controller_status"):
-            return type(result) is list and not result
+        if kind == "discovery":
+            return type(result) is list and all(type(row) is dict and row.get("state") in ("COMPLETED", "FAILED") for row in result)
+        if kind == "controller_status":
+            return type(result) is list and all(type(row) is dict and row.get("state") in ("PENDING", "STOPPED", "REJECTED") for row in result)
         return (type(result) is dict and result.get("worker_id") == check["worker_id"]
                 and result.get("state") == "ABSENT" and result.get("provider_id") is None)
 
@@ -319,8 +454,9 @@ def acceptance(human):
     checks = {"unit_and_process_identities": True, "installed_config_metadata": True, "completed_backup_present": True}
     for plan in plans(users, groups, memberships, roles, human, archive, worker_id):
         checks.update(run_probe(plan))
-    after = state_counts(worker_id=worker_id)
-    checks["jobs_approvals_provider_intents_unchanged"] = all(before[key] == after[key] for key in before if key != "audit_events")
+    after = state_counts(worker_id=worker_id, expected=before)
+    checks["jobs_approvals_provider_intents_unchanged"] = (before["history_sha256"] == after["history_sha256"]
+        and after["audit_prefix_sha256"] == before["audit_tip"] and after["audit_events"] >= before["audit_events"])
     checks["normal_research_reads_audited"] = after["audit_events"] >= before["audit_events"] + 2
     checks["service_processes_unchanged"] = all(int(unit_values(name)["MainPID"]) == pid for name, pid in pids.items())
     return checks, after["audit_events"] - before["audit_events"]

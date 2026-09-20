@@ -6,6 +6,8 @@ on:
     paths:
       - deploy/gpu/Dockerfile.worker
       - deploy/gpu/bootstrap-requirements.txt
+      - deploy/gpu/public-assets.json
+      - deploy/gpu/bake-assets.py
       - .github/workflows/worker-image.yml
   workflow_dispatch:
     inputs:
@@ -41,7 +43,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and publish locked worker without model weights
+      - name: Build and publish locked worker with verified public calibration assets
         id: image
         uses: docker/build-push-action@v6
         with:
@@ -70,6 +72,7 @@ jobs:
           from pathlib import Path
           record = {key.lower(): os.environ[key] for key in ("IMAGE", "DIGEST", "SOURCE_COMMIT", "DIAGNOSTIC_IMAGE")}
           record.update(environment_lock_hash="sha256:"+hashlib.sha256(Path("uv.lock").read_bytes()).hexdigest(), gpu_acceptance_passed=False)
+          record["public_assets_manifest_sha256"] = "sha256:"+hashlib.sha256(Path("deploy/gpu/public-assets.json").read_bytes()).hexdigest()
           Path("worker-image.json").write_text(json.dumps(record, indent=2)+"\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
               stream.write(f"Built `{record['image']}@{record['digest']}`. GPU acceptance has not run.\n")

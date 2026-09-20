@@ -154,8 +154,11 @@ class Controller:
                 previous = connection.execute(
                     "SELECT configuration FROM compute_requests WHERE worker_id=? AND configuration IS NOT NULL",
                     (worker_id,))
-                if any(json.loads(row[0]).get("storage_mode") == "ephemeral_preflight" for row in previous):
+                modes = {json.loads(row[0]).get("storage_mode") for row in previous}
+                if "ephemeral_preflight" in modes:
                     raise ControllerConflict("ephemeral preflight workers cannot run research jobs")
+                if "disposable_research" in modes and action == "START":
+                    raise ControllerConflict("disposable research requires a newly approved CREATE or REPLACE")
             batch_hash = self._infrastructure_hash(infrastructure, deployment.digest) if infrastructure else Ledger._batch(connection, job_ids)
             for job_id in job_ids:
                 if Ledger._row(connection, job_id)["state"] != JobState.PENDING:
@@ -180,6 +183,9 @@ class Controller:
         if (deployment is not None and deployment.storage_mode == "ephemeral_preflight" and
                 (action != "CREATE" or not infrastructure or infrastructure.get("kind") != "gpu_preflight" or job_ids)):
             raise ControllerConflict("ephemeral storage is restricted to an infrastructure preflight with no research jobs")
+        if (deployment is not None and deployment.storage_mode == "disposable_research" and
+                (action not in {"CREATE", "REPLACE"} or infrastructure is not None or not job_ids)):
+            raise ControllerConflict("disposable research requires CREATE or REPLACE with an approved research batch")
 
     def request_start(self, worker_id: str, job_ids: list[str], max_runtime_seconds: int) -> dict:
         return self._request("START", worker_id, job_ids, max_runtime_seconds)
@@ -292,7 +298,21 @@ class Controller:
                 if self.backend.status(request["worker_id"]).state != WorkerState.ABSENT:
                     raise ControllerConflict("reserved creation identity already exists")
                 if request["replaces_worker_id"] is not None:
-                    if self.backend.status(request["replaces_worker_id"]).state != WorkerState.STOPPED:
+                    prior = self.backend.status(request["replaces_worker_id"])
+                    deleted_disposable = False
+                    if (deployment.storage_mode == "disposable_research" and prior.state == WorkerState.ABSENT
+                            and prior.worker_id == request["replaces_worker_id"] and prior.provider_id is not None):
+                        with self.ledger.read_connection() as connection:
+                            previous = connection.execute("SELECT state,observed_provider_id,configuration FROM compute_requests WHERE worker_id=?",
+                                                          (request["replaces_worker_id"],)).fetchall()
+                        # An empty provider lookup alone cannot close authority.
+                        # A disposable identity has exactly one approved interval;
+                        # its prior controller shutdown must already be complete.
+                        deleted_disposable = (len(previous) == 1 and previous[0]["state"] == "STOPPED"
+                            and previous[0]["observed_provider_id"] == prior.provider_id
+                            and previous[0]["configuration"] is not None
+                            and json.loads(previous[0]["configuration"]).get("storage_mode") == "disposable_research")
+                    if prior.state != WorkerState.STOPPED and not deleted_disposable:
                         raise ControllerConflict("replacement requires the previous worker to be confirmed stopped")
             quote = self.backend.quote(worker_id=request["worker_id"] if deployment is None else None,
                                        deployment=deployment)

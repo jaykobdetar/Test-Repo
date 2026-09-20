@@ -280,8 +280,19 @@ class RunPodProvider:
         provider_id = _identifier(pod.get("id"))
         spec = DeploymentSpec.model_validate_json(intent["configuration"])
         launch = RunPodLaunchConfig.model_validate_json(intent["launch_configuration"])
-        mounts = pod.get("mounts", {}).get("network", [])
-        if spec.storage_mode == "ephemeral_preflight":
+        reported = pod.get("mounts")
+        mounts = reported.get("network", []) if type(reported) is dict else []
+        if spec.storage_mode == "disposable_research":
+            # Absence of a complete mounts field is not proof of zero storage.
+            # Reject unknown mount kinds and malformed/ambiguous persistent
+            # entries rather than treating falsy values as an empty inventory.
+            persistent = reported.get("persistent") if type(reported) is dict else None
+            storage_matches = (type(reported) is dict and not set(reported) - {"network", "persistent"}
+                and reported.get("network", []) == []
+                and (persistent is None or (type(persistent) is dict
+                    and not set(persistent) - {"size", "path"}
+                    and type(persistent.get("size")) is int and persistent["size"] == 0)))
+        elif spec.storage_mode == "ephemeral_preflight":
             persistent = pod.get("mounts", {}).get("persistent")
             storage_matches = not mounts and (persistent is None or persistent == {} or
                                               (type(persistent) is dict and persistent.get("size") == 0))
@@ -354,7 +365,7 @@ class RunPodProvider:
         if type(body) is not dict or type(body.get("networkVolumes")) is not list:
             raise ProviderResponseError("invalid network volume inventory")
         volumes = body["networkVolumes"]
-        if deployment.storage_mode != "ephemeral_preflight":
+        if deployment.storage_mode not in {"ephemeral_preflight", "disposable_research"}:
             target = [v for v in volumes if v.get("id") == deployment.volume_id]
             if len(target) != 1 or target[0].get("size") != deployment.volume_gb or target[0].get("dataCenter") != deployment.region:
                 raise ProviderCapabilityError("approved persistent volume must already exist in the exact size and data center")
@@ -369,7 +380,7 @@ class RunPodProvider:
 
     def quote(self, *, worker_id=None, deployment=None):
         if worker_id is not None:
-            raise ProviderCapabilityError("RunPod resume lacks an atomic price ceiling; request a replacement using the existing network volume")
+            raise ProviderCapabilityError("RunPod resume lacks an atomic price ceiling; request a newly approved replacement")
         if deployment is None:
             raise ValueError("deployment is required")
         self._check_spec(deployment)
@@ -388,7 +399,7 @@ class RunPodProvider:
         return PriceQuote(float(price), float(storage), self.clock())
 
     def start(self, worker_id, **kwargs):
-        raise ProviderCapabilityError("RunPod resumes are disabled; create an approved replacement with the retained network volume")
+        raise ProviderCapabilityError("RunPod resumes are disabled; create a newly approved replacement")
 
     def create(self, worker_id, deployment, *, request_key, price_ceiling_usd_per_hour,
                storage_ceiling_usd_per_day, absolute_deadline=None):
@@ -420,7 +431,7 @@ class RunPodProvider:
                 "startSsh": launch.start_ssh, "startJupyter": False, "ports": ",".join(launch.ports),
                 "stopAfter": absolute_deadline.astimezone(UTC).isoformat(),
                 "env": [{"key": key, "value": value} for key, value in env.items()]}
-        if deployment.storage_mode != "ephemeral_preflight":
+        if deployment.storage_mode not in {"ephemeral_preflight", "disposable_research"}:
             body.update(networkVolumeId=deployment.volume_id, volumeMountPath="/workspace")
         validate_audit_payload(body)
         if self.clock() >= absolute_deadline:

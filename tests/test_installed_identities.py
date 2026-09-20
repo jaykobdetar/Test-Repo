@@ -1,5 +1,5 @@
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
@@ -15,9 +15,13 @@ from types import SimpleNamespace
 import pytest
 
 from probe_core.ledger import Ledger
+from probe_core.audit import canonical_json
+from probe_core.controller import Controller
+from probe_core.provider import DeploymentSpec
 from probe_core.research_api import ResearchPolicy, ResearchService
 from probe_core.rpc import UnixRPCServer
 from probe_core.runpod_provider import RunPodConfig, RunPodLaunchConfig, RunPodProvider, StorageRates
+from probe_core.schemas import ApprovalNonce, JobSpec
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -155,6 +159,17 @@ def test_unexpected_status_contract_fails_without_disclosing_payload(rpc_server,
     assert "PRIVATE" not in json.dumps(result)
 
 
+@pytest.mark.parametrize("kind,states,allowed", [
+    ("discovery", ["COMPLETED", "FAILED"], True),
+    ("discovery", ["COMPLETED", "RUNNING"], False),
+    ("controller_status", ["STOPPED", "REJECTED", "PENDING"], True),
+    ("controller_status", ["STOPPED", "UNCERTAIN"], False),
+])
+def test_rpc_idle_views_retain_history_but_reject_active_states(rpc_server, kind, states, allowed):
+    path = rpc_server(lambda method, params: [{"state": state} for state in states])
+    assert child([rpc_check(path, kind)])["checks"]["rpc_access"] is allowed
+
+
 def test_runuser_receives_exact_groups_and_accessible_cwd(tmp_path, monkeypatch):
     path = tmp_path / "readable"
     path.write_text("content")
@@ -260,23 +275,160 @@ def test_failed_backup_cannot_pass_as_completed(installed_units):
         inspect(installed_units)
 
 
-def test_state_gate_preserves_existing_audit_and_refuses_work(tmp_path):
+def history_fixture(tmp_path, *, closed=True, pending=False):
     ledger, provider = tmp_path / "ledger.sqlite", tmp_path / "provider.sqlite"
-    with closing(sqlite3.connect(ledger)) as connection, connection:
-        for table in ("jobs", "approvals", "compute_requests", "audit_events"):
-            connection.execute("CREATE TABLE " + table + "(value TEXT)")
-        connection.execute("INSERT INTO audit_events VALUES ('existing audit must remain')")
+    now = datetime.now(timezone.utc)
+    RunPodProvider(RunPodConfig(state_path=str(provider), api_key_file=str(tmp_path / "unused-key"),
+        launch=RunPodLaunchConfig(image_repository="example/worker"), storage_rates=StorageRates(checked_at=now)))
+    deployment = DeploymentSpec(gpu_model="NVIDIA GeForce RTX 4090", image_digest="sha256:" + "a" * 64,
+        image_repository="example/worker", launch_config_hash="sha256:" + "b" * 64,
+        storage_mode="ephemeral_preflight", volume_gb=0, region="EU-RO-1")
+    with Ledger(ledger, clock=lambda: now) as core:
+        controller = Controller(core, object(), watchdog_health_path=tmp_path / "unused-health", controller_idle_usd_per_day=0)
+        request = controller.request_infrastructure_preflight(deployment, "sha256:" + "c" * 64, 60)
+        if pending:
+            return ledger, provider, request
+        nonce = ApprovalNonce(approval_id=request["approval_id"], token="synthetic-test-value-" + "x" * 48,
+            pod_id=request["worker_id"], batch_hash=request["batch_hash"], purpose="infrastructure_preflight",
+            max_runtime_seconds=60, price_ceiling_usd_per_hour=0.8, issued_at=now, expires_at=now + timedelta(minutes=5))
+        core.register_approval(nonce)
+        grant = core.consume_infrastructure_approval(nonce.approval_id, nonce.token.get_secret_value(),
+            infrastructure_hash=request["batch_hash"], pod_id=request["worker_id"], live_price_usd_per_hour=0.74, requested_runtime_seconds=60)
+        controller._state(request["request_id"], "STOPPED" if closed else "RUNNING", deadline=grant.deadline.timestamp(), provider_id="owned-test-pod")
+        if closed:
+            core.end_approval(nonce.approval_id)
     with closing(sqlite3.connect(provider)) as connection, connection:
-        connection.execute("CREATE TABLE runpod_intents(worker_id TEXT)")
+        connection.execute("INSERT INTO runpod_intents VALUES(?,?,?,?,?,?,?,?,?,?)", (
+            request["worker_id"], request["request_id"], canonical_json(deployment.model_dump(exclude_none=True)), deployment.digest,
+            grant.deadline.timestamp(), "owned-test-pod", now.timestamp(), "{}", 0.8, 1))
+    return ledger, provider, request
+
+
+def test_state_gate_preserves_completed_history_and_checks_probe_identity(tmp_path):
+    ledger, provider, request = history_fixture(tmp_path)
     before = ledger.read_bytes(), provider.read_bytes()
     result = verify.state_counts(ledger=ledger, provider=provider, worker_id="identity-check-test")
-    assert result["audit_events"] == 1 and (ledger.read_bytes(), provider.read_bytes()) == before
-    with closing(sqlite3.connect(provider)) as connection, connection:
-        connection.execute("INSERT INTO runpod_intents VALUES ('identity-check-test')")
+    assert result["audit_events"] > 1 and result["approvals"] == result["runpod_intents"] == 1
+    assert result["idle"] and result["audit_valid"] and (ledger.read_bytes(), provider.read_bytes()) == before
     with pytest.raises(verify.CheckFailure, match="PROBE_WORKER_ALREADY_REGISTERED"):
-        verify.state_counts(ledger=ledger, provider=provider, worker_id="identity-check-test")
-    with pytest.raises(verify.CheckFailure, match="INITIAL_STATE_NOT_EMPTY"):
+        verify.state_counts(ledger=ledger, provider=provider, worker_id=request["worker_id"])
+
+
+def test_unapproved_pending_proposal_without_authority_is_retained(tmp_path):
+    ledger, provider, _ = history_fixture(tmp_path, pending=True)
+    result = verify.state_counts(ledger=ledger, provider=provider)
+    assert result["compute_requests"] == 1 and result["approvals"] == result["runpod_intents"] == 0
+
+
+def test_consumed_unclosed_interval_refuses_upgrade_even_after_wall_deadline(tmp_path):
+    ledger, provider, _ = history_fixture(tmp_path, closed=False)
+    with closing(sqlite3.connect(ledger)) as connection, connection:
+        connection.execute("UPDATE approvals SET deadline=1")
+    with pytest.raises(verify.CheckFailure, match="UNCLOSED_APPROVAL_EXISTS"):
         verify.state_counts(ledger=ledger, provider=provider)
+
+
+@pytest.mark.parametrize("state", ["PENDING", "DISPATCHED", "RUNNING", "FINALIZING", "COMPLETED", "FAILED"])
+def test_job_gate_rejects_all_nonterminal_states(tmp_path, state):
+    ledger, provider, _ = history_fixture(tmp_path)
+    manifest = json.loads((PROJECT / "tests/fixtures/manifest.json").read_text())
+    with Ledger(ledger) as core:
+        job = core.submit_job(JobSpec(idempotency_key="preserved-job", model=manifest["model"], inputs=manifest["inputs"],
+            operation={"kind": "capture", "modules": [{"layer": 0, "component": "residual"}], "positions": ["last"]},
+            limits={"max_runtime_seconds": 60, "max_output_bytes": 1000000}))
+    with closing(sqlite3.connect(ledger)) as connection, connection:
+        connection.execute("UPDATE jobs SET state=? WHERE job_id=?", (state, job.job_id))
+    if state in {"COMPLETED", "FAILED"}:
+        assert verify.state_counts(ledger=ledger, provider=provider)["jobs"] == 1
+    else:
+        with pytest.raises(verify.CheckFailure, match="NONTERMINAL_JOB_EXISTS"):
+            verify.state_counts(ledger=ledger, provider=provider)
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_unconsumed_nonce_is_only_idle_after_expiry(tmp_path, expired):
+    ledger, provider, _ = history_fixture(tmp_path)
+    now = datetime.now(timezone.utc)
+    issued = now - timedelta(minutes=10)
+    expiry = now + timedelta(minutes=-1 if expired else 1)
+    with Ledger(ledger, clock=lambda: issued) as core:
+        core.register_approval(ApprovalNonce(approval_id="unused-test-approval", token="synthetic-unconsumed-" + "z" * 48,
+            pod_id="unused-test-worker", batch_hash="sha256:" + "d" * 64, purpose="infrastructure_preflight",
+            max_runtime_seconds=60, price_ceiling_usd_per_hour=0.8, issued_at=issued, expires_at=expiry))
+    if expired:
+        assert verify.state_counts(ledger=ledger, provider=provider)["approvals"] == 2
+    else:
+        with pytest.raises(verify.CheckFailure, match="UNCONSUMED_AUTHORITY_EXISTS"):
+            verify.state_counts(ledger=ledger, provider=provider)
+
+
+def test_pending_proposal_with_even_closed_authority_requires_reconciliation(tmp_path):
+    ledger, provider, _ = history_fixture(tmp_path)
+    with closing(sqlite3.connect(ledger)) as connection, connection:
+        connection.execute("UPDATE compute_requests SET state='PENDING'")
+    with pytest.raises(verify.CheckFailure, match="PENDING_REQUEST_HAS_AUTHORITY"):
+        verify.state_counts(ledger=ledger, provider=provider)
+
+
+def test_terminal_job_with_unstopped_attempt_still_refuses_upgrade(tmp_path):
+    ledger, provider, request = history_fixture(tmp_path)
+    manifest = json.loads((PROJECT / "tests/fixtures/manifest.json").read_text())
+    with Ledger(ledger) as core:
+        job = core.submit_job(JobSpec(idempotency_key="orphaned-attempt-job", model=manifest["model"], inputs=manifest["inputs"],
+            operation={"kind": "capture", "modules": [{"layer": 0, "component": "residual"}], "positions": ["last"]},
+            limits={"max_runtime_seconds": 60, "max_output_bytes": 1000000}))
+    with closing(sqlite3.connect(ledger)) as connection, connection:
+        connection.execute("UPDATE jobs SET state='FAILED' WHERE job_id=?", (job.job_id,))
+        connection.execute("INSERT INTO attempts(attempt_id,job_id,attempt_number,worker_id,approval_id,dispatched_at,heartbeat_at,lease_expires_at,execution_deadline) VALUES(?,?,?,?,?,?,?,?,?)",
+                           ("orphaned-attempt", job.job_id, 1, request["worker_id"], request["approval_id"], 1, 1, 2, 2))
+    with pytest.raises(verify.CheckFailure, match="UNSTOPPED_ATTEMPT_EXISTS"):
+        verify.state_counts(ledger=ledger, provider=provider)
+
+
+@pytest.mark.parametrize("fault", ["unbound", "wrong_worker", "wrong_configuration", "unknown_request"])
+def test_provider_mapping_must_be_complete_and_consistent(tmp_path, fault):
+    ledger, provider, _ = history_fixture(tmp_path)
+    statement = {"unbound": "UPDATE runpod_intents SET provider_id=NULL",
+                 "wrong_worker": "UPDATE runpod_intents SET worker_id='other'",
+                 "wrong_configuration": "UPDATE runpod_intents SET configuration='{}'",
+                 "unknown_request": "UPDATE runpod_intents SET request_key='other'"}[fault]
+    with closing(sqlite3.connect(provider)) as connection, connection:
+        connection.execute(statement)
+    with pytest.raises(verify.CheckFailure, match="UNRESOLVED_PROVIDER_INTENT|PROVIDER_CONFIGURATION_MISMATCH"):
+        verify.state_counts(ledger=ledger, provider=provider)
+
+
+@pytest.mark.parametrize("fault", ["same_count_row_edit", "audit_edit", "audit_suffix_loss", "extra_table_edit"])
+def test_all_historical_rows_and_audit_prefix_are_preserved(tmp_path, fault):
+    ledger, provider, _ = history_fixture(tmp_path)
+    with closing(sqlite3.connect(ledger)) as connection, connection:
+        connection.execute("CREATE TABLE retained_extension(value TEXT)")
+        connection.execute("INSERT INTO retained_extension VALUES('original')")
+    before = verify.state_counts(ledger=ledger, provider=provider)
+    with closing(sqlite3.connect(ledger)) as connection, connection:
+        if fault == "same_count_row_edit":
+            connection.execute("UPDATE approvals SET token_hash='changed-synthetic-hash'")
+        elif fault == "extra_table_edit":
+            connection.execute("UPDATE retained_extension SET value='changed'")
+        elif fault == "audit_edit":
+            connection.execute("DROP TRIGGER audit_no_update")
+            connection.execute("UPDATE audit_events SET hash=? WHERE sequence=1", ("f" * 64,))
+        else:
+            connection.execute("DROP TRIGGER audit_no_delete")
+            connection.execute("DELETE FROM audit_events WHERE sequence=(SELECT max(sequence) FROM audit_events)")
+    with pytest.raises(verify.CheckFailure, match="HISTORICAL_STATE_CHANGED|AUDIT_HASH_INVALID"):
+        verify.state_counts(ledger=ledger, provider=provider, expected=before)
+
+
+def test_valid_audit_appends_preserve_old_prefix(tmp_path):
+    ledger, provider, _ = history_fixture(tmp_path)
+    before = verify.state_counts(ledger=ledger, provider=provider)
+    with Ledger(ledger) as core:
+        core.record_event("tool_call", {"tool": "query_runs"})
+    after = verify.state_counts(ledger=ledger, provider=provider, expected=before)
+    assert after["audit_events"] > before["audit_events"]
+    assert after["audit_prefix_sha256"] == before["audit_tip"]
+    assert after["history_sha256"] == before["history_sha256"]
 
 
 def test_completed_archive_requires_exact_hash_and_full_verification_receipt(tmp_path):
@@ -412,7 +564,8 @@ def test_orchestration_preserves_prior_audit_and_checks_service_continuity(insta
     monkeypatch.setattr(verify, "inspect_units", lambda *args: (roles, pids))
     monkeypatch.setattr(verify, "validate_config", lambda *args: None)
     monkeypatch.setattr(verify, "completed_archive", lambda **kwargs: Path("/verified/archive.tar"))
-    states = [{"jobs": 0, "approvals": 0, "compute_requests": 0, "runpod_intents": 0, "audit_events": count}
+    states = [{"jobs": 0, "approvals": 0, "compute_requests": 0, "runpod_intents": 0, "audit_events": count,
+               "history_sha256": "a" * 64, "audit_tip": "b" * 64, "audit_prefix_sha256": "b" * 64}
               for count in (9, audit_after)]
     workers = []
 

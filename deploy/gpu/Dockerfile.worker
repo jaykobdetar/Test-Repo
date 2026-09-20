@@ -3,6 +3,9 @@ ARG DIAGNOSTIC_IMAGE
 FROM ${DIAGNOSTIC_IMAGE}
 ARG SOURCE_COMMIT
 WORKDIR /opt/probe-core
+COPY deploy/gpu/public-assets.json /opt/probe-core/public-assets.json
+COPY deploy/gpu/bake-assets.py /tmp/bake-assets.py
+RUN python /tmp/bake-assets.py /opt/probe-core/public-assets.json /opt/probe-assets && rm /tmp/bake-assets.py
 COPY deploy/gpu/bootstrap-requirements.txt /tmp/bootstrap-requirements.txt
 RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes --no-deps -r /tmp/bootstrap-requirements.txt && rm /tmp/bootstrap-requirements.txt
 COPY pyproject.toml uv.lock README.md LICENSE ./

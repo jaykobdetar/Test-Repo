@@ -137,15 +137,16 @@ def test_create_binds_image_approval_deadline_and_atomic_provider_price_ceiling(
     assert backend.capabilities()["host_loss_guarantee"] == "unverified"
 
 
-def ephemeral(runpod):
+def ephemeral(runpod, mode="ephemeral_preflight"):
     backend, http, clock, spec = runpod
     values = spec.model_dump()
-    values.update(storage_mode="ephemeral_preflight", volume_id=None, volume_gb=0)
+    values.update(storage_mode=mode, volume_id=None, volume_gb=0)
     return backend, http, clock, DeploymentSpec.model_validate(values)
 
 
-def test_ephemeral_preflight_creates_no_persistent_storage_and_reconciles_after_restart(runpod):
-    runpod = ephemeral(runpod)
+@pytest.mark.parametrize("mode", ["ephemeral_preflight", "disposable_research"])
+def test_disposable_create_has_no_persistent_storage_and_reconciles_after_restart(runpod, mode):
+    runpod = ephemeral(runpod, mode)
     backend, http, clock, spec = runpod
     http.volumes.clear()
     quote = backend.quote(deployment=spec)
@@ -166,16 +167,62 @@ def test_ephemeral_preflight_creates_no_persistent_storage_and_reconciles_after_
     assert reopened.status("worker1").state == WorkerState.ABSENT
     assert http.pods == []
     assert len(http.purchases) == 1
+    with pytest.raises(ProviderCapabilityError, match="resumes are disabled"):
+        reopened.start("worker1", request_key="never-resume", price_ceiling_usd_per_hour=.8,
+                       storage_ceiling_usd_per_day=1.9, absolute_deadline=clock() + timedelta(seconds=60))
+    assert len(http.purchases) == 1
 
 
-def test_ephemeral_preflight_still_counts_and_limits_all_account_storage(runpod):
-    runpod = ephemeral(runpod)
+@pytest.mark.parametrize("mode", ["ephemeral_preflight", "disposable_research"])
+def test_disposable_still_counts_and_limits_all_account_storage(runpod, mode):
+    runpod = ephemeral(runpod, mode)
     backend, http, _, spec = runpod
     http.volumes.append({"id": "detached-old", "size": 1000, "dataCenter": "US-TX-3", "type": "STANDARD"})
     assert backend.quote(deployment=spec).projected_storage_usd_per_day == pytest.approx(1100 * .07 / 28)
     with pytest.raises(ProviderBudgetRefused):
         create(runpod)
     assert http.purchases == []
+
+
+@pytest.mark.parametrize("reported", [{}, {"network": []}, {"network": [], "persistent": None},
+                                     {"network": [], "persistent": {"size": 0, "path": "/workspace"}}])
+def test_disposable_research_requires_explicit_empty_or_zero_mount_inventory(runpod, reported):
+    runpod = ephemeral(runpod, "disposable_research")
+    backend, http, _, _ = runpod
+    create(runpod)
+    http.pods[0]["mounts"] = reported
+    assert backend.status("worker1").state == WorkerState.RUNNING
+
+
+@pytest.mark.parametrize("reported", [None, [], "missing", {"network": None},
+    {"network": [{"volumeId": "unexpected", "path": "/workspace"}]},
+    {"persistent": {}}, {"persistent": {"size": 1}}, {"persistent": {"size": False}},
+    {"network": [], "global": [{"volumeId": "unapproved"}]}])
+def test_disposable_research_rejects_ambiguous_or_unapproved_storage(runpod, reported):
+    runpod = ephemeral(runpod, "disposable_research")
+    backend, http, _, _ = runpod
+    create(runpod)
+    if reported == "missing":
+        http.pods[0].pop("mounts")
+    else:
+        http.pods[0]["mounts"] = reported
+    with pytest.raises(ProviderUncertain, match="configuration differs"):
+        backend.status("worker1")
+    backend.stop("worker1")
+    assert http.pods == [] and len(http.purchases) == 1
+
+
+def test_disposable_research_loss_is_absent_without_replay_or_storage_recovery(runpod):
+    runpod = ephemeral(runpod, "disposable_research")
+    backend, http, clock, spec = runpod
+    initial = create(runpod)
+    http.pods.clear()  # Provider has lost the Pod and its disposable filesystem.
+    reopened = RunPodProvider(backend.config, transport=http, clock=clock)
+    result = reopened.status("worker1")
+    assert result.state == WorkerState.ABSENT and result.provider_id == initial.provider_id
+    with pytest.raises(ProviderUncertain, match="already consumed"):
+        create((reopened, http, clock, spec))
+    assert len(http.purchases) == 1
 
 
 @pytest.mark.parametrize("unexpected", [
@@ -200,8 +247,12 @@ def test_ephemeral_preflight_rejects_unapproved_persistent_storage_readback(runp
     {"storage_mode": "ephemeral_preflight", "volume_id": None, "volume_gb": 1},
     {"storage_mode": "ephemeral_preflight", "volume_id": None, "volume_gb": 0, "launch_config_hash": None},
     {"storage_mode": "ephemeral_research", "volume_id": None, "volume_gb": 0},
+    {"storage_mode": "disposable_research"},
+    {"storage_mode": "disposable_research", "volume_id": None, "volume_gb": 1},
+    {"storage_mode": "disposable_research", "volume_id": None, "volume_gb": 0, "launch_config_hash": None},
+    {"storage_mode": "disposable_research", "volume_id": None, "volume_gb": 0, "image_repository": None},
 ])
-def test_only_explicit_image_bound_preflight_can_omit_a_volume(runpod, overrides):
+def test_only_explicit_image_bound_disposable_modes_can_omit_a_volume(runpod, overrides):
     values = runpod[3].model_dump()
     values.update(overrides)
     with pytest.raises(ValueError):

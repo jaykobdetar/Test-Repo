@@ -13,7 +13,12 @@ controller process crash, but shares the host's power and network failure modes.
   `storage_mode="ephemeral_preflight"`, `volume_id=null`, and `volume_gb=0`.
   It binds the exact image and launch configuration and creates no retained
   volume. That worker cannot later acquire a research-job allowance; research
-  creation and replacement continue to require persistent storage.
+  creation and replacement use their own explicit storage contract.
+- Research may set `storage_mode="disposable_research"`, `volume_id=null`, and
+  `volume_gb=0`. This creates no persistent storage. The pinned image supplies
+  public model assets; canonical outputs are fetched, verified and sealed on the
+  controller before success. Incomplete output lost with a Pod is failed or
+  inconclusive. It never silently resumes or replays.
 - Quote the GPU price from the live catalog, add a conservative container-disk
   charge, and count all account Standard network volumes and retained Pod disks.
 - Submit one GraphQL `podFindAndDeployOnDemand` mutation with `deployCost` below
@@ -28,8 +33,10 @@ controller process crash, but shares the host's power and network failure modes.
   Absence of a previously observed, durably bound Pod confirms release; an
   unbound or newly created Pod's first 404 remains uncertain. `ERROR`, nonzero
   billed cost and inconsistent runtime remain uncertain.
-- Replace a stopped worker with a fresh approved Pod using the same network
-  volume. Resume is disabled because its API lacks an atomic purchase ceiling.
+- Replace a stopped worker with a fresh approved Pod. For disposable research,
+  a verified absent Pod requires the matching durable STOPPED request and physical
+  identity before replacement. Persistent deployments retain their network volume.
+  Resume is disabled because its API lacks an atomic purchase ceiling.
 
 No network volume is created or deleted by this adapter. High Performance or
 unknown storage tiers anywhere in the account require a separate reviewed rate
@@ -98,7 +105,7 @@ nonce cannot be consumed as an infrastructure allowance.
   establish release.
 - [Terminate a Pod](https://docs.runpod.io/api-reference-v2/pods/terminate-a-pod):
   permanent termination releases compute. The adapter uses this operation
-  because Pod resume is unsupported and durable assets are on network volumes.
+  because Pod resume is unsupported and canonical results belong on the controller.
   Repeated DELETE is safe for the exact owned identity; conflicts and transport
   errors remain uncertain until a separate positive readback.
 - [GraphQL schema](https://graphql-spec.runpod.io/): initial on-demand create has

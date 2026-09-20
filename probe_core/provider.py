@@ -21,7 +21,7 @@ from .audit import canonical_json
 
 
 class DeploymentSpec(BaseModel):
-    """Immutable provisioning config; ephemeral storage is infrastructure-only."""
+    """Immutable provisioning config with explicit disposable execution scope."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
     gpu_model: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_. -]+$")
@@ -33,15 +33,15 @@ class DeploymentSpec(BaseModel):
     image_repository: str | None = Field(default=None, max_length=200,
                                          pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
     launch_config_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
-    storage_mode: Literal["ephemeral_preflight"] | None = None
+    storage_mode: Literal["ephemeral_preflight", "disposable_research"] | None = None
 
     @model_validator(mode="after")
     def storage_scope(self):
-        if self.storage_mode == "ephemeral_preflight":
+        if self.storage_mode in {"ephemeral_preflight", "disposable_research"}:
             if self.volume_id is not None or self.volume_gb != 0:
-                raise ValueError("ephemeral preflight cannot attach persistent storage")
+                raise ValueError("disposable deployments cannot attach persistent storage")
             if self.image_repository is None or self.launch_config_hash is None:
-                raise ValueError("ephemeral preflight must bind the exact trusted launch configuration")
+                raise ValueError("disposable deployments must bind the exact trusted launch configuration")
         elif self.volume_id is None or self.volume_gb < 1:
             raise ValueError("research deployments require a persistent volume")
         return self
