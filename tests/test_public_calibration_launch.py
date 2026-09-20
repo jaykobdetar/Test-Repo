@@ -116,3 +116,15 @@ def test_copied_result_mutation_rejected(copied_results,mutation):
         if mutation=='deadline':m['absolute_deadline']='2099-01-01T00:00:00+00:00'
         p.write_text(json.dumps(m))
     with pytest.raises(ValueError):runner.verify_results(directory,record)
+
+def test_guard_loads_real_json_roundtrip(tmp_path,monkeypatch):
+    from datetime import datetime,timezone
+    from probe_core.runpod_provider import RunPodConfig,RunPodLaunchConfig,StorageRates
+    provider=RunPodConfig(state_path=str(tmp_path/'state.sqlite'),api_key_file=str(tmp_path/'unused-key'),
+        launch=RunPodLaunchConfig(image_repository='ghcr.io/example/image',ports=('22/tcp',)),
+        storage_rates=StorageRates(checked_at=datetime.now(timezone.utc)))
+    record={'provider':provider.model_dump(mode='json'),'deadline':time.time()-1,'worker_id':'worker'}
+    (tmp_path/'run.json').write_text(json.dumps(record))
+    monkeypatch.setattr(sys,'argv',['runner','guard',str(tmp_path)])
+    assert runner.main()==0
+    assert json.loads((tmp_path/'guard-stop.json').read_text())=={'confirmed':True,'created':False}

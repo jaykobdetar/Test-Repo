@@ -207,7 +207,7 @@ def run(directory, record, provider):
 def main():
     p=argparse.ArgumentParser();p.add_argument('mode',choices=['guard','run']);p.add_argument('directory',type=Path)
     a=p.parse_args();directory=a.directory.resolve();record=json.loads((directory/'run.json').read_text())
-    provider=RunPodProvider(RunPodConfig.model_validate(record['provider']))
+    provider=RunPodProvider(RunPodConfig.model_validate_json(json.dumps(record['provider'])))
     if a.mode=='guard':
         guard(directory,record,provider)
         return 0
