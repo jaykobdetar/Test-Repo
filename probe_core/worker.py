@@ -557,21 +557,38 @@ class WorkerEngine:
 
 
 def _block_network() -> None:
-    """Install an irreversible Linux seccomp deny rule for new network sockets."""
+    """Allow CUDA's local socket creation while denying network/socket sends."""
+    import socket
+
+    class ScmpArgCompare(ctypes.Structure):
+        # libseccomp's struct scmp_arg_cmp: uint, enum, uint64, uint64.
+        _fields_ = [("arg", ctypes.c_uint), ("op", ctypes.c_int),
+                    ("datum_a", ctypes.c_uint64), ("datum_b", ctypes.c_uint64)]
+
     library = ctypes.CDLL("libseccomp.so.2", use_errno=True)
     library.seccomp_init.argtypes = [ctypes.c_uint32]
     library.seccomp_init.restype = ctypes.c_void_p
     library.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
-    library.seccomp_rule_add.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint]
+    library.seccomp_syscall_resolve_name.restype = ctypes.c_int
+    library.seccomp_rule_add_array.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int,
+                                              ctypes.c_uint, ctypes.POINTER(ScmpArgCompare)]
+    library.seccomp_rule_add_array.restype = ctypes.c_int
     library.seccomp_load.argtypes = [ctypes.c_void_p]
+    library.seccomp_load.restype = ctypes.c_int
     library.seccomp_release.argtypes = [ctypes.c_void_p]
+    library.seccomp_release.restype = None
     context = library.seccomp_init(0x7FFF0000)  # SCMP_ACT_ALLOW
     if not context:
         raise WorkerRequestError("cannot create network-denial seccomp policy")
     try:
+        # SCMP_CMP_NE compares socket's domain argument, not descriptor numbers
+        # or type flags. CUDA needs AF_UNIX creation during driver initialization.
+        non_unix = (ScmpArgCompare * 1)(ScmpArgCompare(0, 1, socket.AF_UNIX, 0))
         for name in (b"socket", b"connect", b"sendto", b"sendmsg"):
             syscall = library.seccomp_syscall_resolve_name(name)
-            if syscall < 0 or library.seccomp_rule_add(context, 0x00050000 | errno.EPERM, syscall, 0) != 0:
+            count, comparisons = (1, non_unix) if name == b"socket" else (0, None)
+            if syscall < 0 or library.seccomp_rule_add_array(
+                    context, 0x00050000 | errno.EPERM, syscall, count, comparisons) != 0:
                 raise WorkerRequestError("cannot install network-denial syscall rule")
         if library.seccomp_load(context) != 0:
             raise WorkerRequestError("cannot activate network-denial seccomp policy")
