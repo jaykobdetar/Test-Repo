@@ -34,6 +34,14 @@ from .schemas import ApprovalNonce, JobSpec
 UTC = timezone.utc
 _TERMINAL = {"STOPPED", "REJECTED"}
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
+_RECONCILE_ERROR_TYPES = frozenset({
+    "ProviderHTTPError", "ProviderResponseError", "ProviderUncertain",
+    "TimeoutError", "PermissionError", "OSError", "ConnectionError",
+    "ValueError", "TypeError", "KeyError", "AttributeError", "RuntimeError",
+    "JSONDecodeError", "ValidationError",
+})
+_REQUEST_STATES = frozenset({"PENDING", "PREPARING", "STARTING", "RUNNING",
+                             "STOP_REQUESTED", "UNCERTAIN", "STOPPED", "REJECTED"})
 
 
 class ControllerError(RuntimeError):
@@ -73,6 +81,30 @@ def _runtime(value):
     if type(value) is not int or not 1 <= value <= 86400:
         raise ValueError("runtime must be an integer in [1,86400]")
     return value
+
+
+def _reconciliation_cause(reason, request, *, error=None, observed=None, identity_changed=False):
+    """Fixed diagnostics only: never serialize exception text or provider data."""
+    state = request["state"]
+    cause = {"reason": reason, "request_state": state if state in _REQUEST_STATES else "INVALID"}
+    if observed is not None:
+        cause["provider_state"] = observed.state.value if isinstance(observed.state, WorkerState) else "INVALID"
+        cause["provider_identity_changed"] = identity_changed
+    if error is not None:
+        name = type(error).__name__
+        cause["exception_type"] = name if name in _RECONCILE_ERROR_TYPES else "Exception"
+        from .runpod_provider import ProviderHTTPError
+        if isinstance(error, ProviderHTTPError):
+            metadata = error.metadata
+            if (type(metadata) is dict
+                    and type(metadata.get("http_status")) is int and 100 <= metadata["http_status"] <= 599
+                    and type(metadata.get("content_type")) is str and metadata["content_type"] in {"json", "html", "other"}
+                    and (metadata.get("retry_after_seconds") is None or
+                         type(metadata["retry_after_seconds"]) is int and 0 <= metadata["retry_after_seconds"] <= 86400)
+                    and type(metadata.get("cf_mitigated_challenge")) is bool):
+                cause["http"] = {key: metadata.get(key) for key in (
+                    "http_status", "content_type", "retry_after_seconds", "cf_mitigated_challenge")}
+    return cause
 
 
 def _finite(value, name):
@@ -239,14 +271,17 @@ class Controller:
                 request["provider_capabilities"] = capabilities()
         return result
 
-    def _state(self, request_id, state, *, deadline=None, provider_id=None, error=None):
+    def _state(self, request_id, state, *, deadline=None, provider_id=None, error=None, reconciliation_cause=None):
         def update(connection, now):
             connection.execute("""UPDATE compute_requests SET state=?, deadline=COALESCE(?,deadline),
                 observed_provider_id=COALESCE(?,observed_provider_id),last_error_code=? WHERE request_id=?""",
                                (state, deadline, provider_id, error, request_id))
-            Ledger._event(connection, now, "policy_evaluation", {
+            payload = {
                 "decision": "compute_" + state.lower(), "request_id": request_id, "error_code": error,
-            })
+            }
+            if reconciliation_cause is not None:
+                payload["reconciliation_cause"] = reconciliation_cause
+            Ledger._event(connection, now, "policy_evaluation", payload)
             return self._public(self._row(connection, request_id))
         return self.ledger._submit(update)
 
@@ -417,8 +452,10 @@ class Controller:
             self.ledger.end_approval(request["approval_id"])
         return True
 
-    def _stop_one(self, request):
-        self._state(request["request_id"], "STOP_REQUESTED")
+    def _stop_one(self, request, *, reconciliation_cause=None):
+        # The initiating observation commits with STOP_REQUESTED before DELETE;
+        # a later shutdown failure cannot replace its append-only evidence.
+        self._state(request["request_id"], "STOP_REQUESTED", reconciliation_cause=reconciliation_cause)
         try:
             self.backend.stop(request["worker_id"])
             observed = self.backend.status(request["worker_id"])
@@ -453,15 +490,30 @@ class Controller:
                     self._state(request["request_id"], "REJECTED", error="InterruptedBeforeProviderAction")
                     continue
                 try:
-                    observed = self.backend.status(request["worker_id"])
-                except Exception:
-                    self._stop_one(request)
+                    read = getattr(self.backend, "reconcile_status", None)
+                    deadline = request["deadline"]
+                    if (callable(read) and request["state"] == "RUNNING"
+                            and request["observed_provider_id"] is not None
+                            and type(deadline) in (int, float) and math.isfinite(deadline)
+                            and _now(self.clock).timestamp() < deadline):
+                        observed = read(request["worker_id"], provider_id=request["observed_provider_id"],
+                                        deadline=deadline)
+                    else:
+                        observed = self.backend.status(request["worker_id"])
+                except Exception as exc:
+                    self._stop_one(request, reconciliation_cause=_reconciliation_cause(
+                        "provider_status_error", request, error=exc))
                     continue
+                identity_changed = observed.provider_id is not None and observed.provider_id != request["observed_provider_id"]
                 if observed.provider_id is not None and observed.provider_id != request["observed_provider_id"]:
                     request = self._state(request["request_id"], request["state"], provider_id=observed.provider_id)
-                if (request["state"] != "RUNNING" or request["deadline"] is None or
-                        _now(self.clock).timestamp() >= request["deadline"] or observed.state != WorkerState.RUNNING):
-                    self._stop_one(request)
+                reason = ("request_not_running" if request["state"] != "RUNNING" else
+                          "deadline_missing" if request["deadline"] is None else
+                          "approval_deadline" if _now(self.clock).timestamp() >= request["deadline"] else
+                          "provider_not_running" if observed.state != WorkerState.RUNNING else None)
+                if reason is not None:
+                    self._stop_one(request, reconciliation_cause=_reconciliation_cause(
+                        reason, request, observed=observed, identity_changed=identity_changed))
             return self.status()
 
     def research_dispatch(self, method: str, params: dict):
