@@ -146,6 +146,30 @@ Complete the lifecycle gate with actual before/after supervisor PID and same-att
 
 Use separate bounded allowances for Base and posttrained workers; `WorkerConfig` intentionally binds one model identity at a time. Stop and read back the old resource before replacement. Additional thinking/non-thinking contrasts require their explicit model identities and their own reviewed batches. These are engineering calibration checks, not hidden-holdout evaluation, independent scientific replication or a discovery claim.
 
+## Startup and supervised retry
+
+The controller may observe RunPod `status=RUNNING` before the runtime and direct SSH
+port are published. Missing or null connection details remain inside the bounded
+startup wait; malformed details or mismatched image, price, region or host key
+still stop the run. No configuration is uploaded until the connection is verified.
+
+On September 20, 2026, the installed controller update passed a fresh Drive
+upload/download/restore, 16 CPU containment checks and 26 account checks. The first
+queued canonical calibration failed during connection discovery and was deleted
+before SSH configuration or model execution. A null-runtime response reproduces
+the failure locally; the original generic error did not retain its traceback.
+That failed attempt is not parity evidence. Its consumed approval and original records must be retained; a retry
+uses a fresh job and approval under the same cumulative operator budget.
+
+The incident-specific `deploy/retry-gpu-calibration.py` helper has two phases
+around the normal wheel upgrade. It first verifies the stopped request, closed
+allowance, provider absence and zero execution attempts, then cancels only that
+pending job through the research service. After a verified upgrade, it preserves
+the original state directories and prepares a new calibration in separate
+subdirectories. Its pinned inputs allow only a new plan label, idempotency key
+and state/configuration paths; the model, worker image, limits and service
+permissions remain fixed. Neither phase issues a compute approval.
+
 ## Local verification
 
 The offline suite covers locked asset preparation, hash/size/path rejection, diagnostic failure modes, real tiny-Qwen parity, budget contracts, timeout classification and actual supervisor adoption:

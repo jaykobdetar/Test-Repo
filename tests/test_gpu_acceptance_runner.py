@@ -206,6 +206,70 @@ def test_actual_v2_endpoint_shape_requires_authenticated_host_fingerprint(setup)
         assert state.read('endpoint.json')['provider_id'] == request['observed_provider_id']
 
 
+@pytest.mark.parametrize('shape', ['runtime_missing', 'runtime_null', 'ports_missing', 'ports_null', 'ports_empty'])
+def test_not_yet_published_endpoint_is_unavailable_without_ssh_or_log_reads(setup, shape):
+    s = setup
+    request, _, _ = endpoint_fixtures(s)
+    if shape == 'runtime_missing':
+        s.http.pods[0].pop('runtime')
+    else:
+        s.http.pods[0]['runtime'] = {'runtime_null': None, 'ports_missing': {},
+                                   'ports_null': {'ports': None}, 'ports_empty': {'ports': []}}[shape]
+    def forbidden(*_):
+        raise AssertionError('SSH and log reads require an actual endpoint')
+    with runner.State(s.config.trusted_state_directory) as state:
+        with pytest.raises(runner.RunnerError, match='^DIRECT_SSH_ENDPOINT_UNAVAILABLE$'):
+            runner.verified_endpoint(s.config, request, s.backend, state, logs=forbidden, command=forbidden)
+        assert state.read('endpoint.json') is None
+    assert not (s.root/'runner'/'known_hosts').exists()
+
+
+@pytest.mark.parametrize('runtime', [False, 'invalid', [], {'ports': False}, {'ports': {}},
+                                    {'ports': [None]}, {'ports': [{'private': '22', 'type': 'tcp'}]},
+                                    {'ports': [{'private': 22, 'type': None}]}])
+def test_malformed_endpoint_metadata_fails_closed_with_fixed_code(setup, runtime):
+    s = setup
+    request, events, command = endpoint_fixtures(s)
+    s.http.pods[0]['runtime'] = runtime
+    with runner.State(s.config.trusted_state_directory) as state:
+        with pytest.raises(runner.RunnerError, match='^PROVIDER_RUNTIME_INVALID$'):
+            runner.verified_endpoint(s.config, request, s.backend, state, logs=lambda *_: events, command=command)
+        assert state.read('endpoint.json') is None
+
+
+@pytest.mark.parametrize('status,retryable', [(408, True), (429, True), (500, True), (503, True),
+                                           (401, False), (403, False), (404, False)])
+def test_endpoint_get_retries_only_transient_http_statuses(setup, monkeypatch, status, retryable):
+    s = setup
+    request, _, _ = endpoint_fixtures(s)
+    calls = []
+    def response(method, path, body=None):
+        calls.append((method, path, body))
+        raise runner.ProviderHTTPError(status)
+    monkeypatch.setattr(s.backend.transport, 'request', response)
+    with runner.State(s.config.trusted_state_directory) as state:
+        code = 'PROVIDER_ENDPOINT_UNAVAILABLE' if retryable else 'PROVIDER_ENDPOINT_REFUSED'
+        with pytest.raises(runner.RunnerError, match='^'+code+'$'):
+            runner.verified_endpoint(s.config, request, s.backend, state)
+    assert calls == [('GET', '/v2/pods/'+request['observed_provider_id'], None)]
+
+
+@pytest.mark.parametrize('network', [True, False])
+def test_wrapped_network_failure_and_invalid_json_are_distinguished(setup, monkeypatch, network):
+    s = setup
+    request, _, _ = endpoint_fixtures(s)
+    def response(*_):
+        try:
+            raise runner.URLError('private-url') if network else ValueError('private-response')
+        except Exception:
+            raise runner.ProviderResponseError('redacted transport failure') from None
+    monkeypatch.setattr(s.backend.transport, 'request', response)
+    with runner.State(s.config.trusted_state_directory) as state:
+        code = 'PROVIDER_ENDPOINT_UNAVAILABLE' if network else 'PROVIDER_ENDPOINT_RESPONSE_INVALID'
+        with pytest.raises(runner.RunnerError, match='^'+code+'$'):
+            runner.verified_endpoint(s.config, request, s.backend, state)
+
+
 @pytest.mark.parametrize('problem', ['wrong_key', 'only_client', 'wrong_price', 'private_ip', 'wrong_region'])
 def test_endpoint_or_host_provenance_mismatch_never_starts_tunnel(setup, problem):
     s = setup
@@ -327,6 +391,83 @@ def test_real_ledger_dispatcher_collector_flow_and_scoped_deletion(setup, bad_so
     assert s.backend.status(request['worker_id']).state == WorkerState.ABSENT
     assert len(s.http.purchases) == 1  # only the fixture's already approved creation
     assert (s.root/'runner'/'observations.json').is_file()
+
+
+@pytest.mark.parametrize('first_observation', ['runtime_null', 'http_503'])
+def test_startup_recovers_original_endpoint_without_new_create_or_extended_approval(setup, first_observation):
+    s = setup
+    request, events, command = endpoint_fixtures(s)
+    initial_deadline = request['deadline']
+    valid_runtime = deepcopy(s.http.pods[0]['runtime'])
+    transport = s.backend.transport.request
+    gets = []
+    def response(method, path, body=None):
+        if method == 'GET' and path == '/v2/pods/'+request['observed_provider_id']:
+            gets.append(1)
+            if len(gets) == 1:
+                if first_observation == 'http_503':
+                    raise runner.ProviderHTTPError(503)
+                s.http.pods[0]['runtime'] = None
+            elif len(gets) == 2:
+                s.http.pods[0]['runtime'] = valid_runtime
+        return transport(method, path, body)
+    s.backend.transport.request = response
+    client = Endpoint(s)
+    sleeps = []
+    def sleep(seconds):
+        sleeps.append(seconds)
+        s.clock.advance(seconds)
+    def endpoint(*args):
+        return runner.verified_endpoint(*args, logs=lambda *_: events, command=command)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = runner.run(s.config, s.plan, s.ledger, s.backend,
+            SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
+            clock=lambda: s.clock().timestamp(), sleep=sleep, endpoint=endpoint, tunnel_factory=Tunnel,
+            client_factory=lambda *_a, **_k: client, readiness=lambda *_a, **_k: None,
+            configure=lambda *_a, **_k: {'configured': True})
+        assert result['status'] == 'passed', result
+        assert state.read('bound-request.json')['deadline'] == initial_deadline
+    assert sleeps == [1, 0.25] and len(gets) >= 2  # One startup retry, then one normal dispatcher tick.
+    assert client.posts == 1 and len(s.http.purchases) == 1
+    assert client.request.approval_id == request['approval_id']
+    assert client.request.deadline.timestamp() <= initial_deadline
+    assert result['teardown']['confirmed'] is True
+
+
+def test_runtime_missing_forever_reaches_original_startup_deadline_then_deletes(setup):
+    s = setup
+    request, _, _ = endpoint_fixtures(s)
+    s.http.pods[0].pop('runtime')
+    started = s.clock().timestamp()
+    tries = []
+    def endpoint(*args):
+        tries.append(s.clock().timestamp())
+        return runner.verified_endpoint(*args)
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = runner.run(s.config, s.plan, s.ledger, s.backend,
+            SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
+            clock=lambda: s.clock().timestamp(), sleep=lambda seconds: s.clock.advance(seconds), endpoint=endpoint)
+    assert result['reason'] == 'WORKER_STARTUP_DEADLINE' and result['teardown']['confirmed'] is True
+    assert len(tries) == 180 and s.clock().timestamp() == started + 180
+    assert s.ledger.get_job(request['job_ids'][0]).attempt_id is None
+    assert len(s.http.purchases) == 1 and s.http.pods == []
+
+
+def test_unknown_startup_failure_retains_only_safe_type_and_local_location(setup):
+    s = setup
+    approve_fixture(s)
+    def unknown(*args):
+        raise AttributeError('token=RAW_PRIVATE_SECRET')
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = runner.run(s.config, s.plan, s.ledger, s.backend,
+            SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
+            clock=lambda: s.clock().timestamp(), sleep=lambda _: None, endpoint=unknown)
+    assert result['reason'] == 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
+    assert result['diagnostic']['exception_type'] == 'AttributeError'
+    assert result['diagnostic']['location'].startswith('gpu_acceptance_runner.py:')
+    assert result['diagnostic']['location'].split(':')[1].isdigit()
+    assert 'RAW_PRIVATE_SECRET' not in canonical_json(result)
+    assert result['teardown']['confirmed'] is True
 
 
 def test_failed_endpoint_binding_still_deletes_only_bound_pod(setup):

@@ -37,7 +37,8 @@ from .gpu_acceptance import AcceptancePlan, collect
 from .ledger import JobState, Ledger
 from .provider import DeploymentSpec, WorkerState
 from .rpc import UnixRPCClient, decode
-from .runpod_provider import RunPodConfig, RunPodProvider, _NoRedirect, _read_owned_file
+from .runpod_provider import (ProviderHTTPError, ProviderResponseError, RunPodConfig,
+                              RunPodProvider, _NoRedirect, _read_owned_file)
 from .schemas import FrozenModel, GitSHA, SHA256
 from .worker_contracts import WorkerConfig
 
@@ -54,6 +55,20 @@ class RunnerError(ValueError):
 def require(condition, code):
     if not condition:
         raise RunnerError(code)
+
+
+def exception_diagnostic(error):
+    """Report a type and our own source line, never values or traceback text."""
+    name = type(error).__name__
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,79}', name):
+        name = 'Exception'
+    line = None
+    trace = error.__traceback__
+    while trace is not None:
+        if trace.tb_frame.f_code.co_filename == __file__:
+            line = trace.tb_lineno
+        trace = trace.tb_next
+    return {'exception_type': name, 'location': 'gpu_acceptance_runner.py' + (f':{line}' if line else '')}
 
 
 def digest(value):
@@ -420,13 +435,34 @@ def verified_endpoint(config, request, backend, state, *, logs=read_provider_log
     require(intent is not None and intent['provider_id'] == request['observed_provider_id']
             and intent['request_key'] == request['request_id'] and intent['configuration_hash'] == config.deployment.digest
             and intent['deadline'] == request['deadline'], 'PROVIDER_INTENT_MISMATCH')
-    pod = backend.transport.request('GET', '/v2/pods/' + quote(intent['provider_id'], safe=''))
+    try:
+        pod = backend.transport.request('GET', '/v2/pods/' + quote(intent['provider_id'], safe=''))
+    except ProviderHTTPError as error:
+        if error.status in {408, 429} or 500 <= error.status < 600:
+            raise RunnerError('PROVIDER_ENDPOINT_UNAVAILABLE') from None
+        raise RunnerError('PROVIDER_ENDPOINT_REFUSED') from None
+    except ProviderResponseError as error:
+        # RunPodHTTP wraps both network failures and malformed JSON. Retry only
+        # explicit transport evidence, not an invalid response or provenance.
+        if isinstance(error.__context__, (URLError, OSError)):
+            raise RunnerError('PROVIDER_ENDPOINT_UNAVAILABLE') from None
+        raise RunnerError('PROVIDER_ENDPOINT_RESPONSE_INVALID') from None
+    except (TimeoutError, ConnectionError):
+        raise RunnerError('PROVIDER_ENDPOINT_UNAVAILABLE') from None
+    require(type(pod) is dict, 'PROVIDER_ENDPOINT_RESPONSE_INVALID')
     observed = backend._observe(pod, intent)
     require(observed.state == WorkerState.RUNNING and observed.provider_id == request['observed_provider_id'], 'PROVIDER_NOT_RUNNING')
     require(pod.get('dataCenterId') == config.deployment.region
             and pod.get('image') == config.deployment.image_repository + '@' + config.deployment.image_digest
             and Decimal(str(pod.get('cost'))) == Decimal(str(config.expected_worker_price_usd_per_hour)), 'WORKER_PROVENANCE_MISMATCH')
-    direct = pod.get('runtime', {}).get('ports', [])
+    runtime = pod.get('runtime')
+    require(runtime is not None, 'DIRECT_SSH_ENDPOINT_UNAVAILABLE')
+    require(type(runtime) is dict, 'PROVIDER_RUNTIME_INVALID')
+    direct = runtime.get('ports')
+    require(direct is not None, 'DIRECT_SSH_ENDPOINT_UNAVAILABLE')
+    require(type(direct) is list and all(type(value) is dict for value in direct), 'PROVIDER_RUNTIME_INVALID')
+    require(all(type(value.get('private')) is int and 1 <= value['private'] <= 65535
+                and type(value.get('type')) is str for value in direct), 'PROVIDER_RUNTIME_INVALID')
     endpoints = [(v.get('ip'), v.get('public')) for v in direct
                  if type(v.get('private')) is int and v['private'] == 22 and v.get('type') == 'tcp']
     require(len(endpoints) == 1, 'DIRECT_SSH_ENDPOINT_UNAVAILABLE')
@@ -618,7 +654,8 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                 break
             except RunnerError as error:
                 if str(error) not in {'DIRECT_SSH_ENDPOINT_UNAVAILABLE', 'HOST_FINGERPRINT_UNAVAILABLE',
-                                      'PROVIDER_LOGS_UNAVAILABLE', 'SSH_VERIFICATION_COMMAND_FAILED'}:
+                                      'PROVIDER_LOGS_UNAVAILABLE', 'SSH_VERIFICATION_COMMAND_FAILED',
+                                      'PROVIDER_ENDPOINT_UNAVAILABLE'}:
                     raise
                 sleep(1)
         else:
@@ -662,8 +699,9 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                           manifest_sha256=digest(manifest.model_dump(mode='json')))
     except RunnerError as error:
         result['reason'] = str(error)
-    except Exception:
+    except Exception as error:
         result['reason'] = 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
+        result['diagnostic'] = exception_diagnostic(error)
     finally:
         progress('provider_deletion')
         result['teardown'] = stop_and_observe(cloud, backend, request, sleep=sleep)
@@ -700,7 +738,10 @@ def main():
             raise SystemExit(1)
     except Exception as error:
         reason = str(error) if isinstance(error, RunnerError) and re.fullmatch(r'[A-Z0-9_]{1,100}', str(error)) else 'ACCEPTANCE_RUNNER_REFUSED'
-        print(canonical_json({'status': 'failed', 'reason': reason, 'approval_consumed_by_runner': False}))
+        result = {'status': 'failed', 'reason': reason, 'approval_consumed_by_runner': False}
+        if reason == 'ACCEPTANCE_RUNNER_REFUSED':
+            result['diagnostic'] = exception_diagnostic(error)
+        print(canonical_json(result))
         raise SystemExit(1) from None
 
 

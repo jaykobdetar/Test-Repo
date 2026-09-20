@@ -31,8 +31,9 @@ unfinished. No scientific discovery is claimed.
 - **Local controller deployment:** separate trusted/research/watchdog/backup
   identities, an installed CPU containment gate, and daily Drive backups that
   download and restore each new upload before reporting success. The installed
-  CPU gate and backup cycle passed on one Ubuntu host on September 19, 2026;
-  live GPU acceptance remains pending.
+  CPU gate and backup cycle passed on one Ubuntu host; the September 20, 2026
+  controller upgrade also passed 16 containment checks and 26 account checks.
+  Live GPU acceptance remains pending.
 - **Worker preparation:** pinned model inventories, a no-model GPU diagnostic,
   and an immutable worker image.
 
