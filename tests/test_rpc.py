@@ -1,4 +1,5 @@
 import os
+import io
 import multiprocessing
 from pathlib import Path
 import socket
@@ -7,6 +8,7 @@ import threading
 import pytest
 
 from probe_core.rpc import RPCError, UnixRPCClient, UnixRPCServer
+from probe_core import rpc as rpc_module
 
 
 @pytest.fixture
@@ -150,3 +152,86 @@ def test_live_legacy_socket_without_lock_is_not_replaced(tmp_path):
             UnixRPCServer(path, lambda m, p: None,
                           allowed_uids={os.geteuid()}, allow_service_uid=True)
         assert path.stat().st_ino == identity
+
+
+class _PeerSocket:
+    """Deterministically put a disconnect at a client I/O boundary."""
+
+    def __init__(self, *, failure=None, phase=None, response=b'{"ok":true,"result":null}\n'):
+        self.failure, self.phase, self.response = failure, phase, response
+        self.calls = []
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.closed = True
+
+    def settimeout(self, value):
+        self.calls.append(('timeout', value))
+
+    def connect(self, path):
+        self.calls.append(('connect', path))
+
+    def sendall(self, data):
+        self.calls.append(('send', data))
+        if self.phase == 'send':
+            raise self.failure('PRIVATE_SOCKET_DIAGNOSTIC')
+
+    def makefile(self, mode):
+        self.calls.append(('makefile', mode))
+        peer = self
+
+        class Reader(io.BytesIO):
+            def readline(self, limit):
+                peer.calls.append(('read', limit))
+                if peer.phase == 'read':
+                    raise peer.failure('PRIVATE_SOCKET_DIAGNOSTIC')
+                return super().readline(limit)
+
+        return Reader(self.response)
+
+
+@pytest.mark.parametrize('phase', ['send', 'read'])
+@pytest.mark.parametrize('failure', [BrokenPipeError, ConnectionResetError, TimeoutError])
+def test_peer_disconnect_is_a_sanitized_rpc_error_without_replay(monkeypatch, phase, failure):
+    peer = _PeerSocket(failure=failure, phase=phase)
+    opened = []
+
+    def connect_socket(*args):
+        opened.append(args)
+        return peer
+
+    monkeypatch.setattr(rpc_module.socket, 'socket', connect_socket)
+    monkeypatch.setattr(rpc_module, 'peer_uid', lambda _: os.geteuid())
+    with pytest.raises(RPCError, match='^service connection failed$') as error:
+        UnixRPCClient('/synthetic/private.sock', expected_server_uid=os.geteuid()).call(
+            'approve', {'private_request': 'PRIVATE_REQUEST_CONTENT'})
+    assert len(opened) == 1
+    assert [name for name, _ in peer.calls].count('send') == 1
+    assert [name for name, _ in peer.calls].count('read') == (phase == 'read')
+    assert peer.closed
+    assert 'PRIVATE' not in str(error.value)
+    assert error.value.__cause__ is None and error.value.__suppress_context__ is True
+
+
+def test_wrong_server_uid_still_refuses_before_any_request_bytes(monkeypatch):
+    peer = _PeerSocket(failure=BrokenPipeError, phase='send')
+    monkeypatch.setattr(rpc_module.socket, 'socket', lambda *_: peer)
+    monkeypatch.setattr(rpc_module, 'peer_uid', lambda _: os.geteuid() + 1)
+    with pytest.raises(RPCError, match='^untrusted service identity$'):
+        UnixRPCClient('/synthetic/private.sock', expected_server_uid=os.geteuid()).call('approve')
+    assert [name for name, _ in peer.calls] == ['timeout', 'connect']
+    assert peer.closed
+
+
+@pytest.mark.parametrize('response', [b'', b'{"ok":true}', b'[]\n'])
+def test_eof_and_malformed_envelopes_keep_existing_refusal(monkeypatch, response):
+    peer = _PeerSocket(response=response)
+    monkeypatch.setattr(rpc_module.socket, 'socket', lambda *_: peer)
+    monkeypatch.setattr(rpc_module, 'peer_uid', lambda _: os.geteuid())
+    with pytest.raises(RPCError, match='^invalid service response$'):
+        UnixRPCClient('/synthetic/private.sock', expected_server_uid=os.geteuid()).call('status')
+    assert [name for name, _ in peer.calls].count('send') == 1
+    assert peer.closed
