@@ -41,6 +41,10 @@ def setup(tmp_path, runpod, manifest_data, monkeypatch):
     deployment = DeploymentSpec.model_validate(dict(deployment.model_dump(),
         storage_mode='disposable_research', volume_id=None, volume_gb=0))
     clock.value = datetime.now(timezone.utc)
+    # Keep synthetic quote evidence on the same clock as the installed-runner
+    # fixture; production still rejects genuinely stale provider evidence.
+    backend.config = backend.config.model_copy(update={
+        'storage_rates': backend.config.storage_rates.model_copy(update={'checked_at': clock()})})
     data = deepcopy(manifest_data)
     data['model']['revision_sha'] = 'ea980cb0a6c2ae4b936e82123acc929f1cec04c1'
     data['inputs']['generation']['max_new_tokens'] = 4
