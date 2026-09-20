@@ -9,13 +9,27 @@ prepared plan does not count as a passed deployment gate.
 
 ## Current status and next gate
 
-The operator has selected a simpler immediate milestone: [supervised public
-calibration](supervised-public-calibration.md). The ninth managed attempt failed
-before SSH in cgroup bootstrap; it was stopped early and deletion confirmed.
-The standalone path defers nested cgroups and repeated controller upgrades,
-while retaining the original numerical checks, pinned assets, budget, deadlines,
-result verification and Pod deletion. Passing it will establish numerical
-calibration, not completion of the original managed-worker lifecycle checklist.
+**Base and posttrained supervised public calibration have both passed.** Each
+run on an RTX 4090 in EU-RO-1 passed all 29 numerical checks, including 25 exact
+comparisons, and retained nine tensors. Model/image provenance, copied artifact
+hashes and process exit were verified; the provider independently confirmed both
+Pod deletions. See [calibration results](calibration-results.md) for the separate
+receipts, model identities and evidence scope.
+
+The original host report falsely rejected the operation because its verifier
+omitted `suite_version: 1`. Verifier source `d41cb4c` accepted the same collected
+artifacts after that correction. The original report remains preserved; neither
+the numerical checks nor their tolerances changed, and the model was not rerun.
+The posttrained run passed directly with the corrected verifier and explicit
+`thinking_mode: false`.
+
+The operator selected [supervised public calibration](supervised-public-calibration.md)
+after repeated managed-worker startup failures. This path supersedes the original
+five-step sequence as the immediate work plan. It defers nested cgroups and
+repeated controller upgrades while retaining pinned assets, the budget, deadlines,
+verified collection and Pod deletion. These results establish numerical
+calibration in this smaller profile. The original managed-worker lifecycle
+checklist below remains incomplete and deferred.
 
 The installed controller is source `4b19ac6`, wheel
 `a43e336773fe21155a890aa4a545a26ab70d71a6a7d01bf5e0b0619ac86434c3`.
@@ -27,14 +41,18 @@ intermittent CPU timeout classification failure remains retained, not claimed fi
 The eighth full-worker attempt reached verified configuration, SSH tunneling,
 worker readiness and approved dispatch. CUDA initialization then failed with
 error 304; result collection marked the case failed and deletion was independently
-confirmed. There are 18 prepared plans and **zero successful live canonical GPU cases**.
+confirmed. The ninth managed attempt failed before SSH in cgroup bootstrap and
+was deleted. Eighteen managed acceptance plans remain prepared; none has passed
+through the full installed managed-worker path. The later standalone numerical
+passes are separate evidence.
 
 A local A/B reproduction identified a project-controlled failure: the worker's
 seccomp filter denied CUDA's `socket(AF_UNIX, SOCK_SEQPACKET|SOCK_CLOEXEC, 0)`.
 The unchanged filter returns CUDA304; permitting only AF_UNIX creation succeeds.
 The narrow correction retains all `connect`, `sendto` and `sendmsg` denials and
-passed a local BF16 matrix operation. Exact rebuilt-image acceptance on RunPod
-remains required before claiming the cloud failure is resolved.
+passed a local BF16 matrix operation. Acceptance through the managed worker on
+RunPod remains required to resolve that profile's failure; the standalone
+numerical pass does not test its seccomp boundary.
 
 The installed controller already retains initiating reconciliation causes and
 allows one deadline-bounded retry for eligible transient status reads. Its eighth
@@ -52,7 +70,8 @@ a future run. Diagnosis and a matching regression must precede another paid retr
   retained their own package and acceptance receipts.
 - Bounded cloud diagnostics verified hardware and resource enforcement on a
   compatible delegated-cgroup-v2 host. Other assigned hosts were unsuitable;
-  every new Pod must pass the same gates. These tests ran no scientific model.
+  every new managed-worker Pod must pass the same gates. These tests ran no
+  scientific model; the smaller supervised profile does not claim these gates.
 - Early full-worker failures exposed null-runtime handling, insufficient cold
   startup time and inherited provider credentials. The fixed image and controller
   changes require their own live result; the earlier failures are not parity evidence.
@@ -70,22 +89,52 @@ a future run. Diagnosis and a matching regression must precede another paid retr
   image and scientific scope, and did not upgrade application code. The resulting
   seventh attempt stopped during startup; its initiating error was not retained.
 
-The corrected Base worker image is published at
+The corrected managed Base worker image is published at
 `sha256:97a87f0ccf7baae5a77dd6dabaf1f7de1d476396449b40da4e96c8bef7140e41`,
 from source `f031a674c688acad1e2a7fe84caed5b1580d2357`. Its public pull, immutable
-registry identity and source provenance were verified. It has not yet run a
-canonical calibration. The eighth attempt used the older `a795fe2e…` image.
-The separately pinned posttrained worker image has been published at
+registry identity and source provenance were verified. Its supervised derivative,
+`sha256:b1abbb63a890fce5fbfa35dd42c3b166858ceed323e451579a4ff5b202fce853`,
+passed the Base numerical calibration described above. This does not accept the
+parent's managed lifecycle. The eighth attempt used the older `a795fe2e…` image.
+The earlier separately pinned posttrained worker image was published at
 `sha256:618792509a6aad88709d3ce6e1636ffc69a6a0db637202653117ee4bcc8d2152`,
 from worker source `fb7c04a0bc3d03f141934185b50283e30f221f32`. Its registry digest
-and source provenance were verified, but it has not passed live GPU acceptance.
+and source provenance were verified. Its supervised derivative,
+`sha256:226ee49f81c5f07213d5e08ed1b66b357cb90bebec69ba35caccf17724ca5386`,
+has now passed posttrained numerical calibration. Managed lifecycle acceptance
+remains pending for both models.
+
+## Immediate supervised sequence
+
+Base and posttrained numerical calibration and their independent Drive backups
+are complete. Both archives passed download, hash verification and local restore.
+The next milestone is
+the [first fixed public experiment](first-public-experiment.md):
+
+1. Retain independent backups of both standalone result bundles with hashes and
+   a verified readback before beginning the experiment.
+   They live outside the installed ledger and are not automatically included in
+   its normal snapshot.
+2. Prepare one fixed public exploratory experiment: declare its question,
+   prompts, intervention, primary metric and matched control before running it.
+   Add a separate reviewed recipe and result verifier, because the existing
+   standalone command only accepts `backend_parity_v1`.
+3. Run the bounded experiment under the same supervised deadline and deletion
+   procedure, retain per-prompt results, and produce a reproducible exploratory
+   report. Keep the Ubuntu host online for the run.
+
+This sequence does not require a new controller installation, the complete
+managed lifecycle suite, a private evaluator or autonomous agent orchestration.
+Those remain separate requirements for their respective service and scientific
+claims. Public exploratory results are not held-out confirmation or validated
+discoveries.
 
 ## Selected setup
 
 | Decision | Initial choice | Reason |
 | --- | --- | --- |
 | Controller | The operator's Ubuntu machine; local SQLite and retained artifacts | Avoid another server and hosting bill for the first deployment. The machine must stay on during supervised GPU runs. |
-| Transport | Authenticated HTTP bound to loopback through an SSH tunnel with a pinned host key | Fits a single controller and worker without exposing a research API publicly. |
+| Transport | Supervised: one fixed command over pinned-key SSH. Managed: authenticated loopback HTTP through SSH | The supervised path needs no persistent research API or installed dispatcher. |
 | GPU | One Secure Cloud RTX 4090, subject to a fresh price and capacity check | 24 GB is sufficient for the two 1.7B models loaded separately and short, bounded calibration jobs. |
 | Data center | Revalidate before every Pod creation | Capacity and compatible driver availability change; bind the chosen location to that run. |
 | GPU storage | Disposable Pod disk with immutable public assets baked into the worker image; no network volume | This later operator-approved choice avoids persistent GPU storage. Fetch, verify and seal outputs on the controller before declaring success. |
@@ -110,13 +159,17 @@ of both the Pod and controller through verified Google Drive copies.
 
 ## Required evidence, in order
 
+This is the original five-step **managed-service** acceptance checklist. It is
+retained for that larger deployment goal; it does not block the supervised
+sequence above or redefine the two numerical passes.
+
 | Step | Current standing |
 | --- | --- |
-| 1. Infrastructure diagnostic | Passed on specific compatible hosts; each new assignment must be checked |
+| 1. Infrastructure diagnostic | Passed on specific compatible hosts; each new managed assignment must be checked |
 | 2. Separate services | Installed identity and CPU containment gates passed |
 | 3. Recovery and backup | Installed Drive upload/readback/restore passed |
-| 4. Pinned worker and assets | Base and posttrained images prepared and published; in-worker readback remains part of each acceptance run |
-| 5. Canonical GPU acceptance | Not passed; first Base parity is the immediate target |
+| 4. Pinned worker and assets | Both supervised runs verified their pinned model/image identities; each future managed run must verify its own exact deployment. |
+| 5. Canonical GPU acceptance | Both standalone numerical calibrations passed. Full managed acceptance remains incomplete; resource and lifecycle evidence is still required for that profile. |
 
 The original phase numbers in historical records differ from these five
 deployment steps. Use the following requirements when judging completion.
@@ -161,11 +214,12 @@ guide. Restricting methods on a Python object is insufficient: a watchdog needs
 a separate credential boundary, such as a narrow Unix broker whose process
 owns the management credential. See [RunPod API keys](https://docs.runpod.io/get-started/api-keys).
 
-CUDA jobs currently require writable delegated cgroup v2 controls. A container
+Managed CUDA jobs require writable delegated cgroup v2 controls. A container
 image cannot grant itself host delegation. If the actual Pod does not provide
-the required controls, GPU acceptance fails and the deployment remains
-incomplete. Changing that requirement needs an explicit engineering decision
-and an equivalent tested enforcement mechanism.
+those controls, managed acceptance fails. The explicitly selected supervised
+profile uses the disposable Pod boundary instead and makes no nested cgroup or
+hostile-code containment claim. Its numerical pass does not remove the managed
+profile's requirements.
 
 An explicitly approved, short supervised infrastructure test can characterize
 these unknowns. It does not establish unattended readiness or satisfy the

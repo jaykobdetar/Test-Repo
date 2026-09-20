@@ -5,9 +5,9 @@ research into language models. It lets a research agent request model inspection
 and controlled interventions, records what ran and what it produced, and keeps
 paid compute behind a separate approval process.
 
-The intended models are **Qwen3-1.7B-Base** and **Qwen3-1.7B**. The project is still
-being brought up on real GPU infrastructure. It is not yet an autonomous research
-lab, and it has produced no validated scientific findings.
+Both **Qwen3-1.7B-Base** and **Qwen3-1.7B** have passed supervised GPU numerical
+calibration. The project is not yet an autonomous research lab, and it has
+produced no validated scientific findings.
 
 > This page describes the deployment work in
 > [the current draft pull request](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1).
@@ -40,17 +40,24 @@ As of September 20, 2026:
 | Area | Evidence and remaining work |
 | --- | --- |
 | Ubuntu controller | Installed. Its latest upgrade passed 16 CPU containment/crash checks and 26 account-boundary checks. |
-| Independent backups | Google Drive upload, download, hash verification and offline restore have passed. |
-| RunPod containment | Resource controls and cleanup passed on one compatible host. Every newly assigned host must repeat the checks. |
-| Model images | Separate Base and posttrained images are published with pinned public assets and verified registry provenance. Verification inside a live worker is still required. |
-| End-to-end GPU execution | **Not established.** The eighth attempt reached approved dispatch but failed during CUDA initialization. No passing canonical GPU result is claimed. |
+| Independent backups | Controller backups and both standalone calibration bundles passed Google Drive upload, download, hash verification and local restore. |
+| RunPod containment | Managed-worker resource controls and cleanup passed on a compatible host; that profile requires checks on each new host. The supervised profile uses the disposable Pod boundary and does not claim nested cgroup enforcement. |
+| Model images | Separate Base and posttrained images use pinned public assets. Both supervised runs verified model/image provenance and returned artifact hashes. |
+| Supervised GPU execution | **Both models passed:** each completed 29 numerical checks, including 25 exact comparisons and nine retained tensors, followed by verified collection, process exit and confirmed Pod deletion. |
+| Managed-worker acceptance | Incomplete. The supervised result does not establish installed-ledger dispatch, resource-limit enforcement, cancellation, recovery or replacement. |
 | Scientific workflow | Private held-out evaluation, independent Explorer/Skeptic/Replicator sessions and blind scientific calibration remain future work. |
 
-The immediate milestone is one complete Base-model calibration: startup,
-BF16/CUDA inference and interventions, verified result collection, and confirmed
-Pod deletion. Eighteen ordinary acceptance plans are prepared across the two
-models, but prepared plans and local tests are not live acceptance results.
-See the [deployment checklist](docs/live-deployment-plan.md) for the remaining gates.
+The selected path is [supervised public calibration](docs/supervised-public-calibration.md),
+which runs one fixed command without another controller installation or nested
+cgroup requirement. Both models passed on RunPod RTX 4090s in EU-RO-1. The
+[calibration results](docs/calibration-results.md) record the evidence, including
+a corrected Base host-verifier mismatch with the original report preserved.
+
+Next, implement the [first fixed public exploratory experiment](docs/first-public-experiment.md).
+The [deployment checklist](docs/live-deployment-plan.md) retains the
+original five managed-service steps separately. Its 18 prepared acceptance plans
+remain useful for that larger milestone; they are not prerequisites for a
+bounded, supervised public experiment.
 
 RunPod support currently permits short, supervised runs. Unattended operation,
 provider shutdown during controller-host loss, direct Pod resumes and private
@@ -58,6 +65,8 @@ confirmation/replication evaluation are not accepted capabilities. Interventions
 apply to prompt prefill; generation is a separate, unmodified operation.
 
 ## How the pieces fit
+
+The managed-service architecture is:
 
 ```text
 Research agent ──MCP──► research service ──► experiment ledger
@@ -76,7 +85,11 @@ Research service ────► rootless CPU sandbox
 Controller state ────► verified independent backups
 ```
 
-Accepted outputs are copied back to the controller and verified before a run can
+The supervised profile instead uses authenticated SSH for one fixed command,
+a separate host deadline guard, and standalone reports outside the installed
+ledger. It keeps the provider-management key on the host.
+
+Accepted outputs are copied back to the Ubuntu host and verified before a run can
 succeed. The selected GPU setup uses disposable Pod disks and public model assets
 baked into immutable images; it does not require a network volume. Losing a Pod
 before output collection leaves the result failed or inconclusive.
@@ -134,6 +147,9 @@ with the deployment checklist, then follow the relevant component guide:
 
 | Need | Guide |
 | --- | --- |
+| Inspect the two passing numerical calibrations | [Calibration results](docs/calibration-results.md) |
+| Run the smaller fixed public GPU calibration | [Supervised public calibration](docs/supervised-public-calibration.md) |
+| Prepare the next exploratory milestone | [First public experiment](docs/first-public-experiment.md) |
 | Understand what is complete and what is still required | [Live deployment checklist](docs/live-deployment-plan.md) |
 | Understand the implemented scope and boundaries | [Implementation overview](IMPLEMENTATION.md) |
 | Set up the Ubuntu accounts and services | [Host installation](docs/host-installation.md) |
@@ -158,11 +174,19 @@ contain no hidden evaluation dataset.
 
 ## After the first working GPU path
 
-Complete the remaining numerical, resource-limit and recovery checks for both
-models, including replacement with a fresh Pod and retained artifacts. Then add
-scientific metrics, matched controls, private held-out evaluation and independent
-research roles before attempting open-ended discovery. SAE/Qwen-Scope, circuit
-tracing and automatic novelty assessment remain outside the current implementation.
+The next useful milestone is the [first public experiment](docs/first-public-experiment.md),
+with a declared question, metric, matched control and retained per-prompt results.
+This needs a separate reviewed experiment recipe;
+the current standalone command accepts only the numerical calibration. Reuse
+the supervised deadline, credential separation, verified collection and Pod
+deletion, and back up its standalone artifacts explicitly.
+
+Managed resource, cancellation, recovery and replacement checks remain deferred
+work for the full service profile. Private held-out evaluation and independent
+research roles are later requirements for confirmatory research. Neither set of
+work blocks a bounded public exploratory experiment, which must remain labelled
+exploratory. SAE/Qwen-Scope, circuit tracing and automatic novelty assessment
+remain outside the current implementation.
 
 Contributions should state the behavior being changed and provide evidence for
 claims about correctness, containment and scientific results. Changes to the

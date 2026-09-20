@@ -28,9 +28,10 @@ guard nor RunPod's unverified scheduled stop establishes host-loss safety.
 
 The general research worker and its stricter checks remain available unchanged.
 This profile accepts no arbitrary operation, user-provided dataset, model code,
-or private data. After Base numerical calibration succeeds, the next target is
-the separately pinned posttrained checkpoint. Broader service and sandbox
-acceptance can then proceed as separate milestones.
+or private data. Both the Base and separately pinned posttrained checkpoint passed on September
+20, 2026. See the [results and exact scope](calibration-results.md). The next
+step is a [fixed public experiment](first-public-experiment.md); broader service
+and sandbox acceptance remain separate milestones.
 
 The derived image includes a C compiler because the pinned PyTorch/Triton stack
 compiles GPU kernels during inference. The build compiles and executes a small C
