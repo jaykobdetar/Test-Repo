@@ -47,7 +47,7 @@ No persistent storage was purchased and no model inference ran.
 Subsequent bounded tests established real resource-control enforcement on one
 compatible RunPod host. Every newly assigned host must pass the same worker
 identity and containment gates before inference. This evidence does not establish
-shutdown during controller host loss or unattended readiness. Five full-worker
+shutdown during controller host loss or unattended readiness. Six full-worker
 calibrations stopped before inference. Image cold-start handling, clean
 environments and SSH diagnostics are installed. The fourth Pod reached verified
 SSH host-key discovery but configuration failed. The fifth stopped on a refused
@@ -55,8 +55,14 @@ provider endpoint lookup before SSH; its HTTP status was not retained. Both
 Pods were deleted. Controller source `82b950b` is now installed and retains bounded
 HTTP metadata to identify that refusal while preserving the existing deadlines
 and cleanup. Its installation passed all 16 sandbox and 26 identity checks, with
-a verified backup. The fresh Base request is waiting for compatible RTX 4090
-capacity in `EU-CZ-1`; it has not established live numerical acceptance.
+a verified backup. The sixth Base Pod in `EU-CZ-1` disappeared during image
+unpacking after five minutes. The new diagnostics retained HTTP 404; controller
+shutdown and independent provider absence were confirmed. Source review found
+that the watchdog counted image startup as idle at 300 seconds, while the runner
+reserved up to 540 seconds for startup. The source correction shares the same
+absolute dispatch cutoff with the watchdog; its reviewed recovery also verifies
+the old durable stop reason before installation. This correction and numerical
+acceptance remain pending live verification.
 
 The existing Base worker image
 (`sha256:a795fe2eb429d5453c0687d116707cc8a1b0eeca2cea2c77f37a6dbe5248b437`)
