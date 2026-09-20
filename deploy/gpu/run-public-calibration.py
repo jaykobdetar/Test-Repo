@@ -148,7 +148,7 @@ def run(directory, record, provider):
         info = source_key.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
             raise ValueError('SSH private key must be an owned private regular file')
-        ssh_state = Path(tempfile.mkdtemp(prefix='ail-public-ssh-'))
+        ssh_state = Path(tempfile.mkdtemp(prefix='ail-public-ssh-', dir='/tmp'))
         private_key = ssh_state / 'key'
         shutil.copyfile(source_key, private_key)
         private_key.chmod(0o600)
