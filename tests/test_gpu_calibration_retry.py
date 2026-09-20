@@ -260,3 +260,101 @@ def test_generic_error_reports_only_type_and_helper_line(tmp_path, monkeypatch,c
     raw=capsys.readouterr().out;report=json.loads(raw)
     assert report['reason']=='RECOVERY_REFUSED' and report['exception_type']=='RuntimeError'
     assert type(report['helper_line']) is int and 'PRIVATE_CREDENTIAL_TEXT' not in raw
+
+
+@pytest.fixture
+def prior_retry(tmp_path, replacement, monkeypatch):
+    monkeypatch.setattr(r,'ROOT',tmp_path/'opt')
+    previous_pin='2'*64
+    prior=dict(schema_version=1, original_manifest_sha256='3'*64,
+               previous_activation_manifest_sha256='4'*64, retry_id=replacement.retry_id,
+               target_upgrade={'wheel_sha256':'5'*64,'release_manifest_sha256':'6'*64},
+               files={name:r.digest(replacement.new[name]) for name in ('plan.json','acceptance.json',*r.CALIBRATION)})
+    capsule=r.ROOT/'calibration-retries'/previous_pin
+    raw=r.encoded(prior);put(capsule/'manifest.json',raw)
+    failed={'job_id':'new-job','request_id':'new-request','worker_id':'new-worker','provider_id':'new-pod'}
+    report=dict(schema_version=1,status='prepared',manifest_sha256=previous_pin,
+                target_wheel_sha256='5'*64,old_history_preserved=True,approval_issued=False,cloud_mutations_performed=False,
+                submission={**failed,'approval_consumed_by_runner':False})
+    put(capsule/'prepare-report.json',r.encoded(report))
+    put(capsule/'close-report.json',r.encoded(dict(status='closed',manifest_sha256=previous_pin,
+                                                original_job_cancelled=True,attempts_created=False,approval_issued=False)))
+    for name in prior['files']:put(capsule/name,replacement.new[name])
+    manifest=dict(schema_version=2,original_manifest_sha256=prior['original_manifest_sha256'],
+                  previous_activation_manifest_sha256=prior['previous_activation_manifest_sha256'],
+                  previous_upgrade=prior['target_upgrade'],target_upgrade={'wheel_sha256':'7'*64,'release_manifest_sha256':'8'*64},
+                  previous_retry_manifest_sha256=previous_pin,previous_retry_record_sha256=r.digest(raw),
+                  expected_failure_reason='WORKER_STARTUP_DEADLINE',retry_id='b'*32,failed=failed)
+    a=SimpleNamespace(Activation=lambda:SimpleNamespace(),trusted=lambda _:None)
+    operation=r.Recovery(a,None,manifest,{},'9'*64)
+    monkeypatch.setattr(r,'read',lambda path,**_:Path(path).read_bytes())
+    return SimpleNamespace(operation=operation,original=replacement.old,old=replacement.new,
+                           prior=prior,capsule=capsule,report=report,manifest=manifest)
+
+
+def test_second_retry_loads_pinned_nested_inputs_and_changes_only_fresh_identity(prior_retry):
+    s=prior_retry
+    before={path.name:path.read_bytes() for path in s.capsule.iterdir()}
+    old=s.operation.previous_inputs(s.original)
+    assert old['plan.json']==s.old['plan.json'] and old['worker.json']==s.original['worker.json']
+    new=dict(old);plan=json.loads(old['plan.json']);plan['label']+='-second';plan['cases'][0]['spec']['idempotency_key']+='-second'
+    new['plan.json']=r.encoded(plan)
+    config=json.loads(old['acceptance.json']);new_public=r.PUBLIC/('retry-'+s.manifest['retry_id'])
+    old_config_path=Path(config['plan_path']).parent/'acceptance.json'
+    config.update(plan_path=str(new_public/'plan.json'),plan_sha256='sha256:'+r.digest(new['plan.json']),
+                  submission_state_directory=str(r.SUBMIT/('retry-'+s.manifest['retry_id'])),
+                  trusted_state_directory=str(r.STATE/('retry-'+s.manifest['retry_id'])))
+    new['acceptance.json']=r.encoded(config)
+    for name in r.CALIBRATION:
+        new[name]=old[name].replace(('--config '+str(old_config_path)).encode(),('--config '+str(new_public/'acceptance.json')).encode())
+    public,after=r.validate_replacement(old,new,s.manifest['retry_id'])
+    assert public==new_public and after['worker_config_path']=='/etc/probe-calibration/worker.json'
+    assert after['trusted_state_directory'].count('retry-')==1
+    assert before=={path.name:path.read_bytes() for path in s.capsule.iterdir()}
+
+
+@pytest.mark.parametrize('fault',['record','incomplete','wrong_wheel','wrong_job','file','missing_close','wrong_chain'])
+def test_second_retry_refuses_unpinned_incomplete_or_mismatched_history(prior_retry,fault):
+    s=prior_retry
+    if fault=='record':s.manifest['previous_retry_record_sha256']='f'*64
+    elif fault=='file':put(s.capsule/'plan.json',b'changed')
+    elif fault=='missing_close':(s.capsule/'close-report.json').unlink()
+    elif fault=='wrong_chain':s.manifest['previous_upgrade']['wheel_sha256']='f'*64
+    else:
+        report=deepcopy(s.report)
+        if fault=='incomplete':report['status']='failed'
+        elif fault=='wrong_wheel':report['target_wheel_sha256']='f'*64
+        else:report['submission']['job_id']='different'
+        put(s.capsule/'prepare-report.json',r.encoded(report))
+    with pytest.raises((r.RetryError,FileNotFoundError)):s.operation.previous_inputs(s.original)
+
+
+def test_real_snapshot_deadline_failure_requires_exact_manifest_reason(real_failed):
+    f=real_failed
+    result=dict(f.result,reason='WORKER_STARTUP_DEADLINE')
+    r.validate_failed(f.snapshot(),f.failed,f.plan,result,f.bound,f.submitted,expected_failure_reason='WORKER_STARTUP_DEADLINE')
+    with pytest.raises(r.RetryError,match='FAILED_RESULT_CHANGED'):
+        r.validate_failed(f.snapshot(),f.failed,f.plan,result,f.bound,f.submitted)
+    f.s.rpc.call('cancel_job',{'job_id':f.failed['job_id']})
+    r.validate_failed(f.snapshot(),f.failed,f.plan,result,f.bound,f.submitted,cancelled=True,
+                      expected_failure_reason='WORKER_STARTUP_DEADLINE')
+
+
+@pytest.mark.parametrize('fault',[None,'missing_record_pin','unknown_reason'])
+def test_schema2_manifest_requires_canonical_record_pin_and_allowlisted_reason(tmp_path,monkeypatch,fault):
+    files={name:b'# pinned '+name.encode() for name in r.FILES}
+    for name,raw in files.items():put(tmp_path/name,raw)
+    manifest=dict(schema_version=2,original_manifest_sha256='a'*64,
+                  previous_upgrade={'wheel_sha256':'b'*64,'release_manifest_sha256':'c'*64},
+                  target_upgrade={'wheel_sha256':'d'*64,'release_manifest_sha256':'e'*64},
+                  previous_activation_manifest_sha256='f'*64,previous_retry_manifest_sha256='1'*64,
+                  previous_retry_record_sha256='2'*64,expected_failure_reason='WORKER_STARTUP_DEADLINE',retry_id='3'*32,
+                  failed={'job_id':'job','request_id':'request','worker_id':'worker','provider_id':'pod'},
+                  files={name:r.digest(raw) for name,raw in files.items()})
+    if fault=='missing_record_pin':del manifest['previous_retry_record_sha256']
+    if fault=='unknown_reason':manifest['expected_failure_reason']='UNRELATED_FAILURE'
+    path=tmp_path/'manifest.json';put(path,r.encoded(manifest))
+    monkeypatch.setattr(r,'read',lambda path,**_:Path(path).read_bytes())
+    if fault:
+        with pytest.raises(r.RetryError):r.inputs(path,r.digest(path.read_bytes()))
+    else:assert r.inputs(path,r.digest(path.read_bytes()))[1]==manifest

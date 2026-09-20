@@ -27,6 +27,7 @@ CALIBRATION = ('probe-calibration-submit.service', 'probe-calibration-run.servic
 FILES = {'activate-gpu-calibration.py', 'upgrade-controller.py', 'plan.json', 'acceptance.json', *CALIBRATION}
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 IDENT = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z')
+FAILURES = {'ACCEPTANCE_RUNTIME_UNAVAILABLE', 'WORKER_STARTUP_DEADLINE'}
 
 
 class RetryError(ValueError):
@@ -77,9 +78,15 @@ def inputs(path, pin, *, owner=0):
     raw = read(path, owner=owner)
     require(HEX.fullmatch(pin) and digest(raw) == pin, 'MANIFEST_PIN_CHANGED')
     body = decoded(raw)
-    require(set(body) == {'schema_version', 'original_manifest_sha256', 'previous_upgrade', 'target_upgrade',
-                         'previous_activation_manifest_sha256', 'failed', 'retry_id', 'files'}
-            and type(body['schema_version']) is int and body['schema_version'] == 1, 'MANIFEST_SCHEMA')
+    fields = {'schema_version', 'original_manifest_sha256', 'previous_upgrade', 'target_upgrade',
+              'previous_activation_manifest_sha256', 'failed', 'retry_id', 'files'}
+    require(type(body.get('schema_version')) is int and body['schema_version'] in {1, 2}, 'MANIFEST_SCHEMA')
+    if body['schema_version'] == 2:
+        fields |= {'previous_retry_manifest_sha256', 'previous_retry_record_sha256', 'expected_failure_reason'}
+        require(all(type(body.get(name)) is str and HEX.fullmatch(body[name]) for name in
+                    ('previous_retry_manifest_sha256', 'previous_retry_record_sha256'))
+                and body.get('expected_failure_reason') in FAILURES, 'PREVIOUS_RETRY_PIN_INVALID')
+    require(set(body) == fields, 'MANIFEST_SCHEMA')
     require(HEX.fullmatch(body['original_manifest_sha256']) and HEX.fullmatch(body['previous_activation_manifest_sha256'])
             and re.fullmatch(r'[0-9a-f]{32}', body['retry_id']), 'MANIFEST_IDENTITY')
     for name in ('previous_upgrade', 'target_upgrade'):
@@ -120,7 +127,7 @@ def validate_replacement(old, new, retry_id):
                     trusted_state_directory=str(STATE/('retry-'+retry_id)))
     require(after == expected, 'RUNNER_SCOPE_CHANGED')
     for name in CALIBRATION:
-        search = ('--config '+str(PUBLIC/'acceptance.json')).encode()
+        search = ('--config '+str(Path(before['plan_path']).parent/'acceptance.json')).encode()
         replacement = ('--config '+str(public/'acceptance.json')).encode()
         require(old[name].count(search) == 1 and new[name] == old[name].replace(search, replacement), 'UNIT_SCOPE_CHANGED')
     from probe_core.gpu_acceptance import AcceptancePlan
@@ -170,7 +177,8 @@ print(json.dumps(result,sort_keys=True))
 '''
 
 
-def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, cancelled=False):
+def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, cancelled=False,
+                    expected_failure_reason='ACCEPTANCE_RUNTIME_UNAVAILABLE'):
     from probe_core.schemas import JobSpec
     require(all(snapshot.get(name) == 0 for name in ('other_unfinished_jobs', 'unconfirmed_attempts', 'open_approvals')),
             'OTHER_AUTHORITY_OR_WORK_PRESENT')
@@ -195,8 +203,8 @@ def validate_failed(snapshot, failed, old_plan, result, bound, submitted, *, can
             and intent['provider_id'] == failed['provider_id'] and intent['provider_seen'] == 1
             and intent['configuration_hash'] == request['configuration_hash']
             and snapshot['provider_absent'] is True and snapshot['pods'] == 0, 'PROVIDER_DELETION_UNCONFIRMED')
-    require(result.get('status') == 'failed' and result.get('stage') == 'verified_worker_startup'
-            and result.get('reason') == 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
+    require(expected_failure_reason in FAILURES and result.get('status') == 'failed'
+            and result.get('stage') == 'verified_worker_startup' and result.get('reason') == expected_failure_reason
             and all(result.get(key) == failed[key] for key in ('request_id', 'worker_id', 'provider_id'))
             and result.get('teardown') == {'provider_id': failed['provider_id'], 'state': 'ABSENT', 'confirmed': True}
             and result.get('approval_consumed_by_runner') is False, 'FAILED_RESULT_CHANGED')
@@ -237,10 +245,16 @@ class Recovery:
         require(activation_report.get('status') == 'passed' and activation_report.get('manifest_sha256') == self.m['previous_activation_manifest_sha256']
                 and activation_report.get('approval_issued') is False and activation_report.get('cloud_mutations_performed') is False,
                 'ORIGINAL_ACTIVATION_INCOMPLETE')
-        self.old = {name: read(capsule/name) for name in ('plan.json', 'acceptance.json', 'worker.json', *CALIBRATION)}
-        require(all(digest(raw) == old_manifest['files'][name] for name, raw in self.old.items()), 'ORIGINAL_INPUT_CHANGED')
+        original = {name: read(capsule/name) for name in ('plan.json', 'acceptance.json', 'worker.json', *CALIBRATION)}
+        require(all(digest(raw) == old_manifest['files'][name] for name, raw in original.items()), 'ORIGINAL_INPUT_CHANGED')
         for name in ('plan.json', 'acceptance.json', 'worker.json'):
-            require(read(PUBLIC/name) == self.old[name], 'PUBLIC_CONFIGURATION_CHANGED')
+            require(read(PUBLIC/name) == original[name], 'PUBLIC_CONFIGURATION_CHANGED')
+        self.old = self.previous_inputs(original)
+        from probe_core.gpu_acceptance_runner import RunnerConfig
+        old_config = RunnerConfig.model_validate_json(self.old['acceptance.json'])
+        for name, path in (('plan.json', Path(old_config.plan_path)),
+                           ('acceptance.json', Path(old_config.plan_path).parent/'acceptance.json')):
+            require(read(path) == self.old[name], 'PREVIOUS_PUBLIC_CONFIGURATION_CHANGED')
         for name in CALIBRATION:
             require(read(UNITS/name) == self.old[name], 'INSTALLED_UNIT_CHANGED')
             values = self.unit_state(name)
@@ -250,9 +264,9 @@ class Recovery:
         self.public, self.config = validate_replacement(self.old, self.files, self.m['retry_id'])
         require((self.config['service_uid'], self.config['research_uid'], self.config['admin_uid']) == self.operation.users,
                 'RUNNER_IDENTITIES_CHANGED')
-        self.result = decoded(read(STATE/'result.json', owner=self.operation.users[0]))
-        self.bound = decoded(read(STATE/'bound-request.json', owner=self.operation.users[0]))
-        self.submitted = decoded(read(SUBMIT/'submitted.json', owner=self.operation.users[1]))
+        self.result = decoded(read(Path(old_config.trusted_state_directory)/'result.json', owner=self.operation.users[0]))
+        self.bound = decoded(read(Path(old_config.trusted_state_directory)/'bound-request.json', owner=self.operation.users[0]))
+        self.submitted = decoded(read(Path(old_config.submission_state_directory)/'submitted.json', owner=self.operation.users[1]))
         self.failure_hash = digest(encoded({'result': self.result, 'bound': self.bound, 'submitted': self.submitted}))
         parent = self.work.parent
         if parent.exists(): self.a.trusted(parent)
@@ -261,6 +275,42 @@ class Recovery:
         else: self.work.mkdir(mode=0o700)
         self.record('manifest.json', encoded(self.m))
         for name, raw in self.files.items(): self.record(name, raw)
+
+    def previous_inputs(self, original):
+        if self.m['schema_version'] == 1:
+            return original
+        previous_pin = self.m['previous_retry_manifest_sha256']
+        capsule = ROOT/'calibration-retries'/previous_pin
+        self.a.trusted(capsule)
+        raw = read(capsule/'manifest.json')
+        # Version1 stored a canonical record rather than the original manifest
+        # formatting. Its separately pinned bytes must not be mistaken for the
+        # original manifest hash used as the capsule's identity.
+        require(digest(raw) == self.m['previous_retry_record_sha256'], 'PREVIOUS_RETRY_RECORD_CHANGED')
+        previous = decoded(raw)
+        require(previous.get('schema_version') == 1 and previous.get('original_manifest_sha256') == self.m['original_manifest_sha256']
+                and previous.get('previous_activation_manifest_sha256') == self.m['previous_activation_manifest_sha256']
+                and previous.get('target_upgrade') == self.m['previous_upgrade']
+                and previous.get('retry_id') != self.m['retry_id'], 'PREVIOUS_RETRY_CHAIN_CHANGED')
+        report = decoded(read(capsule/'prepare-report.json'))
+        require(report.get('schema_version') == 1 and report.get('status') == 'prepared'
+                and report.get('manifest_sha256') == previous_pin
+                and report.get('target_wheel_sha256') == self.m['previous_upgrade']['wheel_sha256']
+                and report.get('old_history_preserved') is True and report.get('approval_issued') is False
+                and report.get('cloud_mutations_performed') is False
+                and all(report.get('submission', {}).get(key) == self.m['failed'][key]
+                        for key in ('job_id', 'request_id', 'worker_id'))
+                and report.get('submission', {}).get('approval_consumed_by_runner') is False,
+                'PREVIOUS_RETRY_NOT_COMPLETED')
+        closed = decoded(read(capsule/'close-report.json'))
+        require(closed.get('status') == 'closed' and closed.get('manifest_sha256') == previous_pin
+                and closed.get('original_job_cancelled') is True and closed.get('attempts_created') is False
+                and closed.get('approval_issued') is False, 'PREVIOUS_RETRY_CLOSE_MISSING')
+        old = {name: read(capsule/name) for name in ('plan.json', 'acceptance.json', *CALIBRATION)}
+        require(all(digest(value) == previous['files'][name] for name, value in old.items()), 'PREVIOUS_RETRY_INPUT_CHANGED')
+        validate_replacement(original, old, previous['retry_id'])
+        old['worker.json'] = original['worker.json']
+        return old
 
     def unit_state(self, name):
         raw = self.operation.command(['/usr/bin/systemctl', 'show', name,
@@ -275,7 +325,7 @@ class Recovery:
 
     def verify_failure(self, snapshot, *, cancelled=False):
         validate_failed(snapshot, self.m['failed'], decoded(self.old['plan.json']), self.result, self.bound, self.submitted,
-                        cancelled=cancelled)
+                        cancelled=cancelled, expected_failure_reason=self.m.get('expected_failure_reason', 'ACCEPTANCE_RUNTIME_UNAVAILABLE'))
 
     def close_failed(self):
         self.stage = 'close_failed'
@@ -404,12 +454,13 @@ def main(argv=None):
     try:
         require(os.geteuid() == 0, 'ADMINISTRATOR_REQUIRED')
         os.umask(0o077)
-        _, manifest, files = inputs(args.manifest, args.manifest_sha256)
+        manifest_raw, manifest, files = inputs(args.manifest, args.manifest_sha256)
         a = helper(files['activate-gpu-calibration.py'], 'pinned_calibration_activation')
         u = helper(files['upgrade-controller.py'], 'pinned_controller_upgrade')
         safe_errors = (RetryError, a.ActivationError, u.UpgradeError)
         recovery = Recovery(a, u, manifest, files, args.manifest_sha256)
         recovery.initialize(args.mode, args.human)
+        recovery.record('manifest-original.json', manifest_raw)
         report = recovery.close_failed() if args.mode == 'close-failed' else recovery.prepare()
         print(json.dumps(report, sort_keys=True))
         return 0

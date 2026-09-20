@@ -33,6 +33,7 @@ from test_schemas import manifest_data
 @pytest.fixture
 def setup(tmp_path, runpod, manifest_data):
     backend, http, clock, deployment = runpod
+    backend.config = backend.config.model_copy(update={'max_runtime_seconds': 900})
     deployment = DeploymentSpec.model_validate(dict(deployment.model_dump(),
         storage_mode='disposable_research', volume_id=None, volume_gb=0))
     clock.value = datetime.now(timezone.utc)
@@ -69,7 +70,7 @@ def setup(tmp_path, runpod, manifest_data):
         admin_uid=os.geteuid()+20, plan_path=str(plan_path),
         plan_sha256='sha256:' + hashlib.sha256(plan_path.read_bytes()).hexdigest(), deployment=deployment,
         worker_config_path=str(worker_path), worker_config_sha256='sha256:'+hashlib.sha256(worker_path.read_bytes()).hexdigest(),
-        source_commit='c' * 40, expected_worker_price_usd_per_hour=0.74, max_runtime_seconds=300,
+        source_commit='c' * 40, expected_worker_price_usd_per_hour=0.74, max_runtime_seconds=900,
         submission_state_directory=str(tmp_path/'submit'), trusted_state_directory=str(tmp_path/'runner'),
         ssh_identity_file=str(key), bearer_secret_file=str(token))
     ledger = Ledger(tmp_path / 'research.sqlite', clock=clock)
@@ -91,12 +92,12 @@ def approve_fixture(s):
     queued = queue(s)
     request = runner.find_request(s.ledger, s.config, s.plan)
     nonce = ApprovalNonce(approval_id=request['approval_id'], token='test-'+'s'*48,
-        pod_id=request['worker_id'], batch_hash=request['batch_hash'], max_runtime_seconds=300,
+        pod_id=request['worker_id'], batch_hash=request['batch_hash'], max_runtime_seconds=s.config.max_runtime_seconds,
         price_ceiling_usd_per_hour=0.8, issued_at=s.clock(), expires_at=s.clock()+timedelta(minutes=5))
     s.ledger.register_approval(nonce)
     grant = s.ledger.consume_approval(nonce.approval_id, nonce.token.get_secret_value(),
         pod_id=request['worker_id'], job_ids=request['job_ids'], live_price_usd_per_hour=0.74,
-        requested_runtime_seconds=300)
+        requested_runtime_seconds=s.config.max_runtime_seconds)
     s.backend.create(request['worker_id'], s.config.deployment, request_key=request['request_id'],
         price_ceiling_usd_per_hour=0.8, storage_ceiling_usd_per_day=2, absolute_deadline=grant.deadline)
     observed = s.backend.status(request['worker_id'])
@@ -151,7 +152,7 @@ def test_uncertain_intent_without_response_is_never_replayed(setup):
 def test_duplicate_exact_requests_refused(setup):
     s = setup
     queued = queue(s)
-    s.controller.request_provision(s.config.deployment, [queued['job_id']], 300)
+    s.controller.request_provision(s.config.deployment, [queued['job_id']], s.config.max_runtime_seconds)
     with pytest.raises(runner.RunnerError, match='DUPLICATE_PROVISION_REQUESTS'):
         runner.find_request(s.ledger, s.config, s.plan)
 
@@ -394,10 +395,12 @@ def test_real_ledger_dispatcher_collector_flow_and_scoped_deletion(setup, bad_so
 
 
 @pytest.mark.parametrize('first_observation', ['runtime_null', 'http_503'])
-def test_startup_recovers_original_endpoint_without_new_create_or_extended_approval(setup, first_observation):
+@pytest.mark.parametrize('startup_delay', [1, 200])
+def test_startup_recovers_original_endpoint_without_new_create_or_extended_approval(setup, first_observation, startup_delay):
     s = setup
     request, events, command = endpoint_fixtures(s)
     initial_deadline = request['deadline']
+    initial_time = s.clock().timestamp()
     valid_runtime = deepcopy(s.http.pods[0]['runtime'])
     transport = s.backend.transport.request
     gets = []
@@ -416,7 +419,7 @@ def test_startup_recovers_original_endpoint_without_new_create_or_extended_appro
     sleeps = []
     def sleep(seconds):
         sleeps.append(seconds)
-        s.clock.advance(seconds)
+        s.clock.advance(startup_delay if seconds == 1 else seconds)
     def endpoint(*args):
         return runner.verified_endpoint(*args, logs=lambda *_: events, command=command)
     with runner.State(s.config.trusted_state_directory) as state:
@@ -427,6 +430,8 @@ def test_startup_recovers_original_endpoint_without_new_create_or_extended_appro
             configure=lambda *_a, **_k: {'configured': True})
         assert result['status'] == 'passed', result
         assert state.read('bound-request.json')['deadline'] == initial_deadline
+        assert state.read('startup-window.json')['dispatch_cutoff'] == initial_deadline - 240 - 120
+        assert result['startup']['endpoint_ready_at'] == initial_time + startup_delay
     assert sleeps == [1, 0.25] and len(gets) >= 2  # One startup retry, then one normal dispatcher tick.
     assert client.posts == 1 and len(s.http.purchases) == 1
     assert client.request.approval_id == request['approval_id']
@@ -448,7 +453,9 @@ def test_runtime_missing_forever_reaches_original_startup_deadline_then_deletes(
             SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
             clock=lambda: s.clock().timestamp(), sleep=lambda seconds: s.clock.advance(seconds), endpoint=endpoint)
     assert result['reason'] == 'WORKER_STARTUP_DEADLINE' and result['teardown']['confirmed'] is True
-    assert len(tries) == 180 and s.clock().timestamp() == started + 180
+    window = s.config.max_runtime_seconds - s.plan.cases[0].spec.limits.max_runtime_seconds - 120
+    assert len(tries) == window and s.clock().timestamp() == started + window
+    assert result['startup']['last_endpoint_reason'] == 'DIRECT_SSH_ENDPOINT_UNAVAILABLE'
     assert s.ledger.get_job(request['job_ids'][0]).attempt_id is None
     assert len(s.http.purchases) == 1 and s.http.pods == []
 
@@ -600,7 +607,8 @@ def test_unavailable_startup_retries_without_dispatch_then_stops_at_deadline(set
         result = runner.run(s.config, s.plan, s.ledger, s.backend,
             SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
             clock=lambda: s.clock().timestamp(), sleep=lambda _: s.clock.advance(30), endpoint=missing)
-    assert len(tries) == 6
+    window = s.config.max_runtime_seconds - s.plan.cases[0].spec.limits.max_runtime_seconds - 120
+    assert len(tries) == window // 30
     assert result['reason'] == 'WORKER_STARTUP_DEADLINE'
     assert result['teardown']['confirmed'] is True
     assert s.ledger.get_job(request['job_ids'][0]).attempt_id is None
@@ -611,7 +619,7 @@ def test_approval_expiring_during_connection_never_dispatches(setup):
     request = approve_fixture(s)
     client = Endpoint(s)
     def readiness(*_a, **_k):
-        s.clock.advance(301)
+        s.clock.advance(s.config.max_runtime_seconds + 1)
     with runner.State(s.config.trusted_state_directory) as state:
         result = runner.run(s.config, s.plan, s.ledger, s.backend,
             SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
@@ -621,6 +629,68 @@ def test_approval_expiring_during_connection_never_dispatches(setup):
     assert client.posts == 0
     assert result['reason'] == 'APPROVED_DEADLINE_REACHED'
     assert result['teardown']['confirmed'] is True
+
+
+def test_insufficient_remaining_job_and_cleanup_window_refuses_startup(setup):
+    s = setup
+    request = approve_fixture(s)
+    remaining = s.plan.cases[0].spec.limits.max_runtime_seconds + 120
+    s.clock.advance(s.config.max_runtime_seconds - remaining)
+    called = []
+    def endpoint(*_):
+        called.append(True)
+        raise AssertionError('no startup work is allowed without a full execution window')
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = runner.run(s.config, s.plan, s.ledger, s.backend,
+            SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
+            clock=lambda: s.clock().timestamp(), sleep=lambda _: None, endpoint=endpoint)
+        assert state.read('startup-window.json')['approval_deadline'] == request['deadline']
+    assert result['reason'] == 'INSUFFICIENT_EXECUTION_WINDOW'
+    assert result['startup']['endpoint_attempts'] == 0 and called == []
+    assert result['teardown']['confirmed'] is True
+    assert s.ledger.get_job(request['job_ids'][0]).attempt_id is None
+    assert len(s.http.purchases) == 1
+
+
+@pytest.mark.parametrize('late_phase', ['endpoint', 'configuration', 'readiness', 'dispatch'])
+def test_every_startup_stage_shares_cutoff_and_late_ready_worker_never_dispatches(setup, late_phase):
+    s = setup
+    request = approve_fixture(s)
+    cutoff = request['deadline'] - s.plan.cases[0].spec.limits.max_runtime_seconds - 120
+    client = Endpoint(s)
+    phases = []
+    def reach_cutoff():
+        s.clock.advance(cutoff - s.clock().timestamp())
+    def endpoint(*_):
+        phases.append('endpoint')
+        if late_phase == 'endpoint':
+            reach_cutoff()
+        return {}
+    def configure(*_args, deadline, **_kwargs):
+        phases.append('configuration')
+        assert deadline == cutoff
+        if late_phase == 'configuration':
+            reach_cutoff()
+        return {'configured': True}
+    def readiness(*_args, deadline, **_kwargs):
+        phases.append('readiness')
+        assert deadline == cutoff
+        if late_phase == 'readiness':
+            reach_cutoff()
+    def progress(stage):
+        if stage == 'approved_dispatch' and late_phase == 'dispatch':
+            reach_cutoff()
+    with runner.State(s.config.trusted_state_directory) as state:
+        result = runner.run(s.config, s.plan, s.ledger, s.backend,
+            SimpleNamespace(stop_gpu=lambda worker: s.controller.stop_gpu(worker)), state,
+            clock=lambda: s.clock().timestamp(), sleep=lambda _: None, endpoint=endpoint,
+            tunnel_factory=Tunnel, client_factory=lambda *_a, **_k: client,
+            readiness=readiness, configure=configure, progress=progress)
+    assert result['reason'] == 'WORKER_STARTUP_DEADLINE'
+    assert phases == ['endpoint', 'configuration', 'readiness'][:min(3, ['endpoint', 'configuration', 'readiness', 'dispatch'].index(late_phase)+1)]
+    assert s.clock().timestamp() == cutoff < request['deadline']
+    assert client.posts == 0 and s.ledger.get_job(request['job_ids'][0]).attempt_id is None
+    assert result['teardown']['confirmed'] is True and len(s.http.purchases) == 1
 
 
 def configure_settings(s, state):

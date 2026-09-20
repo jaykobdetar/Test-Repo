@@ -46,6 +46,7 @@ LEDGER = Path('/var/lib/probe-core/research.sqlite')
 RESEARCH_SOCKET = '/run/probe-research/research.sock'
 CONTROLLER_SOCKET = '/run/probe-controller/research.sock'
 BOUND = 1024 * 1024
+COLLECTION_DELETION_RESERVE_SECONDS = 120
 
 
 class RunnerError(ValueError):
@@ -646,10 +647,21 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
         state.publish('bound-request.json', {key: request[key] for key in ('request_id', 'worker_id', 'approval_id', 'observed_provider_id', 'deadline', 'batch_hash')})
         result['stage'] = 'verified_worker_startup'
         progress(result['stage'])
-        startup_deadline = min(deadline, clock() + 180)
+        # Cold image startup shares the already consumed allowance. Preserve
+        # the full approved job runtime and time to collect/delete; never renew
+        # the provider or approval deadline merely because startup was slow.
+        job_runtime = plan.cases[0].spec.limits.max_runtime_seconds
+        startup_deadline = deadline - job_runtime - COLLECTION_DELETION_RESERVE_SECONDS
+        window = {'approval_deadline': deadline, 'dispatch_cutoff': startup_deadline,
+                  'job_runtime_seconds': job_runtime,
+                  'collection_deletion_reserve_seconds': COLLECTION_DELETION_RESERVE_SECONDS}
+        state.publish('startup-window.json', window)
+        result['startup'] = dict(window, endpoint_attempts=0)
+        require(clock() < startup_deadline, 'INSUFFICIENT_EXECUTION_WINDOW')
         while clock() < startup_deadline:
             validate_authority(ledger, config, plan, request, now=clock())
             try:
+                result['startup']['endpoint_attempts'] += 1
                 settings = endpoint(config, request, backend, state)
                 break
             except RunnerError as error:
@@ -657,17 +669,26 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
                                       'PROVIDER_LOGS_UNAVAILABLE', 'SSH_VERIFICATION_COMMAND_FAILED',
                                       'PROVIDER_ENDPOINT_UNAVAILABLE'}:
                     raise
+                result['startup']['last_endpoint_reason'] = str(error)
                 sleep(1)
         else:
             raise RunnerError('WORKER_STARTUP_DEADLINE')
+        require(clock() < startup_deadline, 'WORKER_STARTUP_DEADLINE')
+        result['startup']['endpoint_ready_at'] = clock()
         result['stage'] = 'worker_configuration'
         progress(result['stage'])
         result['configuration'] = configure(config, plan, settings, state, deadline=startup_deadline, clock=clock)
+        require(clock() < startup_deadline, 'WORKER_STARTUP_DEADLINE')
         secret = read_file(config.bearer_secret_file, owner=os.geteuid(), private=True, bound=513).decode().strip()
         require(32 <= len(secret) <= 512, 'WORKER_SECRET_INVALID')
         with tunnel_factory(**settings) as tunnel:
             client = client_factory(f'http://127.0.0.1:{tunnel.local_port}', secret, timeout_seconds=5)
+            result['stage'] = 'worker_readiness'
+            progress(result['stage'])
             readiness(client, deadline=startup_deadline, clock=clock, sleep=sleep)
+            require(clock() < deadline, 'APPROVED_DEADLINE_REACHED')
+            require(clock() < startup_deadline, 'WORKER_STARTUP_DEADLINE')
+            result['startup']['worker_ready_at'] = clock()
             result['stage'] = 'approved_dispatch'
             progress(result['stage'])
             dispatcher = Dispatcher(ledger, client, worker_id=request['worker_id'],
@@ -677,6 +698,8 @@ def run(config, plan, ledger, backend, cloud, state, *, clock=time.time, sleep=t
             while clock() < deadline:
                 current = find_request(ledger, config, plan)
                 validate_authority(ledger, config, plan, current, now=clock())
+                if ledger.get_job(request['job_ids'][0]).attempt_id is None:
+                    require(clock() < startup_deadline, 'WORKER_STARTUP_DEADLINE')
                 service.tick()
                 job = ledger.get_job(request['job_ids'][0])
                 if job.state in (JobState.COMPLETED, JobState.FAILED):

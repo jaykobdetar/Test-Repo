@@ -161,6 +161,16 @@ the failure locally; the original generic error did not retain its traceback.
 That failed attempt is not parity evidence. Its consumed approval and original records must be retained; a retry
 uses a fresh job and approval under the same cumulative operator budget.
 
+The next attempt reached the old three-minute startup cutoff while RunPod was
+still downloading and extracting the pinned image, then confirmed Pod deletion
+without running a model. The image is 5.90 GB compressed. Startup now uses the
+existing approval deadline minus the full job runtime and a 120-second allowance
+for result collection and deletion. For the current 900-second approval and
+240-second job, this gives up to 540 seconds from approval consumption to worker
+readiness and dispatch. It does not extend the paid allowance. Connection,
+configuration and readiness must all finish before that cutoff; a late worker
+cannot start a job. This change still needs live GPU validation.
+
 The incident-specific `deploy/retry-gpu-calibration.py` helper has two phases
 around the normal wheel upgrade. It first verifies the stopped request, closed
 allowance, provider absence and zero execution attempts, then cancels only that
@@ -169,6 +179,9 @@ the original state directories and prepares a new calibration in separate
 subdirectories. Its pinned inputs allow only a new plan label, idempotency key
 and state/configuration paths; the model, worker image, limits and service
 permissions remain fixed. Neither phase issues a compute approval.
+The second recovery also pins the completed first recovery's manifest, receipts
+and nested configuration paths, and verifies the exact startup-timeout result.
+Each failed job and consumed approval remains in the ledger; none is replayed.
 
 ## Local verification
 
