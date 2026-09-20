@@ -85,7 +85,7 @@ def verify_results(directory, record):
             and manifest.get('model') == config['model'] and manifest.get('operation') == {'kind':'backend_parity'}
             and manifest.get('config_sha256') == 'sha256:'+hashlib.sha256(canonical_json(config).encode()).hexdigest()
             and manifest.get('run_id') == 'public-calibration'
-            and datetime.fromisoformat(manifest['absolute_deadline']).timestamp() == record['deadline']
+            and datetime.fromisoformat(manifest['absolute_deadline']) == datetime.fromtimestamp(record['deadline'], timezone.utc)
             and manifest['software']['container_image_digest'] == config['container_image_digest']
             and manifest['software']['probe_mcp_git_commit'] == config['code_git_commit']
             and manifest['hardware']['region'] == config['region']
