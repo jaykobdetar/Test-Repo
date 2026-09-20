@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -74,6 +75,10 @@ def provider_http_metadata(status, headers=None):
 class ProviderHTTPError(ProviderResponseError):
     def __init__(self, status: int, *, headers=None):
         self.metadata = provider_http_metadata(status, headers)
+        # Do not treat an unparsed explicit backoff (including an HTTP date) as
+        # permission to retry early. Retain only this boolean, never its value.
+        self.retry_after_unusable = (headers is not None and headers.get("Retry-After") is not None
+                                     and self.metadata["retry_after_seconds"] is None)
         self.status = status
         super().__init__(f"RunPod HTTP status {status}")
 
@@ -370,6 +375,47 @@ class RunPodProvider:
             return WorkerStatus(worker_id, WorkerState.UNKNOWN, request_key=intent["request_key"],
                                 configuration_hash=intent["configuration_hash"])
         return self._observe(matches[0], intent)
+
+    def reconcile_status(self, worker_id, *, provider_id, deadline):
+        """One bounded retry for an already observed, still-approved Pod.
+
+        Only the controller's RUNNING reconciliation uses this method. Creation,
+        stop/readback and the independent stop broker retain one-shot status().
+        A repeated failure escapes in this call; it never grants a later grace
+        period, returns a cached observation or extends the original deadline.
+        """
+        intent = self._intent(worker_id)
+        eligible = (intent is not None and intent["provider_seen"] == 1
+                    and provider_id is not None and intent["provider_id"] == provider_id
+                    and type(deadline) in (int, float) and math.isfinite(deadline)
+                    and intent["deadline"] == deadline)
+        if not eligible:
+            return self.status(worker_id)
+        if self.clock().timestamp() >= deadline:
+            raise ProviderUncertain("reconciliation deadline has elapsed")
+        try:
+            observed = self.status(worker_id)
+        except ProviderHTTPError as exc:
+            delay = 2
+            retry_after = exc.metadata["retry_after_seconds"]
+            if (exc.status not in {429, 502, 503, 504}
+                    or exc.metadata["cf_mitigated_challenge"]
+                    or exc.retry_after_unusable
+                    or retry_after is not None and retry_after > delay
+                    or deadline - self.clock().timestamp() <= delay + self.config.request_timeout_seconds):
+                raise
+            self.sleep(delay)
+            # Sleep, a concurrent stop, or a scheduling delay must not reopen
+            # an expired allowance or permit a different physical resource.
+            current = self._intent(worker_id)
+            if (current is None or current["provider_seen"] != 1
+                    or current["provider_id"] != provider_id or current["deadline"] != deadline
+                    or deadline - self.clock().timestamp() <= self.config.request_timeout_seconds):
+                raise
+            observed = self.status(worker_id)
+        if self.clock().timestamp() >= deadline:
+            raise ProviderUncertain("reconciliation deadline elapsed during observation")
+        return observed
 
     def _check_spec(self, deployment):
         if (deployment.image_repository != self.config.launch.image_repository or

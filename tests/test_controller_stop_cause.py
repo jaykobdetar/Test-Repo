@@ -21,7 +21,10 @@ def causes(ledger, request_id):
 
 @pytest.fixture
 def live(harness, runpod):
-    backend, http, clock, spec = runpod
+    backend, http, _, spec = runpod
+    clock = harness["clock"]
+    backend.clock = clock
+    backend.sleep = clock.advance
     harness["controller"].backend = backend
     harness["watcher"].backend = StopOnlyBackend(backend)
     request = harness["controller"].request_provision(spec, [harness["job"].job_id], 300)
@@ -54,7 +57,7 @@ def test_original_status_503_survives_delete_503_and_later_shutdown(live, monkey
     monkeypatch.setattr(http, "request", unavailable)
     controller.reconcile()
     current = controller.status()[0]
-    assert attempts == ["GET", "DELETE"]  # Audit capture must not add a retry.
+    assert attempts == ["GET", "GET", "DELETE"]  # One bounded read retry, then the unchanged stop path.
     assert current["state"] == "UNCERTAIN" and current["last_error_code"] == "ProviderUncertain"
     record = causes(ledger, started["request_id"])[0]
     assert record["payload"]["decision"] == "compute_stop_requested"
@@ -76,6 +79,40 @@ def test_original_status_503_survives_delete_503_and_later_shutdown(live, monkey
     ledger.sync_audit()
     from probe_core.audit import AuditLog
     assert AuditLog(ledger.audit_path).verify() == ledger.audit_records()
+
+
+def test_one_transient_read_recovers_without_revoking_the_original_allowance(live, monkeypatch):
+    controller, ledger, http, started = (live[key] for key in ("controller", "ledger", "http", "started"))
+    original = http.request
+    path = "/v2/pods/" + started["observed_provider_id"]
+    reads = []
+    before = live["clock"]()
+
+    def transient(method, current_path, body=None):
+        if method == "GET" and current_path == path:
+            reads.append(live["clock"]().timestamp())
+            if len(reads) == 1:
+                raise ProviderHTTPError(503, headers={"Retry-After": "2"})
+        return original(method, current_path, body)
+
+    monkeypatch.setattr(http, "request", transient)
+    controller.reconcile()
+    current = controller.status()[0]
+    assert current["state"] == "RUNNING"
+    assert (current["approval_id"], current["deadline"], current["observed_provider_id"]) == (
+        started["approval_id"], started["deadline"], started["observed_provider_id"])
+    assert reads == [before.timestamp(), before.timestamp() + 2]
+    assert causes(ledger, started["request_id"]) == []
+    assert live["watcher"].tick() == []
+    assert len(http.purchases) == 1 and not any(call[0] == "DELETE" for call in http.calls)
+    assert all(job.attempt_id is None for job in ledger.list_jobs())
+    assert len([entry for entry in ledger.audit_records()
+                if entry["payload"].get("decision") == "human_approved"]) == 1
+    # The normal deadline still terminates the same resource without renewal.
+    live["clock"].advance(current["deadline"] - live["clock"]().timestamp())
+    assert live["watcher"].tick()[0]["reason"] == "absolute_deadline"
+    controller.reconcile()
+    assert controller.status()[0]["state"] == "STOPPED" and http.pods == []
 
 
 @pytest.mark.parametrize("state", ["STARTING", "STOP_REQUESTED", "UNCERTAIN"])
