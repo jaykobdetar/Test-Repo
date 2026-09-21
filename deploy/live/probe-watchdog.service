@@ -1,0 +1,27 @@
+[Unit]
+Description=Probe independent deadline and idle stop watchdog
+After=probe-provider-stop.service
+Wants=probe-provider-stop.service
+# No PartOf/BindsTo/Requires relationship: remain alive after starter failure.
+
+[Service]
+Type=simple
+User=probe-watchdog
+Group=probe-watch-read
+SupplementaryGroups=probe-ledger-read probe-stop
+ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.controller watchdog --ledger /var/lib/probe-core/research.sqlite --stop-socket /run/probe-provider/stop.sock --stop-server-uid @TRUSTED_UID@ --watchdog-health /var/lib/probe-watchdog/health.json --state /var/lib/probe-watchdog/state.sqlite
+StateDirectory=probe-watchdog
+StateDirectoryMode=0750
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/probe-core
+ReadWritePaths=/var/lib/probe-watchdog
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

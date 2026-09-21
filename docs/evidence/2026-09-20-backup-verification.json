@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "destination": "operator private Google Drive",
+  "backups": [
+    {
+      "archive_sha256": "sha256:11d90018050dbbbce1c8347ec2e280166c4b19eea875e00575715775cc708ff4",
+      "archive_bytes": 6154240,
+      "readback_verified": true,
+      "restore_verified": true,
+      "members_verified": 9,
+      "verified_at": "2026-09-20T23:26:53.804941+00:00",
+      "credentials_included": false,
+      "source_history_modified": false,
+      "model": "Qwen/Qwen3-1.7B"
+    },
+    {
+      "archive_sha256": "sha256:4e07afccdfadbb7f1e7f118bd1bcc28821b14a92aef9c013a1abb4dc66e43a07",
+      "archive_bytes": 6154240,
+      "readback_verified": true,
+      "restore_verified": true,
+      "members_verified": 10,
+      "verified_at": "2026-09-20T23:24:48.627910+00:00",
+      "credentials_included": false,
+      "source_history_modified": false,
+      "model": "Qwen/Qwen3-1.7B-Base"
+    }
+  ]
+}

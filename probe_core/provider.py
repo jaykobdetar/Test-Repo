@@ -12,28 +12,44 @@ import math
 import os
 from pathlib import Path
 import sqlite3
-from typing import Iterator, Protocol
+from typing import Iterator, Literal, Protocol
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .audit import canonical_json
 
 
 class DeploymentSpec(BaseModel):
-    """The complete immutable configuration approved for simulator provisioning."""
+    """Immutable provisioning config with explicit disposable execution scope."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
     gpu_model: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_. -]+$")
     image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    volume_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
+    volume_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
     region: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
-    volume_gb: int = Field(ge=1, le=1000)
+    volume_gb: int = Field(ge=0, le=1000)
     gpu_count: int = Field(default=1, ge=1, le=1)
+    image_repository: str | None = Field(default=None, max_length=200,
+                                         pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+    launch_config_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    storage_mode: Literal["ephemeral_preflight", "disposable_research"] | None = None
+
+    @model_validator(mode="after")
+    def storage_scope(self):
+        if self.storage_mode in {"ephemeral_preflight", "disposable_research"}:
+            if self.volume_id is not None or self.volume_gb != 0:
+                raise ValueError("disposable deployments cannot attach persistent storage")
+            if self.image_repository is None or self.launch_config_hash is None:
+                raise ValueError("disposable deployments must bind the exact trusted launch configuration")
+        elif self.volume_id is None or self.volume_gb < 1:
+            raise ValueError("research deployments require a persistent volume")
+        return self
 
     @property
     def digest(self) -> str:
-        return "sha256:" + hashlib.sha256(canonical_json(self.model_dump()).encode()).hexdigest()
+        # Preserve hashes of pre-live-adapter persisted approvals.
+        return "sha256:" + hashlib.sha256(canonical_json(self.model_dump(exclude_none=True)).encode()).hexdigest()
 
 
 class WorkerState(StrEnum):
@@ -83,12 +99,18 @@ class ComputeBackend(StopBackend, Protocol):
     stop_confirms_execution: bool
     def quote(self, *, worker_id: str | None = None, deployment: DeploymentSpec | None = None) -> PriceQuote: ...
     def create(self, worker_id: str, deployment: DeploymentSpec, *, request_key: str,
-               price_ceiling_usd_per_hour: float, storage_ceiling_usd_per_day: float) -> WorkerStatus: ...
+               price_ceiling_usd_per_hour: float, storage_ceiling_usd_per_day: float,
+               absolute_deadline: datetime | None = None) -> WorkerStatus: ...
     def start(self, worker_id: str, *, request_key: str,
-              price_ceiling_usd_per_hour: float, storage_ceiling_usd_per_day: float) -> WorkerStatus: ...
+              price_ceiling_usd_per_hour: float, storage_ceiling_usd_per_day: float,
+              absolute_deadline: datetime | None = None) -> WorkerStatus: ...
 
 
-class ProviderBudgetRefused(RuntimeError):
+class ProviderLaunchRefused(RuntimeError):
+    """A definitive local/provider refusal before a paid action was submitted."""
+
+
+class ProviderBudgetRefused(ProviderLaunchRefused):
     """A definitive provider refusal: no paid operation was submitted."""
 
 
@@ -201,7 +223,8 @@ class SimulatedProvider:
             raise ProviderBudgetRefused("provider storage no longer satisfies idle budget")
 
     def create(self, worker_id: str, deployment: DeploymentSpec, *, request_key: str,
-               price_ceiling_usd_per_hour: float = 1.49, storage_ceiling_usd_per_day: float = 2.0) -> WorkerStatus:
+               price_ceiling_usd_per_hour: float = 1.49, storage_ceiling_usd_per_day: float = 2.0,
+               absolute_deadline: datetime | None = None) -> WorkerStatus:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -227,7 +250,8 @@ class SimulatedProvider:
         return self.status(worker_id)
 
     def start(self, worker_id: str, *, request_key: str,
-              price_ceiling_usd_per_hour: float = 1.49, storage_ceiling_usd_per_day: float = 2.0) -> WorkerStatus:
+              price_ceiling_usd_per_hour: float = 1.49, storage_ceiling_usd_per_day: float = 2.0,
+              absolute_deadline: datetime | None = None) -> WorkerStatus:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:

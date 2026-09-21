@@ -1,0 +1,21 @@
+# Required build argument: the published diagnostic image's immutable digest.
+ARG DIAGNOSTIC_IMAGE
+FROM ${DIAGNOSTIC_IMAGE}
+ARG SOURCE_COMMIT
+ARG PUBLIC_ASSETS_MANIFEST=deploy/gpu/public-assets.json
+WORKDIR /opt/probe-core
+COPY ${PUBLIC_ASSETS_MANIFEST} /opt/probe-core/public-assets.json
+COPY deploy/gpu/bake-assets.py /tmp/bake-assets.py
+RUN python /tmp/bake-assets.py /opt/probe-core/public-assets.json /opt/probe-assets && rm /tmp/bake-assets.py
+COPY deploy/gpu/bootstrap-requirements.txt /tmp/bootstrap-requirements.txt
+RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes --no-deps -r /tmp/bootstrap-requirements.txt && rm /tmp/bootstrap-requirements.txt
+COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY probe_core ./probe_core
+COPY deploy/gpu/diagnose.py deploy/gpu/accept-resources.py /opt/probe/
+ENV UV_PROJECT_ENVIRONMENT=/opt/probe-core/venv UV_LINK_MODE=copy
+RUN uv sync --locked --extra worker --no-dev --no-editable && uv cache clean && \
+    python -c 'import hashlib,json,pathlib,re,sys; commit=sys.argv[1]; assert re.fullmatch("[0-9a-f]{40}",commit); pathlib.Path("build-provenance.json").write_text(json.dumps({"source_commit":commit,"environment_lock_hash":"sha256:"+hashlib.sha256(pathlib.Path("uv.lock").read_bytes()).hexdigest()},sort_keys=True)+"\n")' "$SOURCE_COMMIT" && \
+    groupadd --gid 10001 probe-worker && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash probe-worker
+ENV PATH=/opt/probe-core/venv/bin:$PATH HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 TOKENIZERS_PARALLELISM=false CUBLAS_WORKSPACE_CONFIG=:4096:8
+LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
+ENTRYPOINT ["/opt/probe-core/venv/bin/python", "-I", "-m", "probe_core.gpu_launch"]

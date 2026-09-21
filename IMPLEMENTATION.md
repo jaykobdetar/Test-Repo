@@ -1,15 +1,20 @@
-# Auto Interpretability Lab: local implementation and acceptance
+# Auto Interpretability Lab: Implementation and acceptance boundaries
 
-This document describes the Phase 3–5 implementation on `main`. The supplied
-compute backend is explicitly simulated: these services provision no paid GPU.
-The worker executes real HF/PyTorch models on CPU for acceptance. The separate
-Phase 6 RunPod work is in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1)
-on `feat/live-deployment`, outside the implementation described here.
+[Project overview](README.md) · [Validation status](docs/validation.md) · [Deployment checklist](docs/live-deployment-plan.md)
 
-Start with the [project overview](README.md) for setup and navigation. Use the
-[local verification report](docs/validation.md) to distinguish recorded test
-results from the requirements and remaining work below. The project display
-name does not change existing `probe-core`, `probe_core` or `probe-mcp` identifiers.
+This guide describes the deployment branch through source `7e01602`, including
+the guarded RunPod adapter, installed service boundaries, pinned worker images
+and backup tooling. The public main branch began with the smaller local foundation;
+its earlier milestones are recorded in [the historical core report](VALIDATION.md).
+Package names, Python imports, service accounts and paths retain their `probe-*`
+identifiers despite the Auto Interpretability Lab display name.
+
+As of September 20, 2026, controller source `8a5486b` is installed and has passed
+16 CPU containment checks, 26 identity checks and verified Drive backup/restore.
+Seven full-worker GPU attempts ended before inference; no canonical GPU case has
+passed. Provider deletion is confirmed for those attempts, but shutdown during
+controller host loss is unverified. See the deployment checklist for the current
+blocker and the distinction between prepared code and live evidence.
 
 ## Boundaries
 
@@ -59,9 +64,12 @@ do not prove Phase 5 complete.
   responses enter reconciliation; they never cause a blind second creation/start.
 - Watchdog operation is independent of the controller process. Stop requests
   remain pending until provider readback confirms shutdown. Expiry alone is not
-  a shutdown receipt. Idle work stops after five minutes.
-- Provider credentials belong in the controller's private configuration when
-  Phase 6 adds a real adapter. No credential is needed for this simulator.
+  a shutdown receipt. Ordinary idle work stops after five minutes. Initial
+  startup of one never-dispatched disposable calibration job uses the same fixed
+  dispatch cutoff as the runner, within the original approval deadline.
+- Provider credentials belong only to the trusted controller and its independent
+  stop broker. The watchdog uses a narrow Unix socket instead of holding a full
+  provider key. No credential is needed for the simulator.
 
 ## Phase 4 requirements
 
@@ -112,20 +120,19 @@ safetensors include exact `TensorArtifact` references usable in later jobs.
 so a captured activation or CPU-generated direction survives worker replacement.
 The dispatcher verifies and transfers those retained tensor inputs before execution.
 
-## Remaining deployment stages
+## Remaining deployment work
 
-The separate Phase 6 deployment work must supply and verify the real RunPod adapter, secured
-service identities and credential provisioning on the chosen host, pinned worker
-image, reviewed storage strategy and exact scientific checkpoint revisions, real GPU parity,
-and a verified stopped state. Phase 7 supplies the private evaluator and its
-scientific promotion rules. Neither is represented as implemented by the local
-simulator or CPU acceptance tests.
+The RunPod adapter, protected host services, verified backups and pinned public
+assets are implemented. The selected GPU storage design uses disposable Pod disks
+and immutable image assets; it supersedes the original network-volume proposal.
+The next acceptance target is one successful Base parity job with retained,
+verified artifacts and confirmed Pod deletion. Posttrained parity, the other
+runtime cases and replacement evidence follow that result. Eighteen case plans
+are prepared across the two model identities; none has passed live.
 
-Track deployment progress and its branch-specific acceptance evidence in
-[draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1).
-That branch's current storage choice uses disposable Pod disks and baked immutable
-public assets, without a network volume.
-The requirements above do not certify that deployment or its GPU results.
+The private evaluator and scientific promotion rules remain future work. Broader
+agent orchestration is deferred while the first Base path is made reliable.
+Local simulator and CPU tests do not supply either scientific or live GPU evidence.
 
 The agreed v1 CPU sandbox plus fixed GPU primitives deliberately does not execute
 arbitrary agent-written Python on the GPU. That original report capability needs

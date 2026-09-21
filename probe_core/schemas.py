@@ -192,7 +192,7 @@ class HardwareIdentity(FrozenModel):
 
 
 class ExperimentMetadata(FrozenModel):
-    tool: Literal["capture_activation", "activation_patch", "ablate_component", "steer_direction", "fit_probe", "generate_batch", "weight_stats", "tensor_slice", "module_manifest"]
+    tool: Literal["capture_activation", "activation_patch", "ablate_component", "steer_direction", "fit_probe", "generate_batch", "weight_stats", "tensor_slice", "module_manifest", "backend_parity"]
     modules: Annotated[tuple[ModuleName, ...], Field(min_length=1, max_length=112)]
     positions: Annotated[tuple[TokenPosition, ...], Field(min_length=1, max_length=1024)]
     intervention_hash: SHA256
@@ -266,6 +266,8 @@ class RunManifest(FrozenModel):
 
     @model_validator(mode="after")
     def confirmatory_constraints(self) -> Self:
+        if self.experiment.tool == "backend_parity" and (self.run.experiment_stage != ExperimentStage.CALIBRATION or self.run.hypothesis_id is not None or self.results.heldout or self.results.replication_status != "not_applicable"):
+            raise ValueError("backend parity is calibration and never held-out or replication evidence")
         if self.model.repo == "probe/testing-tiny-qwen3" and self.run.experiment_stage != ExperimentStage.CALIBRATION:
             raise ValueError("test fixture models are restricted to calibration")
         if self.run.experiment_stage in {ExperimentStage.CONFIRMATORY, ExperimentStage.REPLICATION}:
@@ -379,7 +381,13 @@ class ModuleManifest(FrozenModel):
     kind: Literal["module_manifest"]
 
 
-Operation = Annotated[Capture | Patch | Ablate | Steer | FitProbe | Generate | WeightStats | TensorSlice | ModuleManifest, Field(discriminator="kind")]
+class BackendParity(FrozenModel):
+    """Fixed trusted calibration suite; no caller-selected code or tolerances."""
+    kind: Literal["backend_parity"]
+    suite_version: Literal[1] = 1
+
+
+Operation = Annotated[Capture | Patch | Ablate | Steer | FitProbe | Generate | WeightStats | TensorSlice | ModuleManifest | BackendParity, Field(discriminator="kind")]
 
 
 class JobLimits(FrozenModel):
@@ -405,6 +413,14 @@ class JobSpec(FrozenModel):
         if self.model.repo == "probe/testing-tiny-qwen3" and self.experiment_stage != ExperimentStage.CALIBRATION:
             raise ValueError("test fixture models are restricted to calibration")
         requested = len(self.inputs.prompt_ids) * self.inputs.generation.max_new_tokens
+        if self.operation.kind == "backend_parity":
+            if self.experiment_stage != ExperimentStage.CALIBRATION or self.hypothesis_id is not None:
+                raise ValueError("backend parity is calibration only and cannot supply hypothesis evidence")
+            if not 2 <= len(self.inputs.prompt_ids) <= 4 or self.inputs.generation.max_new_tokens > 8 or self.inputs.generation.temperature != 0.0:
+                raise ValueError("backend parity requires two to four prompts and at most eight greedy tokens")
+            requested *= 2  # Native HF and NNsight both generate actual tokens.
+            if self.model.repo != "probe/testing-tiny-qwen3" and (self.model.dtype != "bfloat16" or self.model.quantized):
+                raise ValueError("canonical backend parity requires unquantized BF16")
         if requested > self.limits.max_generated_tokens:
             raise ValueError("prompt count times max_new_tokens exceeds the declared generation limit")
         if self.experiment_stage in {ExperimentStage.CONFIRMATORY, ExperimentStage.REPLICATION}:
@@ -474,6 +490,7 @@ class ApprovalNonce(FrozenModel):
     token: SecretStr = Field(repr=False, exclude=True)
     pod_id: Identifier
     batch_hash: SHA256
+    purpose: Literal["research", "infrastructure_preflight"] = "research"
     max_runtime_seconds: Seconds
     price_ceiling_usd_per_hour: Annotated[float, Field(strict=True, gt=0, le=1.50, allow_inf_nan=False)]
     expires_at: UTCTimestamp

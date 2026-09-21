@@ -210,9 +210,14 @@ class UnixRPCClient:
             connection.connect(self.path)
             if peer_uid(connection) != self.expected_server_uid:
                 raise RPCError("untrusted service identity")
-            connection.sendall(data)
-            with connection.makefile("rb") as stream:
-                raw = stream.readline(MAX_RESPONSE + 1)
+            try:
+                connection.sendall(data)
+                with connection.makefile("rb") as stream:
+                    raw = stream.readline(MAX_RESPONSE + 1)
+            except OSError:
+                # A denied peer can close before sendall or while we read.
+                # The request may have reached the service: never retry it.
+                raise RPCError("service connection failed") from None
             if len(raw) > MAX_RESPONSE or not raw.endswith(b"\n"):
                 raise RPCError("invalid service response")
             result = decode(raw)

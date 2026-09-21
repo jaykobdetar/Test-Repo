@@ -15,9 +15,11 @@ from probe_core.controller import (
     StopWatchdog, WatchdogUnavailable, serve_controller,
 )
 from probe_core.ledger import Ledger
-from probe_core.provider import DeploymentSpec, PriceQuote, SimulatedProvider, StopOnlyBackend, WorkerState
+from probe_core.ledger import ApprovalError
+from probe_core.provider import DeploymentSpec, PriceQuote, SimulatedProvider, StopOnlyBackend, WorkerState, WorkerStatus
 from probe_core.rpc import RPCError, UnixRPCClient
 from probe_core.schemas import JobSpec
+from probe_core.schemas import ApprovalNonce
 
 
 class Clock:
@@ -72,6 +74,168 @@ def provision(harness, runtime=900):
     request = harness["controller"].request_provision(deployment(), [harness["job"].job_id], runtime)
     started = harness["controller"].approve_and_start(request["request_id"])
     return request, started
+
+
+def test_human_infrastructure_allowance_creates_no_dispatchable_research_jobs(harness):
+    controller = harness["controller"]
+    params = {"deployment": deployment().model_dump(), "script_sha256": "sha256:" + "c" * 64,
+              "max_runtime_seconds": 300}
+    with pytest.raises(PermissionError):
+        controller.research_dispatch("request_preflight", params)
+    request = controller.admin_dispatch("request_preflight", params)
+    assert request["job_ids"] == []
+    assert request["infrastructure"] == {"kind": "gpu_preflight", "script_sha256": "sha256:" + "c" * 64}
+    started = controller.approve_and_start(request["request_id"])
+    assert started["state"] == "RUNNING"
+    with harness["ledger"].read_connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM approval_jobs WHERE approval_id=?", (request["approval_id"],)).fetchone()[0] == 0
+        body = json.loads(connection.execute("SELECT document FROM approvals WHERE approval_id=?", (request["approval_id"],)).fetchone()[0])
+    assert body["purpose"] == "infrastructure_preflight"
+    assert harness["ledger"].dispatch_next(request["worker_id"], approval_id=request["approval_id"]) is None
+    harness["clock"].advance(300)
+    assert harness["watcher"].tick()[0]["reason"] == "absolute_deadline"
+    controller.reconcile()
+    assert controller.status()[0]["state"] == "STOPPED"
+
+
+def test_ephemeral_preflight_cannot_be_provisioned_replaced_or_reused_for_research(harness):
+    controller = harness["controller"]
+    spec = deployment(storage_mode="ephemeral_preflight", volume_id=None, volume_gb=0,
+                      image_repository="ghcr.io/test/diagnostic", launch_config_hash="sha256:" + "d" * 64)
+    for replaces in (None, "old-worker"):
+        with pytest.raises(ControllerConflict, match="infrastructure preflight"):
+            controller.request_provision(spec, [harness["job"].job_id], 300, replaces_worker_id=replaces)
+    params = {"deployment": spec.model_dump(), "script_sha256": "sha256:" + "c" * 64,
+              "max_runtime_seconds": 300}
+    with pytest.raises(PermissionError):
+        controller.research_dispatch("request_preflight", params)
+    request = controller.admin_dispatch("request_preflight", params)
+    assert request["job_ids"] == [] and request["configuration_hash"] == spec.digest
+    controller.approve_and_start(request["request_id"], price_ceiling_usd_per_hour=.80)
+    assert harness["ledger"].dispatch_next(request["worker_id"], approval_id=request["approval_id"]) is None
+    harness["clock"].advance(300)
+    harness["watcher"].tick()
+    controller.reconcile()
+    assert controller.status()[0]["state"] == "STOPPED"
+    with pytest.raises(ControllerConflict, match="cannot run research"):
+        controller.request_start(request["worker_id"], [harness["job"].job_id], 300)
+    assert len(calls(harness, "create")) == 1 and calls(harness, "start") == []
+
+
+def disposable_deployment():
+    return deployment(storage_mode="disposable_research", volume_id=None, volume_gb=0,
+                      image_repository="ghcr.io/test/worker", launch_config_hash="sha256:" + "d" * 64)
+
+
+def test_disposable_research_requires_research_batch_and_cannot_reuse_worker(harness):
+    controller, ledger = harness["controller"], harness["ledger"]
+    spec = disposable_deployment()
+    with pytest.raises(ControllerConflict, match="approved research batch"):
+        controller.request_infrastructure_preflight(spec, "sha256:" + "c" * 64, 300)
+    with pytest.raises(ValueError, match="nonempty bounded list"):
+        controller.request_provision(spec, [], 300)
+    request = controller.request_provision(spec, [harness["job"].job_id], 300)
+    assert calls(harness, "create") == []
+    with pytest.raises(ApprovalError):
+        ledger.dispatch_next(request["worker_id"], approval_id=request["approval_id"])
+    started = controller.approve_and_start(request["request_id"])
+    assert started["state"] == "RUNNING" and len(calls(harness, "create")) == 1
+    for stopped in (False, True):
+        if stopped:
+            controller.stop_gpu(request["worker_id"])
+        with pytest.raises(ControllerConflict, match="newly approved CREATE or REPLACE"):
+            controller.request_start(request["worker_id"], [harness["job"].job_id], 300)
+    assert calls(harness, "start") == []
+
+
+def test_disposable_replacement_accepts_exact_deleted_identity_only_with_new_approval(harness, monkeypatch):
+    controller, backend = harness["controller"], harness["backend"]
+    first = controller.request_provision(disposable_deployment(), [harness["job"].job_id], 300)
+    started = controller.approve_and_start(first["request_id"])
+    controller.stop_gpu(first["worker_id"])
+    original_status = backend.status
+    prior = original_status(first["worker_id"])
+
+    def status(worker_id):
+        return WorkerStatus(worker_id, WorkerState.ABSENT, prior.provider_id) if worker_id == first["worker_id"] else original_status(worker_id)
+
+    monkeypatch.setattr(backend, "status", status)
+    replacement = controller.request_provision(disposable_deployment(), [harness["job"].job_id], 300,
+                                              replaces_worker_id=first["worker_id"])
+    assert replacement["worker_id"] != first["worker_id"] and replacement["approval_id"] != started["approval_id"]
+    assert len(calls(harness, "create")) == 1
+    second = controller.approve_and_start(replacement["request_id"])
+    assert second["state"] == "RUNNING" and len(calls(harness, "create")) == 2
+    assert calls(harness, "start") == []
+
+
+@pytest.mark.parametrize("fault", ["unclosed", "unknown", "different_provider", "unseen"])
+def test_disposable_replacement_never_treats_empty_inventory_as_closed_authority(harness, monkeypatch, fault):
+    controller, backend = harness["controller"], harness["backend"]
+    first = controller.request_provision(disposable_deployment(), [harness["job"].job_id], 300)
+    controller.approve_and_start(first["request_id"])
+    if fault != "unclosed":
+        controller.stop_gpu(first["worker_id"])
+    original_status = backend.status
+    prior = original_status(first["worker_id"])
+    observed = WorkerStatus(first["worker_id"], WorkerState.UNKNOWN if fault == "unknown" else WorkerState.ABSENT,
+                           None if fault == "unseen" else "different" if fault == "different_provider" else prior.provider_id)
+    monkeypatch.setattr(backend, "status", lambda worker_id: observed if worker_id == first["worker_id"] else original_status(worker_id))
+    replacement = controller.request_provision(disposable_deployment(), [harness["job"].job_id], 300,
+                                              replaces_worker_id=first["worker_id"])
+    with pytest.raises(ControllerConflict, match="confirmed stopped"):
+        controller.approve_and_start(replacement["request_id"])
+    assert len(calls(harness, "create")) == 1
+    with harness["ledger"].read_connection() as reader:
+        assert reader.execute("SELECT count(*) FROM approvals WHERE approval_id=?", (replacement["approval_id"],)).fetchone()[0] == 0
+
+
+def test_disposable_pod_loss_never_turns_unfinished_job_into_success_or_replays_it(harness, monkeypatch):
+    controller, ledger, backend = harness["controller"], harness["ledger"], harness["backend"]
+    request = controller.request_provision(disposable_deployment(), [harness["job"].job_id], 300)
+    started = controller.approve_and_start(request["request_id"])
+    active = ledger.dispatch_next(request["worker_id"], approval_id=started["approval_id"])
+    ledger.start_job(active.job_id, active.attempt_id, request["worker_id"])
+    prior = backend.status(request["worker_id"])
+    monkeypatch.setattr(backend, "status", lambda worker_id: WorkerStatus(worker_id, WorkerState.ABSENT, prior.provider_id))
+    # Only a provider with confirmed whole-Pod destruction can acknowledge stop.
+    monkeypatch.setattr(backend, "stop_confirms_execution", True, raising=False)
+    result = controller.reconcile()[0]
+    assert result["state"] == "STOPPED" and result["deadline"] == started["deadline"]
+    failed = ledger.get_job(active.job_id)
+    assert failed.state.value == "FAILED" and failed.attempt_id == active.attempt_id
+    with ledger.read_connection() as reader:
+        assert reader.execute("SELECT count(*) FROM manifests").fetchone()[0] == 0
+        assert reader.execute("SELECT count(*) FROM attempts").fetchone()[0] == 1
+        assert reader.execute("SELECT count(*) FROM approvals").fetchone()[0] == 1
+    controller.reconcile()
+    assert len(calls(harness, "create")) == 1 and calls(harness, "start") == []
+
+
+@pytest.mark.parametrize("purpose", ["research", "infrastructure_preflight"])
+def test_research_and_infrastructure_approval_scopes_cannot_cross(harness, purpose):
+    ledger, clock = harness["ledger"], harness["clock"]
+    digest = ledger.batch_hash([harness["job"].job_id])
+    approval = ApprovalNonce(approval_id="scope-test", token="s" * 48, pod_id="worker-scope", batch_hash=digest,
+                             purpose=purpose, max_runtime_seconds=300, price_ceiling_usd_per_hour=1.0,
+                             issued_at=clock(), expires_at=clock() + timedelta(seconds=300))
+    ledger.register_approval(approval)
+    common = dict(pod_id="worker-scope", live_price_usd_per_hour=0.50, requested_runtime_seconds=300)
+    with pytest.raises(ApprovalError, match="different purpose"):
+        if purpose == "research":
+            ledger.consume_infrastructure_approval("scope-test", "s" * 48, infrastructure_hash=digest, **common)
+        else:
+            ledger.consume_approval("scope-test", "s" * 48, job_ids=[harness["job"].job_id], **common)
+    with ledger.read_connection() as connection:
+        assert connection.execute("SELECT consumed_at FROM approvals WHERE approval_id='scope-test'").fetchone()[0] is None
+
+
+def test_infrastructure_cannot_overlap_an_unclosed_research_allowance(harness):
+    provision(harness, runtime=300)
+    request = harness["controller"].request_infrastructure_preflight(deployment(), "sha256:" + "d" * 64, 300)
+    with pytest.raises(ApprovalError, match="shutdown"):
+        harness["controller"].approve_and_start(request["request_id"])
+    assert len(calls(harness, "create")) == 1
 
 
 def calls(harness, operation):
@@ -352,7 +516,9 @@ def test_real_research_socket_can_request_but_cannot_approve(harness):
         assert request["state"] == "PENDING"
         with pytest.raises(RPCError):
             client.rpc.call("approve", {"request_id": request["request_id"]})
-        with pytest.raises(RPCError):
+        # A denied peer may be disconnected before sendall or before a JSON
+        # response can be read; both are an actual refusal by the admin socket.
+        with pytest.raises((RPCError, BrokenPipeError, ConnectionResetError)):
             UnixRPCClient(admin.path, expected_server_uid=os.geteuid()).call("approve", {"request_id": request["request_id"]})
         assert calls(harness, "create") == []
     finally:

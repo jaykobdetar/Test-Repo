@@ -1,114 +1,128 @@
 # Auto Interpretability Lab
 
-Auto Interpretability Lab is an experimental toolkit for giving a research agent controlled
-access to a language model's internals. It combines model inspection and
-activation interventions with a persistent experiment ledger, bounded execution,
-and a separate human approval path for compute.
+Auto Interpretability Lab is experimental infrastructure for agent-assisted
+research into language models. It lets a research agent request model inspections
+and controlled interventions, records what ran and what it produced, and keeps
+paid compute behind a separate approval process.
 
-The intended research subjects are **Qwen3-1.7B-Base** and **Qwen3-1.7B**. The
-implementation on `main` has been tested locally with a small, randomly initialized
-Qwen3 model on CPU. Its cloud provider is a simulator. Live RunPod deployment is
-being developed separately in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1)
-on `feat/live-deployment`; that work is not included in `main` and is not a claim
-of completed GPU acceptance. Hidden evaluation and the independent scientific
-workflow also remain unfinished. No scientific discovery is claimed.
+Both **Qwen3-1.7B-Base** and **Qwen3-1.7B** have passed supervised GPU numerical
+calibration. The project is not yet an autonomous research lab, and it has
+produced no validated scientific findings.
 
-To try the local implementation, start with the [development tests](#install-and-run-the-development-tests).
-Read the [verification report](docs/validation.md) for what has actually been
-tested and the [service guides](#configure-the-services) before configuring a host.
+> This page describes the deployment work in
+> [the current draft pull request](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1).
+> The `main` branch contains the earlier local foundation. Deployment acceptance
+> is still in progress; use the documentation from the same branch as your code.
 
-## What main includes
+## What the software does
 
-- **Persistent experiments:** a local SQLite ledger with job states, leases,
-  cancellation, recovery, immutable accepted manifests, and a hash-chained audit log.
-- **Model operations:** activation capture, patching, ablation, steering, probe
-  fitting, bounded generation, weight statistics, tensor slices, and module inspection.
-- **Two numerical backends:** Hugging Face/PyTorch as a reference and NNsight
-  for interventions, with local parity tests.
-- **Trusted execution:** a separate worker process, authenticated loopback HTTP,
-  a controller-side dispatcher, and hash-checked artifact transfer and retention.
-- **Research tools over MCP:** stdio access to jobs, history, hypotheses, artifacts,
-  CPU experiments, and compute requests. Submitting a job does not approve a GPU start.
-- **CPU Python sandbox:** rootless Podman with restricted mounts, no network or GPU,
-  and enforced time, memory, process, CPU, and output limits.
-- **Compute-control foundation:** one-time human approvals, price/runtime checks,
-  and an independent watchdog, currently connected to a persistent provider simulator.
+- **Records experiments:** SQLite stores job states, execution attempts, model
+  identities, retained artifacts and an append-only audit trail.
+- **Inspects and intervenes in models:** fixed operations cover activation capture,
+  patching, ablation, steering, probe fitting, bounded generation and weight
+  inspection. Hugging Face/PyTorch provides a reference for NNsight comparisons.
+- **Exposes research tools through MCP:** an agent can submit work, inspect results
+  and record hypotheses. A compute request does not itself authorize a GPU start.
+- **Runs bounded jobs:** the worker and dispatcher enforce job limits and verify
+  returned artifacts. Arbitrary CPU Python runs in a rootless Podman sandbox;
+  arbitrary agent-written GPU Python is not supported.
+- **Separates operational authority:** research, controller, watchdog and backup
+  processes use distinct accounts. The controller handles approvals and provider
+  credentials; the research agent and model worker do not receive those credentials.
 
-The repository is `auto-interpretability-lab`. The existing MCP command remains
-`probe-mcp`; the Python distribution and import package remain `probe-core` and
-`probe_core`. Service names, configuration paths and environment variables keep
-their existing `probe` identifiers so the documented commands continue to work.
+These are implemented engineering capabilities. Their validation scope is described
+below and in the [validation guide](docs/validation.md).
 
-## Current limits
+## Current status
 
-| Area | Status |
+As of September 20, 2026:
+
+| Area | Evidence and remaining work |
 | --- | --- |
-| Cloud provider | Simulator on `main`; live RunPod work is separate in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1) |
-| GPU execution | CUDA paths exist; real GPU limits, SSH deployment, and canonical checkpoint parity still require validation |
-| Flexible experiments | Arbitrary CPU Python plus fixed worker operations; no arbitrary agent-written GPU Python |
-| Interventions | Apply to the prompt's prefill pass; generation is a separate, unmodified operation |
-| Scientific evaluation | Confirmation/replication execution is refused until a private evaluator is implemented |
-| Research workflow | Hypothesis storage and freezing exist; Explorer/Skeptic/Replicator orchestration and blind calibration remain pending |
-| Advanced methods | SAE/Qwen-Scope, circuit tracing, and automated novelty adjudication are not implemented |
+| Ubuntu controller | Installed. Its latest upgrade passed 16 CPU containment/crash checks and 26 account-boundary checks. |
+| Independent backups | Controller backups and both standalone calibration bundles passed Google Drive upload, download, hash verification and local restore. |
+| RunPod containment | Managed-worker resource controls and cleanup passed on a compatible host; that profile requires checks on each new host. The supervised profile uses the disposable Pod boundary and does not claim nested cgroup enforcement. |
+| Model images | Separate Base and posttrained images use pinned public assets. Both supervised runs verified model/image provenance and returned artifact hashes. |
+| Supervised GPU execution | **Both models passed:** each completed 29 numerical checks, including 25 exact comparisons and nine retained tensors, followed by verified collection, process exit and confirmed Pod deletion. |
+| Managed-worker acceptance | Incomplete. The supervised result does not establish installed-ledger dispatch, resource-limit enforcement, cancellation, recovery or replacement. |
+| Scientific workflow | Private held-out evaluation, independent Explorer/Skeptic/Replicator sessions and blind scientific calibration remain future work. |
 
-Model weights, credentials, research datasets, and built container images are not
-included. Deployment files on `main` are examples and do not install or start services.
+The selected path is [supervised public calibration](docs/supervised-public-calibration.md),
+which runs one fixed command without another controller installation or nested
+cgroup requirement. Both models passed on RunPod RTX 4090s in EU-RO-1. The
+[calibration results](docs/calibration-results.md) record the evidence, including
+a corrected Base host-verifier mismatch with the original report preserved.
 
-## Architecture
+Next, implement the [first fixed public exploratory experiment](docs/first-public-experiment.md).
+The [deployment checklist](docs/live-deployment-plan.md) retains the
+original five managed-service steps separately. Its 18 prepared acceptance plans
+remain useful for that larger milestone; they are not prerequisites for a
+bounded, supervised public experiment.
+
+RunPod support currently permits short, supervised runs. Unattended operation,
+provider shutdown during controller-host loss, direct Pod resumes and private
+confirmation/replication evaluation are not accepted capabilities. Interventions
+apply to prompt prefill; generation is a separate, unmodified operation.
+
+## How the pieces fit
+
+The managed-service architecture is:
 
 ```text
-Research agent
-    │ stdio MCP
-    ▼
-Research facade ──────────► local ledger and retained artifacts
-    │ compute request
-    ▼
-Human approval ───────────► trusted controller ──► provider simulator
-                                  │                   ▲
-                         approved job batch      watchdog stop
-                                  ▼
-                              dispatcher
-                                  │ authenticated loopback HTTP
-                                  │ (SSH tunnel for a remote deployment)
-                                  ▼
-                              model worker
+Research agent ──MCP──► research service ──► experiment ledger
+                              │
+                         compute request
+                              ▼
+Human approval ──────► trusted controller ──► RunPod
+                              │                ▲
+                           dispatcher     watchdog stop
+                              │
+                    authenticated HTTP over SSH
+                              ▼
+                          model worker
 
-Research facade ──────────► rootless CPU Python sandbox
+Research service ────► rootless CPU sandbox
+Controller state ────► verified independent backups
 ```
 
-The research interface cannot consume approvals, accept worker results, certify
-shutdown, or administer hidden evaluation. Production separation depends on
-distinct OS identities and correctly installed permissions; running every role
-under one account is a development setup. The live ledger belongs on local
-controller storage, with external backups, rather than a network filesystem.
+The supervised profile instead uses authenticated SSH for one fixed command,
+a separate host deadline guard, and standalone reports outside the installed
+ledger. It keeps the provider-management key on the host.
 
-## Install and run the development tests
+Accepted outputs are copied back to the Ubuntu host and verified before a run can
+succeed. The selected GPU setup uses disposable Pod disks and public model assets
+baked into immutable images; it does not require a network volume. Losing a Pod
+before output collection leaves the result failed or inconclusive.
 
-Requirements: Linux, Git, [uv](https://docs.astral.sh/uv/), and Python 3.13.
-The worker dependencies include PyTorch and require several gigabytes of disk.
-Use a maintained SQLite build; see the [core guide](docs/core-guide.md).
+Distinct OS accounts and installed file permissions enforce the service boundaries.
+Running all roles under one account is a development setup. Keep the active SQLite
+ledger on local controller storage and retain independent backups.
+
+## Development setup
+
+Use Linux, Git, [uv](https://docs.astral.sh/uv/) and Python 3.13. The worker
+extras include PyTorch and require several gigabytes of disk. See the
+[core guide](docs/core-guide.md) for SQLite requirements and the
+[worker guide](docs/worker-dispatcher.md#runtime-enforcement-and-acceptance-gate)
+for process and cgroup requirements.
 
 ```sh
 git clone https://github.com/jaykobdetar/auto-interpretability-lab.git
 cd auto-interpretability-lab
+git switch --track origin/feat/live-deployment
 uv python install 3.13
 uv sync --locked --all-extras
 uv run --locked python -m pytest -q
 ```
 
-These tests create their small model locally and need no cloud credentials or
-downloaded model checkpoint. Tests involving services bind local sockets. The
-nine real sandbox integration tests skip unless a suitable Podman environment
-and image are configured; a default test run does not validate containment.
+Run these commands on the branch you intend to test. Development model tests use
+a small, locally generated model; they need no cloud credentials or downloaded
+canonical checkpoint. Some tests bind local sockets. Real sandbox tests skip
+without their required environment, so a default test run does not establish
+containment or live GPU readiness. Historical test totals and their exact scope
+are recorded in the [validation guide](docs/validation.md).
 
-The recorded local acceptance run on September 19, 2026 passed **429 tests with
-no skips**, including the real sandbox gate. That is historical evidence for the
-source commit and environment recorded in [verification details](docs/validation.md),
-not a new test result for every subsequent commit or a production-readiness claim.
-To reproduce a run, retain the checked-out commit, locked dependencies and any
-sandbox image/policy pins alongside its results.
-
-To run the mandatory sandbox gate after preparing its pinned image:
+To require the real sandbox checks after building its pinned image:
 
 ```sh
 PROBE_SANDBOX_REQUIRED=1 \
@@ -116,49 +130,67 @@ PROBE_SANDBOX_IMAGE="sha256:REPLACE_WITH_64_HEX_IMAGE_ID" \
 uv run --locked python -m pytest tests/test_sandbox.py tests/test_sandbox_service.py -q
 ```
 
-Replace the image placeholder before running. The [sandbox guide](deploy/sandbox/README.md)
-covers the image build, subordinate user mappings, delegated cgroups, and service
-runtime requirements. With `PROBE_SANDBOX_REQUIRED=1`, missing capabilities fail
-the tests instead of skipping them.
+Replace the image placeholder before running. The
+[sandbox guide](deploy/sandbox/README.md) covers image preparation, user mappings,
+cgroups and service requirements. Required checks fail instead of skipping when
+`PROBE_SANDBOX_REQUIRED=1`.
 
-## Configure the services
+The repository name is `auto-interpretability-lab`. Existing executable, package,
+service and deployed image identifiers retain their original names for compatibility:
+`probe-mcp`, `probe-core`, `probe_core` and `probe-*`. The branding change does not
+rename runtime components.
 
-Installing the package does not create a running lab. These guides describe the
-local implementation on `main`; follow them to prepare
-private configuration, service accounts, sockets, worker assets, and directories:
+## Deployment and documentation
 
-- [Controller, approvals, and watchdog](docs/controller-services.md)
-- [Worker and dispatcher](docs/worker-dispatcher.md)
-- [CPU sandbox and containment verification](deploy/sandbox/README.md)
-- [Implementation scope and service boundaries](IMPLEMENTATION.md)
-- [Core API, queue, manifests, audit, and backups](docs/core-guide.md)
+Installing the package does not configure a lab or approve paid compute. Start
+with the deployment checklist, then follow the relevant component guide:
 
-For the separate RunPod deployment effort, follow
-[draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1).
-Its installation procedures and acceptance records belong to that branch;
-do not infer their availability from these local examples.
+| Need | Guide |
+| --- | --- |
+| Inspect the two passing numerical calibrations | [Calibration results](docs/calibration-results.md) |
+| Run the smaller fixed public GPU calibration | [Supervised public calibration](docs/supervised-public-calibration.md) |
+| Prepare the next exploratory milestone | [First public experiment](docs/first-public-experiment.md) |
+| Understand what is complete and what is still required | [Live deployment checklist](docs/live-deployment-plan.md) |
+| Understand the implemented scope and boundaries | [Implementation overview](IMPLEMENTATION.md) |
+| Set up the Ubuntu accounts and services | [Host installation](docs/host-installation.md) |
+| Understand compute requests, approvals and shutdown | [Controller services](docs/controller-services.md) |
+| Prepare and check GPU workers | [GPU deployment](docs/gpu-deployment.md) and [RunPod provider](docs/runpod-provider.md) |
+| Understand dispatch, execution and returned artifacts | [Worker and dispatcher](docs/worker-dispatcher.md) |
+| Configure independent recoverable backups | [Backup and restore](docs/backup-restore.md) |
+| Use the queue, manifests and audit APIs | [Core guide](docs/core-guide.md) |
+| Interpret test and deployment evidence | [Validation](docs/validation.md) |
 
-After the research service is configured, an MCP client can launch `probe-mcp`
-with `--socket` pointing to its research socket and `--service-uid` set to the
-trusted service's actual UID. The controller approval interface belongs to the
-human account, not the research agent's MCP configuration.
+The controller uses the `controller` and `mcp` extras; it does not need the GPU
+worker's PyTorch installation. The host installer expects a reviewed release
+bundle containing pinned manifests, a Python runtime and locked offline dependencies.
 
-## Next milestones
+Once the research service exists, an MCP client can launch `probe-mcp` with
+`--socket` pointing to its research socket and `--service-uid` set to the trusted
+service's actual UID. Keep the human approval interface separate from that client.
 
-1. Complete and review the separate RunPod deployment work: trusted services,
-   pinned model assets, storage, backups, and verified shutdown.
-2. Validate canonical BF16/CUDA execution, resource limits, and remote recovery.
-3. Implement scientific metrics, matched controls, private held-out evaluation,
-   and trusted promotion rules.
-4. Add fresh Explorer, Skeptic, and Replicator sessions; pass blind calibration
-   before beginning open-ended discovery.
-5. Run one narrow behavioral/mechanistic pilot, then expand into paired model
-   and thinking-mode studies, advanced methods, and scientific-efficiency reporting.
+Model weights and credentials are not stored in this repository. Worker image
+recipes fetch pinned public model files and synthetic calibration prompts; they
+contain no hidden evaluation dataset.
 
-Contributions should keep new claims tied to evidence, preserve the separation
-between research and compute authority, and include relevant regression tests.
-Larger changes to the execution model or scientific protocol benefit from an
-issue describing the proposed behavior and acceptance criteria first.
+## After the first working GPU path
+
+The next useful milestone is the [first public experiment](docs/first-public-experiment.md),
+with a declared question, metric, matched control and retained per-prompt results.
+This needs a separate reviewed experiment recipe;
+the current standalone command accepts only the numerical calibration. Reuse
+the supervised deadline, credential separation, verified collection and Pod
+deletion, and back up its standalone artifacts explicitly.
+
+Managed resource, cancellation, recovery and replacement checks remain deferred
+work for the full service profile. Private held-out evaluation and independent
+research roles are later requirements for confirmatory research. Neither set of
+work blocks a bounded public exploratory experiment, which must remain labelled
+exploratory. SAE/Qwen-Scope, circuit tracing and automatic novelty assessment
+remain outside the current implementation.
+
+Contributions should state the behavior being changed and provide evidence for
+claims about correctness, containment and scientific results. Changes to the
+execution model or research protocol should describe their acceptance criteria.
 
 ## License
 

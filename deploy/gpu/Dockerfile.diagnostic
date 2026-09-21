@@ -1,0 +1,13 @@
+# Base digest is the observed linux/amd64 manifest, not a mutable tag alone.
+FROM python:3.13-slim-bookworm@sha256:3e2de9c40ca4e3d73240059f9d48baff27908f10293e985a2f382a0378e6df4a
+ARG DEBIAN_SNAPSHOT=20260918T000000Z
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    printf 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/%s/ bookworm main\ndeb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/%s/ bookworm-security main\n' "$DEBIAN_SNAPSHOT" "$DEBIAN_SNAPSHOT" > /etc/apt/sources.list && \
+    apt-get -o Acquire::Check-Valid-Until=false update && \
+    apt-get install -y --no-install-recommends openssh-server libseccomp2 ca-certificates && \
+    rm -rf /var/lib/apt/lists/* /etc/ssh/ssh_host_* && mkdir -p /run/sshd
+ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility PYTHONUNBUFFERED=1
+COPY deploy/gpu/diagnose.py /opt/probe/diagnose.py
+COPY deploy/gpu/diagnostic-entrypoint.py /opt/probe/entrypoint.py
+EXPOSE 22
+ENTRYPOINT ["python", "/opt/probe/entrypoint.py"]

@@ -1,0 +1,35 @@
+[Unit]
+Description=Probe trusted facade for the separate research identity
+After=probe-controller.service
+
+[Service]
+Type=simple
+User=probe-trusted
+# Rootless mapping helpers require the account's own primary group.
+Group=probe-trusted
+SupplementaryGroups=probe-research probe-ipc probe-ledger-read
+WorkingDirectory=/opt/probe-core
+Environment=HOME=/var/lib/probe-sandbox
+EnvironmentFile=/etc/probe-core/research-runtime.env
+Environment=PYTHONNOUSERSITE=1
+ExecStartPre=/usr/bin/test -S @USER_RUNTIME@/bus
+# Set the socket directory group after systemd prepares this command's runtime
+# directory. A separate pre-start command is undone by the next command's setup.
+ExecStart=/bin/sh -ec '/usr/bin/chgrp probe-research /run/probe-research; exec /opt/probe-core/venv/bin/python -I -m probe_core.research_service --config /etc/probe-core/research.json'
+RuntimeDirectory=probe-research
+RuntimeDirectoryMode=0750
+Restart=on-failure
+RestartSec=2
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/probe-core /var/lib/probe-sandbox /run/probe-research @USER_RUNTIME@
+PrivateTmp=yes
+# Mapping helpers retain normal setuid; the child container drops capabilities
+# and enforces no-new-privileges, network denial and its strict seccomp policy.
+NoNewPrivileges=no
+KillMode=control-group
+Delegate=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

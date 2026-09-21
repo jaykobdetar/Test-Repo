@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
 import socket
 import subprocess
 import threading
@@ -30,6 +31,75 @@ from .worker_contracts import ExecutionReceipt, ExecutionRequest, ScienceMetadat
 
 class TransportError(LedgerError):
     """Worker response is absent or untrusted; remote liveness remains unresolved."""
+
+    def __init__(self, message, *, diagnostic=None):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+class TunnelExited(TransportError):
+    """The owned SSH process is gone; the service manager must restart transport."""
+
+
+SSH_FAILURE_PATTERNS = (
+    ('HOST_KEY_REJECTED', (b'host key verification failed', b'remote host identification has changed')),
+    ('AUTHENTICATION_REJECTED', (b'permission denied (publickey', b'permission denied (password',
+                               b'permission denied (keyboard-interactive')),
+    ('CONNECTION_REFUSED', (b'connection refused',)),
+    ('NETWORK_UNREACHABLE', (b'network is unreachable', b'no route to host', b'could not resolve hostname')),
+    ('CONNECTION_CLOSED', (b'connection closed', b'connection reset by peer')),
+)
+
+
+def ssh_failure_classification(raw):
+    """Only a fixed classification escapes a bounded transient SSH stderr read."""
+    lowered = raw.lower()
+    for code, fragments in SSH_FAILURE_PATTERNS:
+        if any(fragment in lowered for fragment in fragments):
+            return code
+    return None
+
+
+class _SSHStderrDiagnostic:
+    """Drain an owned pipe without retaining raw messages or blocking SSH.
+
+    Examine at most 64 KiB, with a small overlap for split phrases. Subsequent
+    bytes are drained and discarded. Only a fixed code is stored on this object.
+    """
+    def __init__(self, pipe):
+        self.pipe, self.classification = pipe, None
+        self.stop = threading.Event()
+        os.set_blocking(pipe.fileno(), False)
+        self.thread = threading.Thread(target=self._read, daemon=True, name='probe-ssh-stderr')
+        self.thread.start()
+
+    def _read(self):
+        total, tail = 0, b''
+        priority = {code: index for index, (code, _) in enumerate(SSH_FAILURE_PATTERNS)}
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(self.pipe, selectors.EVENT_READ)
+                while not self.stop.is_set():
+                    for key, _ in selector.select(.1):
+                        chunk = os.read(key.fd, 4096)
+                        if not chunk:
+                            return
+                        if total < 65536:
+                            window = tail + chunk[:65536-total]
+                            code = ssh_failure_classification(window)
+                            if code is not None and (self.classification is None or priority[code] < priority[self.classification]):
+                                self.classification = code
+                            total = min(65536, total + len(chunk))
+                            tail = window[-256:] if total < 65536 else b''
+        except (OSError, ValueError):
+            return
+
+    def finish(self):
+        # Allow an exited process's remaining pipe bytes to be classified first.
+        self.thread.join(timeout=.1)
+        self.stop.set()
+        self.thread.join(timeout=.2)
+        self.pipe.close()
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -179,6 +249,7 @@ class SSHTunnel:
         self.identity_file, self.known_hosts_file = identity_file.absolute(), known_hosts_file.absolute()
         self.ssh_port, self.remote_port, self.local_port = ssh_port, remote_port, local_port
         self.process = None
+        self._stderr_diagnostic = None
 
     def command(self):
         return ["ssh", "-F", "/dev/null", "-N", "-T", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3", "-o", "PermitLocalCommand=no", "-o", "UserKnownHostsFile=" + str(self.known_hosts_file), "-i", str(self.identity_file), "-p", str(self.ssh_port), "-L", f"127.0.0.1:{self.local_port}:127.0.0.1:{self.remote_port}", self.user + "@" + self.host]
@@ -190,22 +261,38 @@ class SSHTunnel:
             with socket.socket() as temporary:
                 temporary.bind(("127.0.0.1", 0))
                 self.local_port = temporary.getsockname()[1]
-        self.process = subprocess.Popen(self.command(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C"})
+        try:
+            self.process = subprocess.Popen(self.command(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, close_fds=True, start_new_session=True, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C"})
+            self._stderr_diagnostic = _SSHStderrDiagnostic(self.process.stderr)
+        except (OSError, RuntimeError):
+            self.close()
+            raise TransportError("SSH tunnel failed to establish", diagnostic={
+                "phase": "tunnel", "exit_status": None, "timeout": False,
+                "classification": "SPAWN_FAILED"}) from None
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
+                status = self.process.returncode
+                stderr = self._stderr_diagnostic
                 self.close()
-                raise TransportError("SSH tunnel failed to establish")
+                raise TransportError("SSH tunnel failed to establish", diagnostic={
+                    "phase": "tunnel", "exit_status": status, "timeout": False,
+                    "classification": stderr.classification or "TUNNEL_EXITED"})
             try:
                 with socket.create_connection(("127.0.0.1", self.local_port), timeout=0.1):
                     return f"http://127.0.0.1:{self.local_port}"
             except OSError:
                 time.sleep(0.05)
+        status = self.process.poll()
         self.close()
-        raise TransportError("SSH tunnel establishment timed out")
+        raise TransportError("SSH tunnel establishment timed out", diagnostic={
+            "phase": "tunnel", "exit_status": status, "timeout": True,
+            "classification": "TUNNEL_TIMEOUT"})
 
     def close(self):
+        pipe = None
         if self.process is not None:
+            pipe = self.process.stderr
             self.process.terminate()
             try:
                 self.process.wait(timeout=5)
@@ -213,6 +300,20 @@ class SSHTunnel:
                 self.process.kill()
                 self.process.wait(timeout=5)
             self.process = None
+        if self._stderr_diagnostic is not None:
+            self._stderr_diagnostic.finish()
+            self._stderr_diagnostic = None
+        elif pipe is not None:
+            pipe.close()
+
+    def ensure_alive(self):
+        if self.process is None or self.process.poll() is not None:
+            if self._stderr_diagnostic is not None:
+                self._stderr_diagnostic.thread.join(timeout=.1)
+            raise TunnelExited("owned SSH tunnel exited; restart dispatcher to reconcile the existing attempt", diagnostic={
+                "phase": "tunnel", "exit_status": None if self.process is None else self.process.returncode,
+                "timeout": False, "classification": (self._stderr_diagnostic.classification
+                    if self._stderr_diagnostic is not None else None) or "TUNNEL_EXITED"})
 
     def __enter__(self):
         self.start()
@@ -262,7 +363,7 @@ class Dispatcher:
     def _stage_inputs(self, job):
         operation = job.spec.operation
         references = [getattr(operation, name, None) for name in ("source", "baseline", "direction", "activations", "labels")]
-        staged = set()
+        staged = {}
         for reference in (item for item in references if item is not None):
             if self.input_artifact_root is None:
                 raise TransportError("input tensors require a controller-owned artifact registry")
@@ -277,8 +378,8 @@ class Dispatcher:
                 if source.is_symlink():
                     raise TransportError("input registry symlink rejected")
             if reference.sha256 not in staged:
-                self.client.upload_tensor(source, expected_sha256=reference.sha256)
-                staged.add(reference.sha256)
+                staged[reference.sha256] = self.client.upload_tensor(source, expected_sha256=reference.sha256)
+        return staged
 
     def dispatch_next(self, *, approval_id: str):
         with self._lock:
@@ -378,11 +479,14 @@ class Dispatcher:
 
 class DispatcherService:
     """Restartable controller-side pump bound to one explicitly configured worker."""
-    def __init__(self, dispatcher: Dispatcher):
+    def __init__(self, dispatcher: Dispatcher, *, tunnel: SSHTunnel | None = None):
         self.dispatcher = dispatcher
+        self.tunnel = tunnel
         self.last_error_code = None
 
     def tick(self):
+        if self.tunnel is not None:
+            self.tunnel.ensure_alive()
         ledger = self.dispatcher.ledger
         with ledger.read_connection() as reader:
             # No controller request means no dispatch, even if a bare approval
@@ -408,11 +512,18 @@ class DispatcherService:
             elif len(grants) > 1:
                 raise LedgerError("multiple active grants violate worker exclusivity")
         except (TransportError, ApprovalError, LeaseError) as exc:
+            # An HTTP outage can recover on the existing connection. A dead
+            # owned SSH child cannot: let systemd restart the process/tunnel.
+            # This changes no remote execution or durable approval state.
+            if self.tunnel is not None:
+                self.tunnel.ensure_alive()
             code = type(exc).__name__
             if code != self.last_error_code:
                 ledger.record_event("policy_evaluation", {"decision": "dispatch_unavailable", "worker_id": self.dispatcher.worker_id, "reason_code": code})
             self.last_error_code = code
             return results
+        if self.tunnel is not None:
+            self.tunnel.ensure_alive()
         if self.last_error_code is not None:
             ledger.record_event("policy_evaluation", {"decision": "dispatch_recovered", "worker_id": self.dispatcher.worker_id})
         self.last_error_code = None
@@ -462,6 +573,7 @@ def main():
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: stop.set())
     with ExitStack() as stack:
+        tunnel = None
         if "ssh" in config:
             ssh = dict(config["ssh"])
             ssh["identity_file"] = Path(ssh["identity_file"])
@@ -472,7 +584,7 @@ def main():
             url = config["base_url"]
         ledger = stack.enter_context(Ledger(config["ledger_path"]))
         dispatcher = Dispatcher(ledger, WorkerClient(url, secret), worker_id=config["worker_id"], transfer_directory=Path(config["transfer_directory"]), input_artifact_root=Path(config["input_artifact_root"]), lease_seconds=config.get("lease_seconds", 30))
-        service = DispatcherService(dispatcher)
+        service = DispatcherService(dispatcher, tunnel=tunnel)
         if args.once:
             service.tick()
         else:

@@ -1,20 +1,36 @@
-# Auto Interpretability Lab: controller and independent stop service
+# Auto Interpretability Lab: Controller and independent stop service
 
-This guide describes the implementation on `main`, which uses a persistent provider simulator. It performs no cloud requests and reads no cloud credentials. Initial creation, replacement, and restart all require the human administrative socket. Research clients can submit a request, inspect its status, or stop compute.
+[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
 
-Live RunPod integration is separate work in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1) on `feat/live-deployment`; its installation and acceptance status do not apply to these simulator instructions. Start with the [project overview](../README.md), then use the [core guide](core-guide.md) for ledger semantics and the [worker guide](worker-dispatcher.md) for execution. Existing `probe` commands, account names and paths remain unchanged.
+This is the service and authority contract for Auto Interpretability Lab.
+The installed controller identities have passed their actual OS-boundary checks;
+that does not certify a numerical GPU result. The development backend is a
+persistent provider simulator. A separate guarded
+[RunPod adapter](runpod-provider.md) supports short supervised acceptance runs.
+Initial creation, replacement, and any supported restart require the human
+administrative socket. Research clients can submit a request, inspect its
+status, or stop compute. RunPod resumes and unattended launches remain disabled.
 
 ## Process and identity boundaries
 
 Run the controller and trusted research facade as `probe-trusted`, because both own the authoritative ledger and its audit projection. Run the untrusted MCP client and research agent under a different account. The controller's `--research-uid` identifies the **trusted facade**, not the untrusted agent. It may equal the controller UID. The facade exposes its narrower research API to the untrusted account.
 
-Run the independent watchdog as `probe-watchdog`. It reads the ledger with SQLite `mode=ro` and owns its own schedule database and health file. It cannot register or consume core approvals. Its provider interface exposes only status and stop. A future live adapter must additionally use provider-enforced stop-only credentials; Python interface restriction alone is not a credential boundary.
+Run the independent watchdog as `probe-watchdog`. It reads the ledger with SQLite
+`mode=ro` and owns its own schedule database and health file. It cannot register
+or consume core approvals. Its provider interface exposes only status and stop.
+The RunPod deployment uses a separate Unix broker because the provider has no
+documented Pod-specific stop-only key. Only the trusted broker holds that key;
+Python interface restriction alone is not a credential boundary.
 
 The administrative Unix socket checks the peer's kernel-supplied UID. Its configured human UID must differ from the controller service, trusted facade, and untrusted agent identities. The controller requires `--agent-uid` and rejects configurations that reuse that UID for any trusted role. Set `AGENT_UID` to the research facade configuration's `research_uid`, and set `HUMAN_UID` to its `admin_uid`. The trusted facade may share the controller UID. The normal CLI does not offer the testing-only same-service-UID escape hatch. The RPC client also verifies the server UID.
 
 ## Local service installation contract
 
-The systemd units are configuration artifacts; no unit is installed or started automatically. Install the package in `/opt/probe-core/venv`, create the named accounts/groups, copy the units, and fill `/etc/probe-core/controller.env` with the actual account IDs. Keep that configuration owned by the administrator and unwritable by the research identities.
+The original systemd examples use the simulator. The reviewed manual
+[host installer](host-installation.md) renders the separate live templates using
+actual account IDs, installs `/opt/probe-core/venv`, and starts the control and
+backup services without purchasing compute. Keep configuration owned by the
+administrator and unwritable by research identities.
 
 Provision these directories before enabling the units:
 
@@ -51,17 +67,42 @@ The provider supplies the live price; the caller cannot provide it. The provider
 
 ## Creation and replacement identity
 
-`DeploymentSpec` freezes GPU model/count, image digest, volume identity/size, and region. A provisioning request reserves a local logical worker ID and binds the exact configuration hash, job-batch hash, runtime, and replacement target. `ApprovalNonce.pod_id` refers to this stable logical worker ID. The provider must map it uniquely to the actual provider Pod ID and retain the creation request key and configuration hash for reconciliation. Replacing an existing worker requires it to be confirmed stopped and uses a new logical identity and a new human approval. The old resource and volume are retained; replacement never silently deletes them.
+`DeploymentSpec` freezes GPU model/count, image digest, volume identity/size, and region. A provisioning request reserves a local logical worker ID and binds the exact configuration hash, job-batch hash, runtime, and replacement target. `ApprovalNonce.pod_id` refers to this stable logical worker ID. The provider must map it uniquely to the actual provider Pod ID and retain the creation request key and configuration hash for reconciliation. Replacing an existing worker requires it to be confirmed stopped and uses a new logical identity and a new human approval. For the selected disposable profile, the old Pod must already be confirmed
+absent and its request stopped; accepted artifacts remain on the controller.
+The optional persistent-volume profile retains its independent network volume.
 
 The same approved request can attempt `create` or `start` only once. The absolute core deadline and `STARTING` intent are committed before the call. A process interruption, timeout, unknown status, or lost response never triggers another paid call. Startup reconciliation locates the logical identity and stops/readbacks the result. If an ambiguous creation is still absent, the interval remains unresolved: absence does not prove a delayed create cannot appear. Later reconciliation can find and stop it. There is no unsafe automatic reset of that interval.
 
 ## Stopping and failure recovery
 
-The watchdog stops at the absolute deadline even when a job is active. It also stops after five minutes without an active execution. Idle timers survive watchdog restarts. Once a stop decision is durable, subsequent activity cannot revoke it. Each stop is followed by a provider status readback; failures remain pending and are retried.
+The watchdog stops at the absolute deadline even when a job is active. Ordinary
+idle time is limited to five minutes. One pending, never-dispatched calibration
+job on a fresh disposable worker instead uses the runner's fixed startup cutoff:
+approval deadline minus the full job runtime and 120 seconds for collection and
+deletion. The first attempt permanently ends this exception. Idle timers and
+startup bounds survive watchdog restarts. Once a stop decision is durable, subsequent activity cannot revoke it. Each stop is followed by a provider status readback; failures remain pending and are retried.
 
 Known workers and deadlines are cached in the watchdog's own durable database before acknowledgment. If the main ledger becomes unreadable, the watchdog immediately stops cached active workers and reports unhealthy status. It does not forget the schedules. A fresh or healthy-looking heartbeat without the exact approval acknowledgment cannot authorize compute.
 
 After a real provider confirms its worker and executor processes are off, the controller can acknowledge termination in the core and close the compute interval. The simulator changes resource metadata only: it cannot prove that a local CPU executor terminated. Simulated shutdown therefore cancels active jobs and remains `STOP_REQUESTED` until the dispatcher obtains a verified worker process-stop receipt; a later controller reconciliation closes the interval. Stopped `FINALIZING` work remains eligible for CPU publication. The watcher has no renewal method, and retries never extend an approval deadline.
+
+The seventh full-worker attempt exposed a diagnostic gap: reconciliation can
+request a stop after a provider-status error without retaining that original
+error. A later deletion failure is recorded as `ProviderUncertain`, and the
+watchdog then records `uncertain_action`. A local injected HTTP503 sequence
+reproduces this mechanism, but it does not identify the historical first error.
+The source correction records the initiating cause in the same audit transaction
+as `STOP_REQUESTED`, before any deletion. It includes only fixed reason codes,
+an exception category and bounded HTTP metadata, never response bodies or raw
+headers. It is not yet part of the installed controller at the status above.
+
+For an already running, physically identified RunPod, reconciliation may retry
+one status read after HTTP 429, 502, 503 or 504. It waits two seconds only when
+the complete request timeout still fits inside the original deadline. A longer
+or unparsed `Retry-After`, challenge, second failure, expired deadline or changed
+binding receives no further retry. Normal creation and stop/readback calls keep
+their existing one-shot behavior. This does not extend an approval or allow
+cached status to stand in for provider confirmation.
 
 ## Research client contract
 

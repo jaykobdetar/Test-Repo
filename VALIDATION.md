@@ -1,19 +1,15 @@
-# Auto Interpretability Lab: historical Phase 2 verification
+# Auto Interpretability Lab: Historical Phase 2 verification
 
-This is the retained verification record for the earlier core milestone. For
-the broader local implementation, see the [429-test report](docs/validation.md)
-and [project overview](README.md). Live RunPod development is tracked separately
-in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1);
-neither its code nor live GPU acceptance is covered by this report.
+[Project overview](README.md) · [Validation status](docs/validation.md) · [Deployment checklist](docs/live-deployment-plan.md)
+
+This is the historical Phase 2 record, retained for provenance. It does not
+describe the current installed release or its live GPU status; use the linked
+validation status for those facts. Later test totals overlap this milestone.
 
 Verified on September 19, 2026 with Python 3.13.13, Pydantic 2.13.2,
 SQLite 3.53.1, and pytest 9.0.3 on Linux.
 
 **277 tests passed; exit status 0.** Warnings are configured as errors.
-
-The versions and counts below describe that historical run. They are not a
-fresh test result for the current checkout. Use the checked-out `uv.lock` and
-record the actual source commit when running the current suite.
 
 | Requirement | Implementation | Evidence |
 | --- | --- | --- |

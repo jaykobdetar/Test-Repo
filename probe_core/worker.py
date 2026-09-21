@@ -27,6 +27,7 @@ from pathlib import Path
 import platform
 import resource
 import re
+import select
 import struct
 import tempfile
 import signal
@@ -206,7 +207,7 @@ class WorkerEngine:
             tokens = [list(prompt.token_ids) if prompt.token_ids is not None else self.tokenizer.encode(prompt.text, add_special_tokens=False) for prompt in records]
         model = self._load_model(request.spec)
         cap = min(32768, model.config.max_position_embeddings)
-        generated = request.spec.inputs.generation.max_new_tokens if request.spec.operation.kind == "generate" else 0
+        generated = request.spec.inputs.generation.max_new_tokens if request.spec.operation.kind in {"generate", "backend_parity"} else 0
         if any(not row or len(row) + generated > cap for row in tokens):
             raise WorkerRequestError("prompt plus generation exceeds the model context limit")
         if any(token < 0 or token >= model.config.vocab_size for row in tokens for token in row):
@@ -450,6 +451,9 @@ class WorkerEngine:
         if operation.kind == "fit_probe":
             self._dataset(request)
             tensors, summary = self._fit_probe(request)
+        elif operation.kind == "backend_parity":
+            from .backend_parity import run_parity
+            tensors, summary, generated_tokens = run_parity(self, request)
         else:
             model = self._load_model(request.spec)
             # Loading an uncached model can consume random state. Execution
@@ -533,7 +537,7 @@ class WorkerEngine:
             names = [self._target(operation.target)[0]]
         else:
             names = ["model"]
-        tools = {"capture": "capture_activation", "patch": "activation_patch", "ablate": "ablate_component", "steer": "steer_direction", "fit_probe": "fit_probe", "generate": "generate_batch", "weight_stats": "weight_stats", "tensor_slice": "tensor_slice", "module_manifest": "module_manifest"}
+        tools = {"capture": "capture_activation", "patch": "activation_patch", "ablate": "ablate_component", "steer": "steer_direction", "fit_probe": "fit_probe", "generate": "generate_batch", "weight_stats": "weight_stats", "tensor_slice": "tensor_slice", "module_manifest": "module_manifest", "backend_parity": "backend_parity"}
         science = request.science
         manifest = RunManifest.model_validate({
             "schema_version": 1,
@@ -553,21 +557,38 @@ class WorkerEngine:
 
 
 def _block_network() -> None:
-    """Install an irreversible Linux seccomp deny rule for new network sockets."""
+    """Allow CUDA's local socket creation while denying network/socket sends."""
+    import socket
+
+    class ScmpArgCompare(ctypes.Structure):
+        # libseccomp's struct scmp_arg_cmp: uint, enum, uint64, uint64.
+        _fields_ = [("arg", ctypes.c_uint), ("op", ctypes.c_int),
+                    ("datum_a", ctypes.c_uint64), ("datum_b", ctypes.c_uint64)]
+
     library = ctypes.CDLL("libseccomp.so.2", use_errno=True)
     library.seccomp_init.argtypes = [ctypes.c_uint32]
     library.seccomp_init.restype = ctypes.c_void_p
     library.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
-    library.seccomp_rule_add.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint]
+    library.seccomp_syscall_resolve_name.restype = ctypes.c_int
+    library.seccomp_rule_add_array.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int,
+                                              ctypes.c_uint, ctypes.POINTER(ScmpArgCompare)]
+    library.seccomp_rule_add_array.restype = ctypes.c_int
     library.seccomp_load.argtypes = [ctypes.c_void_p]
+    library.seccomp_load.restype = ctypes.c_int
     library.seccomp_release.argtypes = [ctypes.c_void_p]
+    library.seccomp_release.restype = None
     context = library.seccomp_init(0x7FFF0000)  # SCMP_ACT_ALLOW
     if not context:
         raise WorkerRequestError("cannot create network-denial seccomp policy")
     try:
+        # SCMP_CMP_NE compares socket's domain argument, not descriptor numbers
+        # or type flags. CUDA needs AF_UNIX creation during driver initialization.
+        non_unix = (ScmpArgCompare * 1)(ScmpArgCompare(0, 1, socket.AF_UNIX, 0))
         for name in (b"socket", b"connect", b"sendto", b"sendmsg"):
             syscall = library.seccomp_syscall_resolve_name(name)
-            if syscall < 0 or library.seccomp_rule_add(context, 0x00050000 | errno.EPERM, syscall, 0) != 0:
+            count, comparisons = (1, non_unix) if name == b"socket" else (0, None)
+            if syscall < 0 or library.seccomp_rule_add_array(
+                    context, 0x00050000 | errno.EPERM, syscall, count, comparisons) != 0:
                 raise WorkerRequestError("cannot install network-denial syscall rule")
         if library.seccomp_load(context) != 0:
             raise WorkerRequestError("cannot activate network-denial seccomp policy")
@@ -593,6 +614,41 @@ def _same_process(metadata) -> bool:
     return metadata.get("boot_id") == _boot_id() and _process_identity(metadata["pid"]) == metadata["identity"]
 
 
+def _signal_pidfd(descriptor: int, signum: int, *, process_group: bool = False) -> None:
+    # PIDFD_SIGNAL_PROCESS_GROUP (Linux 6.9+) keeps CPU descendant cleanup bound
+    # to the original group leader even after its numeric PID can be reused.
+    flags = 4 if process_group else 0
+    try:
+        if hasattr(signal, "pidfd_send_signal"):
+            signal.pidfd_send_signal(descriptor, signum, None, flags)
+            return
+        library = ctypes.CDLL(None, use_errno=True)
+        function = getattr(library, "pidfd_send_signal", None)
+        if function is None:
+            raise WorkerRequestError("host runtime lacks PID descriptor signals")
+        function.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint]
+        function.restype = ctypes.c_int
+        if function(descriptor, signum, None, flags) < 0:
+            raise OSError(ctypes.get_errno(), "pidfd_send_signal failed")
+    except OSError as exc:
+        if process_group and exc.errno in {errno.EINVAL, errno.ENOSYS}:
+            raise WorkerRequestError("live CPU cancellation requires Linux 6.9+ PID descriptor group signaling") from None
+        raise
+
+
+def _group_populated(pid: int) -> bool:
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if fields[0] != "Z" and int(fields[2]) == pid:
+            return True
+    return False
+
+
 def _rss(pid: int) -> int:
     try:
         for line in Path(f"/proc/{pid}/status").read_text().splitlines():
@@ -604,7 +660,31 @@ def _rss(pid: int) -> int:
 
 
 def _output_size(path: Path) -> int:
-    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file() and not item.is_symlink()) if path.exists() else 0
+    def scan_error(error):
+        if not isinstance(error, FileNotFoundError):
+            raise error
+
+    try:
+        if not stat.S_ISDIR(path.lstat().st_mode):
+            return 0
+    except FileNotFoundError:
+        return 0
+    total = 0
+    for directory, _, files in path.walk(on_error=scan_error, follow_symlinks=False):
+        for name in files:
+            try:
+                # An atomic publish can rename .partial between enumeration
+                # and inspection. Use one non-following metadata snapshot.
+                info = (directory / name).lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+    return total
+
+
+def _cpu_time_exceeded(_signum, _frame):
+    raise TimeoutError("CPU time limit reached")
 
 
 def _child_entry(config_json: str, request_json: str, directory: str, ready, release) -> None:
@@ -620,17 +700,34 @@ def _child_entry(config_json: str, request_json: str, directory: str, ready, rel
         keep = {key: value for key, value in os.environ.items() if key in {"PATH", "HOME", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES"}}
         os.environ.clear()
         os.environ.update(keep)
-        os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", TOKENIZERS_PARALLELISM="false", WANDB_MODE="disabled")
+        os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", TOKENIZERS_PARALLELISM="false", WANDB_MODE="disabled", CUBLAS_WORKSPACE_CONFIG=":4096:8")
         os.environ["OMP_NUM_THREADS"] = str(request.spec.limits.max_cpu_cores)
         os.environ["MKL_NUM_THREADS"] = str(request.spec.limits.max_cpu_cores)
         available = sorted(os.sched_getaffinity(0))
         os.sched_setaffinity(0, available[:request.spec.limits.max_cpu_cores])
-        resource.setrlimit(resource.RLIMIT_CPU, (request.spec.limits.max_runtime_seconds, request.spec.limits.max_runtime_seconds))
+        # RLIMIT_CPU is aggregate CPU time, whereas the independently monitored
+        # execution deadline is wall time. A soft limit gives a truthful SIGXCPU
+        # outcome; equal soft/hard limits can otherwise produce ambiguous SIGKILL.
+        signal.signal(signal.SIGXCPU, _cpu_time_exceeded)
+        cpu_seconds = request.spec.limits.max_runtime_seconds * request.spec.limits.max_cpu_cores
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         resource.setrlimit(resource.RLIMIT_FSIZE, (max(request.spec.limits.max_output_bytes, 65536),) * 2)
         if config.device == "cpu":
             resource.setrlimit(resource.RLIMIT_AS, (request.spec.limits.max_ram_bytes,) * 2)
         _block_network()
+        pid = os.getpid()
+        identity = _process_identity(pid)
+        if identity is None:
+            raise WorkerRequestError("execution start requires a live process identity")
+        _json_write(Path(directory) / "execution-started.json", {
+            "schema_version": 1, "job_id": request.job_id, "attempt_id": request.attempt_id,
+            "worker_id": request.worker_id, "approval_id": request.approval_id,
+            "pid": pid, "identity": identity, "boot_id": _boot_id(),
+            "request_sha256": "sha256:" + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
+            "config_sha256": "sha256:" + hashlib.sha256(canonical_json(config.model_dump(mode="json")).encode()).hexdigest(),
+            "started_at": datetime.now(UTC).isoformat(),
+        })
         engine = WorkerEngine(config)
         result = engine.execute(request, Path(directory) / "artifacts")
     except BaseException as exc:
@@ -654,6 +751,7 @@ class Supervisor:
         self._lock = threading.RLock()
         self._processes = {}
         self._requests = {}
+        self._group_descriptors = {}
         self._stop = threading.Event()
         self.monitor_interval = monitor_interval
         for directory in self.root.iterdir():
@@ -662,6 +760,15 @@ class Supervisor:
                 if directory.name != request.attempt_id:
                     raise WorkerRequestError("persisted attempt directory mismatch")
                 self._requests[request.attempt_id] = request
+        try:
+            for attempt_id in self._requests:
+                metadata_path = self._directory(attempt_id) / "process.json"
+                if metadata_path.exists() and not self._read(attempt_id).process_stopped:
+                    self._remember_cpu_group(attempt_id, json.loads(metadata_path.read_text()))
+        except BaseException:
+            for attempt_id in tuple(self._group_descriptors):
+                self._forget_cpu_group(attempt_id)
+            raise
         self._monitor = threading.Thread(target=self._watch, name="probe-worker-supervisor", daemon=True)
         self._monitor.start()
 
@@ -672,6 +779,57 @@ class Supervisor:
 
     def _read(self, attempt_id: str) -> ExecutionReceipt:
         return ExecutionReceipt.model_validate_json((self._directory(attempt_id) / "receipt.json").read_text())
+
+    def _remember_cpu_group(self, attempt_id, metadata):
+        if self.config.cgroup_directory is not None or attempt_id in self._group_descriptors or not _same_process(metadata):
+            return
+        from .sandbox_lifecycle import LifecycleError, _pidfd_open
+
+        descriptor = None
+        try:
+            descriptor = _pidfd_open(metadata["pid"])
+            if _same_process(metadata) and os.getpgid(metadata["pid"]) == metadata["pid"]:
+                fence = (metadata["pid"], metadata["identity"], metadata["boot_id"])
+                self._group_descriptors[attempt_id] = (fence, descriptor)
+                descriptor = None
+        except (ProcessLookupError, LifecycleError):
+            # Ordinary completed results need no signal capability. An orphan
+            # scope without a captured fence remains explicitly unresolved.
+            pass
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _forget_cpu_group(self, attempt_id):
+        cached = self._group_descriptors.pop(attempt_id, None)
+        if cached is not None:
+            os.close(cached[1])
+
+    def _stop_orphan_scope(self, attempt_id, metadata):
+        # A validated cgroup remains an attempt boundary after its leader exits.
+        # A CPU PGID is safe to signal only through a previously captured pidfd.
+        with self._cancellation_scope(attempt_id, metadata, signal_scope=True) as (kill_fd, scope_stopped):
+            if scope_stopped():
+                return
+            if kill_fd is not None:
+                if os.write(kill_fd, b"1") != 1:
+                    raise WorkerRequestError("execution cgroup kill was not accepted")
+            else:
+                cached = self._group_descriptors.get(attempt_id)
+                fence = (metadata["pid"], metadata["identity"], metadata["boot_id"])
+                if cached is None or cached[0] != fence or metadata["boot_id"] != _boot_id():
+                    raise WorkerRequestError("CPU descendants remain without a retained process-group identity; termination is unresolved")
+                try:
+                    _signal_pidfd(cached[1], signal.SIGKILL, process_group=True)
+                except ProcessLookupError:
+                    # ESRCH can mean the original group just became empty;
+                    # never substitute a signal to the reusable numeric PGID.
+                    pass
+            deadline = time.monotonic() + 5
+            while not scope_stopped() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not scope_stopped():
+                raise WorkerRequestError("execution descendants remain; termination is unresolved")
 
     def _cgroup(self, request, pid):
         if self.config.cgroup_directory is None:
@@ -723,12 +881,15 @@ class Supervisor:
                 if identity is None:
                     raise WorkerRequestError("execution process exited during initialization")
                 deadline = min(request.deadline.timestamp(), now.timestamp() + request.spec.limits.max_runtime_seconds)
-                _json_write(directory / "process.json", {"pid": process.pid, "identity": identity, "boot_id": _boot_id(), "deadline": deadline, "monotonic_deadline": time.monotonic() + max(0, deadline - time.time()), "cgroup": cgroup})
+                metadata = {"pid": process.pid, "identity": identity, "boot_id": _boot_id(), "deadline": deadline, "monotonic_deadline": time.monotonic() + max(0, deadline - time.time()), "cgroup": cgroup}
+                _json_write(directory / "process.json", metadata)
+                self._remember_cpu_group(request.attempt_id, metadata)
                 receipt = receipt.model_copy(update={"state": WorkerState.RUNNING})
                 _json_write(directory / "receipt.json", receipt.model_dump(mode="json"))
                 release.set()
                 return receipt
             except BaseException:
+                self._forget_cpu_group(request.attempt_id)
                 if process.pid:
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
@@ -755,13 +916,13 @@ class Supervisor:
             # publication. Missing metadata is never evidence that child exited.
             raise WorkerRequestError("process identity is missing; termination remains unresolved")
         if metadata and _same_process(metadata):
-            group = Path(metadata["cgroup"]) if metadata.get("cgroup") else None
-            if group and (group / "cgroup.kill").exists():
-                (group / "cgroup.kill").write_text("1")
-            try:
-                os.killpg(metadata["pid"], signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            if self.config.cgroup_directory is not None:
+                self._stop_orphan_scope(attempt_id, metadata)
+            else:
+                try:
+                    os.killpg(metadata["pid"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             process = self._processes.get(attempt_id)
             if process:
                 process.join(timeout=5)
@@ -770,13 +931,56 @@ class Supervisor:
                 time.sleep(0.01)
             if _same_process(metadata):
                 raise WorkerRequestError("process termination could not be confirmed")
+        self._stop_orphan_scope(attempt_id, metadata)
         receipt = receipt.model_copy(update={"state": WorkerState.CANCELLED if failure_kind == "cancelled" else WorkerState.FAILED, "failure_kind": failure_kind, "error_code": error_code, "finished_at": datetime.now(UTC), "process_stopped": True})
         _json_write(directory / "receipt.json", receipt.model_dump(mode="json"))
+        self._forget_cpu_group(attempt_id)
         return receipt
+
+    @contextmanager
+    def _cancellation_scope(self, attempt_id, metadata, *, signal_scope=False):
+        configured = self.config.cgroup_directory
+        if configured is None:
+            if metadata.get("cgroup") is not None:
+                raise WorkerRequestError("unexpected execution cgroup")
+            yield None, lambda: not _group_populated(metadata["pid"])
+            return
+        root = Path(configured)
+        expected = root / ("probe-" + attempt_id)
+        if not root.is_absolute() or metadata.get("cgroup") != str(expected):
+            raise WorkerRequestError("execution cgroup identity mismatches")
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        group_fd = events_fd = kill_fd = None
+        try:
+            group_fd = os.open(expected.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+            events_fd = os.open("cgroup.events", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=group_fd)
+            if signal_scope:
+                kill_fd = os.open("cgroup.kill", os.O_WRONLY | os.O_NOFOLLOW, dir_fd=group_fd)
+                procs_fd = os.open("cgroup.procs", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=group_fd)
+                try:
+                    members = os.read(procs_fd, 65537)
+                finally:
+                    os.close(procs_fd)
+                if len(members) > 65536 or (str(metadata["pid"]).encode() not in members.splitlines() and _same_process(metadata)):
+                    raise WorkerRequestError("execution child is not in its registered cgroup")
+
+            def stopped():
+                os.lseek(events_fd, 0, os.SEEK_SET)
+                fields = dict(line.split() for line in os.read(events_fd, 4096).decode("ascii").splitlines())
+                if fields.get("populated") not in {"0", "1"}:
+                    raise WorkerRequestError("execution cgroup population is unknown")
+                return fields["populated"] == "0"
+
+            yield kill_fd, stopped
+        finally:
+            for descriptor in (kill_fd, events_fd, group_fd, root_fd):
+                if descriptor is not None:
+                    os.close(descriptor)
 
     def _refresh(self, attempt_id):
         receipt = self._read(attempt_id)
         if receipt.process_stopped:
+            self._forget_cpu_group(attempt_id)
             return receipt
         directory = self._directory(attempt_id)
         metadata_path = directory / "process.json"
@@ -785,17 +989,21 @@ class Supervisor:
         metadata = json.loads(metadata_path.read_text())
         request = self._requests[attempt_id]
         alive = _same_process(metadata)
+        # An output limit remains enforceable even if the child exited between
+        # monitor ticks. Never reclassify an observed over-budget file as science.
+        if _output_size(directory / "artifacts") > request.spec.limits.max_output_bytes:
+            return self._terminate(attempt_id, "policy", "OutputLimitExceeded")
         if alive:
+            self._remember_cpu_group(attempt_id, metadata)
             if time.time() >= metadata["deadline"] or time.monotonic() >= metadata["monotonic_deadline"]:
                 return self._terminate(attempt_id, "timeout", "ExecutionDeadlineExceeded")
             if _rss(metadata["pid"]) > request.spec.limits.max_ram_bytes:
                 return self._terminate(attempt_id, "oom", "RAMLimitExceeded")
-            if _output_size(directory / "artifacts") > request.spec.limits.max_output_bytes:
-                return self._terminate(attempt_id, "policy", "OutputLimitExceeded")
             return receipt
         process = self._processes.get(attempt_id)
         if process:
             process.join(timeout=0)
+        self._stop_orphan_scope(attempt_id, metadata)
         result_path = directory / "result.json"
         if result_path.exists():
             result = ExecutionReceipt.model_validate_json(result_path.read_text())
@@ -803,8 +1011,14 @@ class Supervisor:
                 return self._terminate(attempt_id, "infrastructure", "ResultIdentityMismatch")
             result = result.model_copy(update={"process_stopped": True})
         else:
-            result = receipt.model_copy(update={"state": WorkerState.FAILED, "failure_kind": "infrastructure", "error_code": "ProcessExitedWithoutResult", "finished_at": datetime.now(UTC), "process_stopped": True})
+            cpu_expired = process is not None and process.exitcode == -signal.SIGXCPU
+            deadline_expired = time.time() >= metadata["deadline"] or time.monotonic() >= metadata["monotonic_deadline"]
+            result = receipt.model_copy(update={"state": WorkerState.FAILED,
+                "failure_kind": "timeout" if cpu_expired or deadline_expired else "infrastructure",
+                "error_code": "CPUTimeLimitExceeded" if cpu_expired else "ExecutionDeadlineExceeded" if deadline_expired else "ProcessExitedWithoutResult",
+                "finished_at": datetime.now(UTC), "process_stopped": True})
         _json_write(directory / "receipt.json", result.model_dump(mode="json"))
+        self._forget_cpu_group(attempt_id)
         if metadata.get("cgroup"):
             try:
                 Path(metadata["cgroup"]).rmdir()
@@ -829,10 +1043,91 @@ class Supervisor:
 
     def cancel(self, attempt_id: str) -> ExecutionReceipt:
         with self._lock:
-            receipt = self._read(attempt_id)
+            receipt = self._refresh(attempt_id)
             if receipt.process_stopped:
                 return receipt
-            return self._terminate(attempt_id, "cancelled", "OperatorCancelled")
+            from .sandbox_lifecycle import LifecycleError, _pidfd_open
+
+            directory = self._directory(attempt_id)
+            request = self._requests[attempt_id]
+            metadata = json.loads((directory / "process.json").read_text())
+            if (directory / "cancellation.json").exists():
+                raise WorkerRequestError("live attempt already has cancellation evidence")
+            try:
+                descriptor = _pidfd_open(metadata["pid"])
+            except ProcessLookupError:
+                return self._refresh(attempt_id)
+            except LifecycleError:
+                raise WorkerRequestError("live cancellation requires PID descriptor support") from None
+            try:
+                if not _same_process(metadata) or select.select([descriptor], [], [], 0)[0]:
+                    return self._refresh(attempt_id)
+                with self._cancellation_scope(attempt_id, metadata, signal_scope=True) as (kill_fd, scope_stopped):
+                    group_signal = kill_fd is None
+                    if group_signal:
+                        try:
+                            group_id = os.getpgid(metadata["pid"])
+                        except ProcessLookupError:
+                            return self._refresh(attempt_id)
+                        if group_id != metadata["pid"]:
+                            raise WorkerRequestError("execution child is not its registered process-group leader")
+                    # Probe only a still-live CPU attempt, after preserving any
+                    # terminal/deadline outcome. There is no PID-only fallback.
+                    try:
+                        _signal_pidfd(descriptor, 0, process_group=group_signal)
+                    except ProcessLookupError:
+                        return self._refresh(attempt_id)
+                    current = self._refresh(attempt_id)
+                    if current.process_stopped:
+                        return current
+                    if not _same_process(metadata) or select.select([descriptor], [], [], 0)[0]:
+                        return self._refresh(attempt_id)
+                    try:
+                        _signal_pidfd(descriptor, signal.SIGKILL, process_group=group_signal)
+                    except ProcessLookupError:
+                        return self._refresh(attempt_id)
+                    signalled_at = datetime.now(UTC)
+                    signalled_monotonic = time.monotonic()
+                    if kill_fd is not None and os.write(kill_fd, b"1") != 1:
+                        raise WorkerRequestError("execution cgroup kill was not accepted")
+                    stop_deadline = time.monotonic() + 5
+                    while time.monotonic() < stop_deadline:
+                        if select.select([descriptor], [], [], 0)[0] and scope_stopped():
+                            break
+                        time.sleep(0.01)
+                    if not select.select([descriptor], [], [], 0)[0] or not scope_stopped():
+                        raise WorkerRequestError("execution termination could not be confirmed")
+                    process = self._processes.get(attempt_id)
+                    if process:
+                        process.join(timeout=0)
+                    # A result atomically published during the GET/POST/signal
+                    # race wins over cancellation. The killed scope can no
+                    # longer publish a new result after this check.
+                    if ((directory / "result.json").exists()
+                            or signalled_at.timestamp() >= metadata["deadline"]
+                            or signalled_monotonic >= metadata["monotonic_deadline"]):
+                        return self._refresh(attempt_id)
+                    stopped_at = datetime.now(UTC)
+                    cancelled = receipt.model_copy(update={"state": WorkerState.CANCELLED,
+                        "failure_kind": "cancelled", "error_code": "OperatorCancelled",
+                        "finished_at": stopped_at, "process_stopped": True})
+                    _json_write(directory / "receipt.json", cancelled.model_dump(mode="json"))
+                    self._forget_cpu_group(attempt_id)
+                    _json_write(directory / "cancellation.json", {
+                        "schema_version": 1, "job_id": request.job_id, "attempt_id": request.attempt_id,
+                        "worker_id": request.worker_id, "approval_id": request.approval_id,
+                        "request_sha256": "sha256:" + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
+                        "config_sha256": "sha256:" + hashlib.sha256(canonical_json(self.config.model_dump(mode="json")).encode()).hexdigest(),
+                        "pid": metadata["pid"], "identity": metadata["identity"], "boot_id": metadata["boot_id"],
+                        "deadline": metadata["deadline"], "monotonic_deadline": metadata["monotonic_deadline"],
+                        "cgroup": metadata["cgroup"], "signal": "SIGKILL",
+                        "signal_scope": "process_group" if group_signal else "process_and_cgroup",
+                        "signal_sent_at": signalled_at.isoformat(), "stopped_at": stopped_at.isoformat(),
+                        "process_stopped": True, "job_scope_stopped": True, "result_present": False,
+                    })
+                    return cancelled
+            finally:
+                os.close(descriptor)
 
     def upload_tensor(self, digest: str, stream, length: int) -> dict:
         """Stage immutable safetensors by content hash; no caller-selected host path."""
@@ -917,11 +1212,15 @@ class Supervisor:
     def close(self, *, terminate: bool = True):
         self._stop.set()
         self._monitor.join(timeout=5)
-        if terminate:
-            with self._lock:
-                for key in tuple(self._requests):
-                    if not self._read(key).process_stopped:
-                        self._terminate(key, "cancelled", "SupervisorStopped")
+        with self._lock:
+            try:
+                if terminate:
+                    for key in tuple(self._requests):
+                        if not self._read(key).process_stopped:
+                            self._terminate(key, "cancelled", "SupervisorStopped")
+            finally:
+                for key in tuple(self._group_descriptors):
+                    self._forget_cpu_group(key)
 
 
 class WorkerHTTPServer(ThreadingHTTPServer):
@@ -1031,6 +1330,7 @@ def main():
     config = WorkerConfig.model_validate_json(Path(args.config).read_text())
     supervisor = Supervisor(config)
     server = WorkerHTTPServer(supervisor, token_path.read_text().strip(), port=args.port)
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     try:
         server.serve_forever()
     finally:

@@ -1,0 +1,11 @@
+[Unit]
+Description=Probe daily independently verified research backup
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=10m
+Persistent=true
+Unit=probe-backup.service
+
+[Install]
+WantedBy=timers.target

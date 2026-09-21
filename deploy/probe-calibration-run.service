@@ -1,0 +1,24 @@
+[Unit]
+Description=Probe supervised exact approved GPU calibration and collection
+After=network-online.target probe-controller.service probe-calibration-submit.service
+Wants=network-online.target probe-calibration-submit.service
+Requires=probe-controller.service
+
+[Service]
+Type=simple
+User=probe-trusted
+Group=probe-trusted
+SupplementaryGroups=probe-ipc probe-ledger-read
+WorkingDirectory=/opt/probe-core
+ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.gpu_acceptance_runner run --config /etc/probe-calibration/acceptance.json
+TimeoutStopSec=15
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/probe-core /var/lib/probe-provider
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

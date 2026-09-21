@@ -1,0 +1,18 @@
+[Unit]
+Description=Auto Interpretability Lab fixed public job proposal
+After=probe-research.service
+Requires=probe-research.service
+
+[Service]
+Type=oneshot
+User=probe-research
+Group=probe-research
+WorkingDirectory=/opt/probe-core
+ExecStart=/opt/probe-core/venv/bin/python -I /opt/probe-core/supervised/supervised-entry.py submit --suite /etc/probe-supervised/suite.json
+TimeoutStartSec=300
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/probe-supervised-submit
+UMask=0077

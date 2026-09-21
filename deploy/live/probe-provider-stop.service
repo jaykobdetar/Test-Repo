@@ -1,0 +1,24 @@
+[Unit]
+Description=Probe independently supervised provider stop broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=probe-trusted
+Group=probe-stop
+SupplementaryGroups=probe-trusted
+ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.runpod_provider serve-stop --config /etc/probe-core/runpod.json --socket /run/probe-provider/stop.sock --watchdog-uid @WATCHDOG_UID@ --socket-gid @STOP_GID@
+RuntimeDirectory=probe-provider
+RuntimeDirectoryMode=0750
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/probe-provider /run/probe-provider
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

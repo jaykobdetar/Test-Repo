@@ -244,7 +244,9 @@ def _independent_watchdog(ledger_path,provider_path,state_path,health_path,stop_
 
 @pytest.mark.parametrize("stop_while_running", [False, True])
 def test_daemon_runs_controller_approved_job_with_independent_watchdog(service,make_request,tmp_path,stop_while_running):
+    from contextlib import closing
     import multiprocessing
+    import sqlite3
     import subprocess
     import sys
     from probe_core.controller import Controller
@@ -281,7 +283,11 @@ def test_daemon_runs_controller_approved_job_with_independent_watchdog(service,m
             assert health.exists()
             daemon=subprocess.Popen([sys.executable,"-m","probe_core.dispatcher","--config",str(config)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             controller.approve_and_start(request["request_id"])
-            deadline=time.monotonic()+45
+            # Completion may use the whole approved job budget. Allow bounded
+            # receipt/reconciliation time without shortening that contract in
+            # the test observer; the worker's enforced limit stays unchanged.
+            observation_seconds = 45 if stop_while_running else job.spec.limits.max_runtime_seconds + 10
+            deadline=time.monotonic()+observation_seconds
             while time.monotonic()<deadline:
                 record=ledger.get_job(job.job_id)
                 if record.state.value in ({"RUNNING", "COMPLETED", "FAILED"} if stop_while_running else {"COMPLETED","FAILED"}):break
@@ -289,16 +295,36 @@ def test_daemon_runs_controller_approved_job_with_independent_watchdog(service,m
                 time.sleep(0.1)
             if stop_while_running:
                 assert record.state.value == "RUNNING", record
-                # Pause only the dispatcher so the simulator's stop result can
-                # be inspected before a real worker receipt is available.
+                # Own SQLite's writer lock before pausing the dispatcher. Otherwise
+                # SIGSTOP can freeze its writer mid-transaction and prevent the
+                # controller from recording its independent stop request.
                 import signal
-                daemon.send_signal(signal.SIGSTOP)
                 try:
+                    with closing(sqlite3.connect(database, isolation_level=None, timeout=5)) as gate:
+                        gate.execute("BEGIN IMMEDIATE")
+                        try:
+                            assert gate.execute("SELECT state FROM jobs WHERE job_id=?", (job.job_id,)).fetchone()[0] == "RUNNING"
+                            daemon.send_signal(signal.SIGSTOP)
+                            stop_deadline = time.monotonic() + 3
+                            observed_stop = None
+                            while time.monotonic() < stop_deadline:
+                                observed_stop = os.waitid(os.P_PID, daemon.pid, os.WSTOPPED | os.WNOHANG | os.WNOWAIT)
+                                if observed_stop is not None:
+                                    break
+                                assert daemon.poll() is None
+                                time.sleep(0.01)
+                            assert observed_stop is not None
+                            assert observed_stop.si_code == os.CLD_STOPPED and observed_stop.si_status == signal.SIGSTOP
+                        finally:
+                            gate.rollback()
+                    # The stopped daemon owns no write transaction, so inspect
+                    # the simulator's stop before a real receipt is reconciled.
                     stopped = controller.stop_gpu(request["worker_id"])
                     assert stopped[0]["state"] == "STOP_REQUESTED"
                     assert stopped[0]["last_error_code"] == "WorkerStopPending"
                     with ledger.read_connection() as reader:
                         assert reader.execute("SELECT ended_at FROM approvals WHERE approval_id=?", (request["approval_id"],)).fetchone()[0] is None
+                        assert reader.execute("SELECT stopped_at FROM attempts WHERE attempt_id=?", (record.attempt_id,)).fetchone()[0] is None
                 finally:
                     daemon.send_signal(signal.SIGCONT)
                 deadline = time.monotonic() + 15
