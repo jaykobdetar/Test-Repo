@@ -113,11 +113,18 @@ def cancellation_step(dispatcher, client, job, state, worker, deadline):
         observed = before.get('receipt', {})
         if not (before.get('execution_started') and observed.get('state') == 'RUNNING'):
             return
+        started = before['execution_started']
         require(observed.get('job_id') == job.job_id and observed.get('attempt_id') == job.attempt_id
                 and before.get('request_sha256') == digest(execution.model_dump(mode='json'))
                 and before.get('config_sha256') == digest(worker)
                 and isinstance(before.get('child_identity'), dict)
-                and datetime.fromisoformat(before['original_deadline']).timestamp() == deadline,
+                and datetime.fromisoformat(before['original_deadline']).timestamp() == deadline
+                and type(started) is dict
+                and all(started.get(key) == getattr(execution, key)
+                        for key in ('job_id', 'attempt_id', 'worker_id', 'approval_id'))
+                and all(started.get(key) == before[key]
+                        for key in ('request_sha256', 'config_sha256', 'child_identity'))
+                and datetime.fromisoformat(started['deadline']) == execution.deadline,
                 'CANCELLATION_ATTEMPT_MISMATCH')
         state.publish('cancellation-before.json', before)
     current = client.inspect(job.attempt_id)

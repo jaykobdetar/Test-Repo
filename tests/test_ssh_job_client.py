@@ -390,3 +390,33 @@ def test_actual_remote_helper_transfer_and_inspect_protocol(setup,execution,tmp_
     destination=client.download(receipt,tmp_path/'copied',max_bytes=1024*1024)
     assert {name:(destination/name).read_bytes() for name in outputs}==outputs
     assert calls==['upload','read-tensor','inspect','artifact','artifact']
+
+
+@pytest.mark.parametrize('raw,code',[
+    ('{"error":"FIXED_PUBLIC_JOB_REQUIRED"}\n','FIXED_PUBLIC_JOB_REQUIRED'),
+    ('{"error":"PermissionError"}\n','PermissionError'),
+    ('ssh: private-host: Permission denied (synthetic-secret)',None),
+    ('{"error":"synthetic-secret/private/path"}',None),
+    ('{"error":"SAFE","detail":"synthetic-secret"}',None),
+    ('{"error":"SAFE","error":"OTHER"}',None),
+    ('{"error":"'+'x'*81+'"}',None),
+    ('Traceback synthetic-secret\n{"error":"SAFE"}',None),
+])
+def test_real_command_only_publishes_exact_helper_error_envelope(raw,code):
+    command=[sys.executable,'-c','import sys;sys.stderr.write(sys.argv[1]);sys.exit(1)',raw]
+    with pytest.raises(TransportError) as failure:
+        bounded_command(command,b'',timeout=2,max_output_bytes=100)
+    assert failure.value.helper_error_code==code
+    assert 'synthetic-secret' not in str(failure.value)
+    if code is not None:
+        assert ': '+code+';' in str(failure.value)
+    else:
+        assert str(failure.value)=='SSH helper failed; reconcile the same attempt'
+
+
+def test_real_command_drains_large_stderr_without_blocking_input_or_leaking_it():
+    command=[sys.executable,'-c',
+        'import sys;sys.stderr.write("synthetic-secret"*20000);sys.stderr.flush();'
+        'sys.stdout.buffer.write(sys.stdin.buffer.read())']
+    payload=b'bounded-public-input'*5000
+    assert bounded_command(command,payload,timeout=2,max_output_bytes=len(payload))==payload

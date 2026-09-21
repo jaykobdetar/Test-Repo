@@ -90,11 +90,16 @@ class CancellableSSH(SSHFixture):
 
     def inspect(self, attempt_id):
         request = runner.find_request(self.s.ledger, configuration(self.s), self.s.plan)
-        body = {'receipt': self.status(attempt_id).model_dump(mode='json'), 'execution_started': True,
+        body = {'receipt': self.status(attempt_id).model_dump(mode='json'),
                 'request_sha256': runner.digest(self.request.model_dump(mode='json')),
                 'config_sha256': runner.digest({}), 'child_identity': self.child,
                 'original_deadline': datetime.fromtimestamp(request['deadline'], timezone.utc).isoformat(),
                 'cancellation': None}
+        body['execution_started'] = {key: getattr(self.request, key) for key in
+                                    ('job_id', 'attempt_id', 'worker_id', 'approval_id')}
+        body['execution_started'].update({key: body[key] for key in
+                                        ('request_sha256', 'config_sha256', 'child_identity')})
+        body['execution_started']['deadline'] = self.request.deadline.isoformat()
         if self.cancelled and self.proof:
             body['cancellation'] = {key: body[key] for key in
                 ('request_sha256', 'config_sha256', 'child_identity', 'original_deadline')}

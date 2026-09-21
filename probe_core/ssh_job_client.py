@@ -138,15 +138,17 @@ def bounded_command(command, payload, *, timeout, max_output_bytes):
     process = None
     try:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
+            stderr=subprocess.PIPE, close_fds=True, start_new_session=True,
             env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'})
         end = time.monotonic() + timeout
         output = bytearray()
+        diagnostic = bytearray()
         remaining = memoryview(payload)
         with selectors.DefaultSelector() as selector:
-            for stream in (process.stdin, process.stdout):
+            for stream in (process.stdin, process.stdout, process.stderr):
                 os.set_blocking(stream.fileno(), False)
             selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stderr, selectors.EVENT_READ)
             if remaining:
                 selector.register(process.stdin, selectors.EVENT_WRITE)
             else:
@@ -161,16 +163,35 @@ def bounded_command(command, payload, *, timeout, max_output_bytes):
                         if not remaining:
                             selector.unregister(process.stdin)
                             process.stdin.close()
-                    else:
+                    elif key.fileobj is process.stdout:
                         chunk = os.read(process.stdout.fileno(), min(65536, max_output_bytes-len(output)+1))
                         if not chunk:
                             selector.unregister(process.stdout)
                         output.extend(chunk)
                         if len(output) > max_output_bytes:
                             raise TransportError('SSH helper output exceeds its bound')
+                    else:
+                        chunk = os.read(process.stderr.fileno(), 65536)
+                        if not chunk:
+                            selector.unregister(process.stderr)
+                        diagnostic.extend(chunk)
+                        del diagnostic[:-8192]
             process.wait(timeout=max(.001, end-time.monotonic()))
         if process.returncode:
-            raise TransportError('SSH helper failed; reconcile the same attempt')
+            # Only the helper's exact fixed-code envelope may leave this method.
+            # SSH text, paths, addresses, traces and arbitrary stderr are discarded.
+            code = None
+            try:
+                value = decode(bytes(diagnostic))
+                if (type(value) is dict and set(value) == {'error'} and type(value['error']) is str
+                        and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,79}', value['error'])):
+                    code = value['error']
+            except (ValueError, TypeError):
+                pass
+            error = TransportError('SSH helper failed' + (': ' + code if code else '')
+                                   + '; reconcile the same attempt')
+            error.helper_error_code = code
+            raise error
         return bytes(output)
     except (OSError, subprocess.SubprocessError):
         raise TransportError('SSH transport failed; reconcile the same attempt') from None
@@ -182,7 +203,7 @@ def bounded_command(command, payload, *, timeout, max_output_bytes):
             except ProcessLookupError:
                 pass
             process.wait(timeout=5)
-            for stream in (process.stdin, process.stdout):
+            for stream in (process.stdin, process.stdout, process.stderr):
                 stream.close()
 
 
