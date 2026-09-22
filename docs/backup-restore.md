@@ -1,6 +1,6 @@
 # Auto Interpretability Lab: Verified Google Drive backups
 
-[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+[Project overview](../README.md) · [Status](../STATUS.md) · [Validation](validation.md)
 
 This is Auto Interpretability Lab's backup and restore contract. The installed
 backup identity has completed upload, full readback and offline restore checks.

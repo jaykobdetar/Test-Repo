@@ -1,13 +1,11 @@
 # Auto Interpretability Lab: Ubuntu host installation
 
-[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+[Project overview](../README.md) · [Status](../STATUS.md) · [Validation](validation.md)
 
 This guide separates fresh installation from the historical repairs used on the
-first controller. The current installation has passed the 16-check CPU gate,
-26-check identity gate and Drive backup/restore; the repairs below are not routine
-upgrade instructions. Use only a reviewed helper matching its exact recorded
-failure state. Source and installed-release status are tracked in the linked
-validation page.
+first controller. The repairs below are not routine upgrade instructions. Use
+only a reviewed helper matching its exact recorded failure state. Installed
+release and acceptance status are recorded in [STATUS.md](../STATUS.md).
 
 `deploy/install-controller.sh` is a manual administrator procedure. Preparing the
 bundle or running `probe_core.host_setup` does not create accounts, alter `/etc`,

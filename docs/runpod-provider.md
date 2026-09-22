@@ -1,6 +1,6 @@
 # Auto Interpretability Lab: RunPod provider boundary
 
-[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+[Project overview](../README.md) · [Status](../STATUS.md) · [Validation](validation.md)
 
 This guide describes Auto Interpretability Lab's implemented provider boundary,
 not a claim that model acceptance has passed. The adapter supports short,

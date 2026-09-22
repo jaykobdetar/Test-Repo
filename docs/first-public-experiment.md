@@ -1,8 +1,9 @@
 # First supervised public experiment
 
-The next milestone is one small exploratory experiment after Base and posttrained
-numerical calibration and independent artifact backup. This is a proposed fixed
-recipe, not an executed experiment or a claim about what the model represents.
+This is the experiment for Milestone 1d of the [redirect plan](../REDIRECT-PLAN.md),
+which runs it as a registered recipe after budget envelopes, recipes and metrics
+exist. It is a proposed fixed recipe, not an executed experiment or a claim about
+what the model represents; see [STATUS.md](../STATUS.md) for whether it has run.
 
 ## Question and measurement
 

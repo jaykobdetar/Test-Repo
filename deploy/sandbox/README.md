@@ -1,6 +1,6 @@
 # Auto Interpretability Lab: Rootless CPU sandbox
 
-[Project overview](../../README.md) · [Validation status](../../docs/validation.md) · [Host installation](../../docs/host-installation.md)
+[Project overview](../../README.md) · [Status](../../STATUS.md) · [Validation](../../docs/validation.md) · [Host installation](../../docs/host-installation.md)
 
 This is Auto Interpretability Lab's execution layer for arbitrary researcher
 Python on CPU. It is separate from the fixed-operation GPU worker; success here
@@ -159,7 +159,7 @@ gate under the actual installed service profile after a launcher change.
 
 The dedicated installed service passed all 16 acceptance checks on September 20,
 2026, including the launcher-crash cleanup gate. Its exact image remains pinned
-below. The [validation status](../../docs/validation.md) identifies the installed
+below. [STATUS.md](../../STATUS.md) identifies the installed
 controller release. The earlier local runs in this section explain how the
 runtime was qualified; their overlapping counts must not be added together.
 
