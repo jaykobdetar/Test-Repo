@@ -8,7 +8,7 @@ that does not certify a numerical GPU result. The development backend is a
 persistent provider simulator. A separate guarded
 [RunPod adapter](runpod-provider.md) supports short supervised acceptance runs.
 Initial creation, replacement, and any supported restart require the human
-administrative socket. Research clients can submit a request, inspect its
+administrative socket, or an open budget envelope that a human issued through it. Research clients can submit a request, inspect its
 status, or stop compute. RunPod resumes and unattended launches remain disabled.
 
 ## Process and identity boundaries
@@ -65,6 +65,58 @@ python -m probe_core.controller admin --socket /run/probe-controller/admin.sock 
 
 The provider supplies the live price; the caller cannot provide it. The provider simulator rechecks the approved price and storage ceilings atomically with the paid action. The GPU rate must remain strictly below $1.50/hour. Storage for all existing persistent volumes, including retained replacement volumes, plus configured non-storage overhead must remain strictly below $2/day. The simulator's storage price is a fixture, not a current RunPod price claim.
 
+## Budget envelopes
+
+A budget envelope is a human-approved spending limit for exploratory research.
+While one is open, the controller may approve a pending disposable research Pod
+without a per-start human action. It replaces only that action: the live quote,
+$1.50/hour and $2/day limits, 15-minute approval, watchdog acknowledgement,
+deadline and confirmed deletion all still apply to every Pod.
+
+Issue one from the human account with a JSON file such as:
+
+```json
+{
+  "envelope_id": "m1-exploratory-001",
+  "max_gpu_usd": 3.0,
+  "max_llm_usd": 0.0,
+  "max_gpu_usd_per_hour": 0.80,
+  "max_wall_seconds_per_pod": 900,
+  "allowed_models": [
+    {"repo": "Qwen/Qwen3-1.7B-Base", "revision_sha": "ea980cb0a6c2ae4b936e82123acc929f1cec04c1"},
+    {"repo": "Qwen/Qwen3-1.7B", "revision_sha": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"}
+  ],
+  "allowed_stages": ["exploratory"],
+  "lifetime_hours": 24
+}
+```
+
+```sh
+python -m probe_core.controller admin --socket /run/probe-controller/admin.sock --expected-server-uid 2001 --method issue_envelope --envelope-file envelope.json
+python -m probe_core.controller admin --socket /run/probe-controller/admin.sock --expected-server-uid 2001 --method budget_status
+python -m probe_core.controller admin --socket /run/probe-controller/admin.sock --expected-server-uid 2001 --method close_envelope --envelope-id m1-exploratory-001
+```
+
+The controller sets `approved_by` from the admin socket's peer UID and the issue
+and expiry times from its own clock; a client cannot supply them. Only one
+envelope may be open. Nothing renews or extends it. `max_llm_usd` must be zero
+until LLM spending is separately approved, and only the exploratory stage is
+allowed. After expiry or closure no new Pod can be reserved; a running Pod keeps
+its own deadline.
+
+Accounting is append-only in the ledger (`probe_core/budget.py`). Before
+creation, in the same transaction that consumes the request, the controller
+reserves the worst case: `(runtime + 300 s deletion reserve) × max_gpu_usd_per_hour`.
+It refuses the start when reserved plus settled spend would exceed `max_gpu_usd`,
+and records the refusal. When the provider confirms deletion, the reservation
+settles at the interval from reservation to confirmation times the quoted live
+price, an upper bound on billed time. A request that fails before any provider
+action settles at zero. An uncertain request keeps its full reservation until
+reconciliation confirms deletion.
+
+The installed identity gate expects `gpu_start_authority: false` from
+`lab_status`, so run it with no envelope open.
+
 ## Creation and replacement identity
 
 `DeploymentSpec` freezes GPU model/count, image digest, volume identity/size, and region. A provisioning request reserves a local logical worker ID and binds the exact configuration hash, job-batch hash, runtime, and replacement target. `ApprovalNonce.pod_id` refers to this stable logical worker ID. The provider must map it uniquely to the actual provider Pod ID and retain the creation request key and configuration hash for reconciliation. Replacing an existing worker requires it to be confirmed stopped and uses a new logical identity and a new human approval. For the selected disposable profile, the old Pod must already be confirmed
@@ -112,5 +164,7 @@ cached status to stand in for provider confirmation.
 - `request_provision(deployment, job_ids, max_runtime_seconds, replaces_worker_id=None)`
 - `status()`
 - `stop_gpu(worker_id=None)`
+- `budget_status()`
+- `start_within_envelope(request_id)`
 
-Wire methods have those same names and accept named parameters. There is no research approval method. Run the controller with `python -m probe_core.controller serve ...` and the independent watcher with `python -m probe_core.controller watchdog ...`; their complete flags are available with `--help`.
+Wire methods have those same names and accept named parameters. There is no research approval method; `start_within_envelope` succeeds only inside an open human-issued envelope. The research facade exposes it to the agent as the `start_gpu_within_envelope` MCP tool and adds the envelope and its spend to `lab_status`. Run the controller with `python -m probe_core.controller serve ...` and the independent watcher with `python -m probe_core.controller watchdog ...`; their complete flags are available with `--help`.

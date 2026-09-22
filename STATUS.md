@@ -8,8 +8,7 @@ links to retained evidence or to the tests that check it. A claim changes here i
 the same commit as the code or evidence that changes it (see
 [CONTRIBUTING.md](CONTRIBUTING.md)).
 
-Last updated: September 22, 2026, at source `db92311` plus the Milestone 0
-documentation changes.
+Last updated: September 22, 2026, on branch `redirect/milestone-1`.
 
 **Summary.** The **supervised** GPU profile has passed exact numerical
 calibration on both Qwen3-1.7B checkpoints. The **managed** worker profile has
@@ -40,6 +39,7 @@ Code and tests exist, but no live or installed run has passed.
 | Ledger-connected supervised public job over SSH (`supervised_runner`, `ssh_job_client`, `deploy/gpu/public-job.py`, additive sidecar installer) | Any live GPU run through the installed ledger; deadline, output, CUDA allocator, cancellation and deletion evidence on RunPod | [tests/test_supervised_runner.py](tests/test_supervised_runner.py), [tests/test_ssh_job_client.py](tests/test_ssh_job_client.py), [tests/test_public_job.py](tests/test_public_job.py), [tests/test_install_supervised.py](tests/test_install_supervised.py) |
 | Worker seccomp correction allowing CUDA's AF_UNIX socket creation while keeping network denials | A published image and a live RunPod run under the managed worker; local driver and BF16 kernel checks only | [tests/test_worker_network_policy.py](tests/test_worker_network_policy.py) |
 | RunPod provider adapter with price ceiling and deletion readback | Exercised by the supervised passes above; unattended use and `stopAfter` host-loss behaviour are unverified | [tests/test_runpod_provider.py](tests/test_runpod_provider.py) |
+| Budget envelopes: human-issued GPU spending limit, automatic approval of disposable exploratory Pods within it, append-only worst-case reservation and settlement, refusal when the remainder cannot cover a Pod, spend in `lab_status` | No live use yet. The standalone supervised command does not yet charge the envelope (Milestone 1d). Tested only on CPU with the simulator provider. | [tests/test_budget.py](tests/test_budget.py) |
 | Real CPU sandbox in ordinary CI | CI skips the real Podman checks; only the installed gate above counts | [tests/test_sandbox.py](tests/test_sandbox.py), [tests/test_sandbox_service.py](tests/test_sandbox_service.py) |
 
 ## Deferred
@@ -56,12 +56,21 @@ in [REDIRECT-PLAN.md](REDIRECT-PLAN.md) requires it.
 
 ## Current milestone
 
-**Milestone 0: redirect and consolidate status** ([plan](REDIRECT-PLAN.md#milestone-0--redirect-consolidate-status-make-docs-trustworthy)).
-This file, `docs/history/`, `CONTRIBUTING.md`, the CI documentation check and
-the formatting baseline.
+**Milestone 1: recipes, metrics and budget envelopes**
+([plan](REDIRECT-PLAN.md#milestone-1--recipes-metrics-and-budget-envelopes-run-the-first-experiment)).
+Milestone 0 is complete ([PR #2](https://github.com/jaykobdetar/Test-Repo/pull/2)).
 
-Next is **Milestone 1**: budget envelopes, multi-step recipes, metrics, and the
-[first public experiment](docs/first-public-experiment.md), which has not been
-run. The following have not been started: SAE features (M2), an automated
-explanation loop (M3), a private held-out evaluator, Explorer/Skeptic/Replicator
-roles and blind scientific calibration (M6).
+- 1a, budget envelopes: implemented and tested on the simulator. The operator
+  approved the design on 2026-09-22, including automatic approval within an
+  envelope and a first envelope of $3 GPU, 24 hours, $0.80/hour, 900 s per Pod,
+  exploratory stage and both pinned Qwen3-1.7B checkpoints. It has not been
+  issued on the installed controller.
+- 1b recipes, 1c metrics, 1d the [first public experiment](docs/first-public-experiment.md):
+  not started. The experiment has not been run.
+
+GPU budget: the operator's cumulative authorization is $20, of which about $3
+was spent before envelopes existed (operator report, 2026-09-22).
+
+Not yet started: SAE features (M2), an automated explanation loop (M3), a
+private held-out evaluator, Explorer/Skeptic/Replicator roles and blind
+scientific calibration (M6).

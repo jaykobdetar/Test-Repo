@@ -546,3 +546,40 @@ class ApprovalNonce(FrozenModel):
         if (self.expires_at - self.issued_at).total_seconds() > 900:
             raise ValueError("approval lifetime must not exceed 15 minutes")
         return self
+
+
+class PinnedModel(FrozenModel):
+    repo: Literal["Qwen/Qwen3-1.7B-Base", "Qwen/Qwen3-1.7B"]
+    revision_sha: GitSHA
+
+
+class BudgetEnvelope(FrozenModel):
+    """A human-approved spending envelope for exploratory research compute.
+
+    Within an open, unexpired envelope the controller may approve disposable
+    research Pods without a per-start human action. Every per-Pod price, idle,
+    deadline, watchdog and deletion check still applies. Nothing renews or
+    extends an envelope; the controller sets ``approved_by`` from the admin
+    socket's peer identity.
+    """
+
+    envelope_id: Identifier
+    max_gpu_usd: Annotated[float, Field(strict=True, gt=0, le=20, allow_inf_nan=False)]
+    max_llm_usd: Annotated[float, Field(strict=True, ge=0, le=0, allow_inf_nan=False)]
+    max_gpu_usd_per_hour: Annotated[float, Field(strict=True, gt=0, lt=1.50, allow_inf_nan=False)]
+    max_wall_seconds_per_pod: Annotated[int, Field(strict=True, ge=60, le=900)]
+    allowed_models: Annotated[tuple[PinnedModel, ...], Field(min_length=1, max_length=16)]
+    allowed_stages: Annotated[tuple[Literal[ExperimentStage.EXPLORATORY], ...], Field(min_length=1, max_length=1)]
+    issued_at: UTCTimestamp
+    expires_at: UTCTimestamp
+    approved_by: Annotated[str, StringConstraints(strict=True, pattern=r"^uid:[0-9]{1,10}$")]
+
+    @model_validator(mode="after")
+    def bounded_lifetime(self) -> Self:
+        if self.expires_at <= self.issued_at:
+            raise ValueError("expires_at must follow issued_at")
+        if (self.expires_at - self.issued_at).total_seconds() > 7 * 86400:
+            raise ValueError("an envelope must expire within seven days")
+        if len(set(self.allowed_models)) != len(self.allowed_models):
+            raise ValueError("allowed models must be distinct")
+        return self
