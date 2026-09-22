@@ -347,3 +347,81 @@ def test_first_experiment_recipes_are_baked_into_their_model_images(name, manife
         singular = prompt.prompt_id.endswith("singular")
         verbs = (374, 525) if repo.endswith("Base") else (285, 546)
         assert (prompt.target_token_id, prompt.alternative_token_id) == (verbs if singular else verbs[::-1])
+
+
+def test_prepare_public_run_binds_image_suite_and_fresh_deadline(tmp_path):
+    from datetime import datetime, timezone
+
+    from probe_core.runpod_provider import RunPodConfig, RunPodLaunchConfig, StorageRates
+    from test_public_calibration_launch import load
+
+    prepare = load("prepare-public-run.py")
+    launch = RunPodLaunchConfig(image_repository="ghcr.io/test/worker", ports=("22/tcp",))
+    provider = RunPodConfig(
+        state_path=str(tmp_path / "state.sqlite"),
+        api_key_file=str(tmp_path / "never-read"),
+        launch=launch,
+        storage_rates=StorageRates(checked_at=datetime.now(timezone.utc)),
+        mode="supervised_acceptance",
+    )
+    template = tmp_path / "old-run"
+    template.mkdir()
+    old = {
+        "deadline": 0,
+        "worker_id": "old",
+        "request_id": "old",
+        "ssh_key": "/keys/id",
+        "provider": json.loads(provider.model_dump_json()),
+        "deployment": {
+            "gpu_model": "NVIDIA GeForce RTX 4090",
+            "image_digest": "sha256:" + "1" * 64,
+            "region": "EU-RO-1",
+            "volume_gb": 0,
+            "image_repository": "ghcr.io/test/worker",
+            "launch_config_hash": launch.digest,
+            "storage_mode": "disposable_research",
+        },
+        "calibration_script_sha256": "sha256:" + "0" * 64,
+    }
+    (template / "run.json").write_text(json.dumps(old))
+    (template / "calibration.json").write_text(json.dumps({"model": BASE, "live_price_usd_per_hour": 0.74}))
+    with pytest.raises(ValueError, match="budget ledger"):
+        prepare.prepare(
+            template,
+            tmp_path / "x",
+            suite_name="subject_verb_l14_mlp_base_v1",
+            image_digest="sha256:" + "2" * 64,
+            code_commit="a" * 40,
+        )
+    with pytest.raises(ValueError, match="not registered"):
+        prepare.prepare(
+            template,
+            tmp_path / "y",
+            suite_name="subject_verb_l14_mlp_posttrained_v1",
+            image_digest="sha256:" + "2" * 64,
+            code_commit="a" * 40,
+            budget_ledger=tmp_path / "b",
+        )
+    result = prepare.prepare(
+        template,
+        tmp_path / "new",
+        suite_name="subject_verb_l14_mlp_base_v1",
+        image_digest="sha256:" + "2" * 64,
+        code_commit="a" * 40,
+        budget_ledger=tmp_path / "budget.sqlite",
+    )
+    record = json.loads((tmp_path / "new" / "run.json").read_text())
+    config = json.loads((tmp_path / "new" / "calibration.json").read_text())
+    suite = recipe_registry.registered("subject_verb_l14_mlp_base_v1")
+    assert record["deployment"]["image_digest"] == config["container_image_digest"] == "sha256:" + "2" * 64
+    assert record["suite"] == suite.name and record["worker_id"] != "old" and record["request_id"] != "old"
+    assert 0 < record["deadline"] - time.time() <= 900 and result["suite"] == suite.name
+    assert config["datasets"] == [{"path": "/opt/probe-assets/" + suite.dataset_path, "sha256": suite.dataset_sha256}]
+    assert config["code_git_commit"] == "a" * 40 and record["provider"] == old["provider"]
+    assert (
+        record["calibration_script_sha256"]
+        == "sha256:"
+        + hashlib.sha256(
+            (recipe_registry.RESOURCES.parents[2] / "deploy/gpu/public-calibration.py").read_bytes()
+        ).hexdigest()
+    )

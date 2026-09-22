@@ -34,6 +34,21 @@ confirms deletion, the reservation settles at the measured interval times the
 quoted price; if deletion is unconfirmed, the full reservation stays held. The
 same accounting code serves the installed controller.
 
+To prepare a run directory from an earlier run of the same model, immediately
+before starting the guard (the deadline of at most 900 seconds starts at once):
+
+```sh
+python deploy/gpu/prepare-public-run.py --template PREVIOUS_RUN_DIR --output NEW_RUN_DIR \
+  --suite subject_verb_l14_mlp_base_v1 --image-digest sha256:DERIVED_IMAGE_DIGEST \
+  --code-commit FULL_SOURCE_COMMIT --budget-ledger ~/probe-budget/budget.sqlite
+python deploy/gpu/run-public-calibration.py guard NEW_RUN_DIR   # as its own user service
+python deploy/gpu/run-public-calibration.py run NEW_RUN_DIR
+```
+
+The helper copies `run.json` and `calibration.json`, binds the new image, source
+commit and suite dataset, and sets new worker and request identities. It does
+not read the provider key, which `run.json` names only by path.
+
 Images built from this branch also bake the registered experiment datasets. A
 managed-launcher configuration for such an image must list every baked dataset,
 because `probe_core/gpu_launch.py` requires an exact match (that profile is

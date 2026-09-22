@@ -67,6 +67,14 @@ registered in `probe_core/resources/recipes/` and pinned by canonical SHA-256:
   its paired mean change. Target log-probability, KL to baseline and the top-5
   tokens are also reported.
 
+Images built from source `efa0b5819fc4e399c9641f508d478827e47caab6` (not yet
+accepted on a GPU):
+
+| Model | Worker image | Derived supervised image |
+| --- | --- | --- |
+| Base | `sha256:89e593abdeb443c88b6677cad04e9a4b3a693b18f7b91c6f041aed424a5e08e7` | `sha256:b936d83996967c58a386c9c45156e23d2de50a792800815d45a8972165a02510` |
+| Posttrained | `sha256:6b893213801dc2c8aae0a1ba8621aa75548cc750d13c10119cd291b70c43fec3` | `sha256:bd4750c5a74a07e6267d421ad7bcb0bc8d03442897fb3f66dcb75d4a4ae3058f` |
+
 Each run is charged to budget envelope `m1-exploratory-001`. The estimate is
 about $0.25 for both Pods; the envelope reserves up to $0.27 per Pod.
 
