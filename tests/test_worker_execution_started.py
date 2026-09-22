@@ -1,4 +1,5 @@
 """Execution-start evidence must follow release and a verified child identity."""
+
 import json
 import multiprocessing
 from pathlib import Path
@@ -33,9 +34,16 @@ def test_pre_release_child_has_no_execution_start_marker(tiny_bundle, make_reque
     request = make_request(key="waiting-for-release")
     context = multiprocessing.get_context("spawn")
     ready, release = context.Event(), context.Event()
-    process = context.Process(target=_child_entry, args=(
-        tiny_bundle[0].model_dump_json(), request.model_dump_json(), str(tmp_path), ready, release,
-    ))
+    process = context.Process(
+        target=_child_entry,
+        args=(
+            tiny_bundle[0].model_dump_json(),
+            request.model_dump_json(),
+            str(tmp_path),
+            ready,
+            release,
+        ),
+    )
     process.start()
     try:
         assert ready.wait(timeout=10), "child did not reach its pre-release wait"
@@ -51,9 +59,16 @@ def test_missing_child_identity_fails_before_execution_start_marker(tiny_bundle,
     request = make_request(key="missing-process-identity")
     context = multiprocessing.get_context("spawn")
     ready, release = context.Event(), context.Event()
-    process = context.Process(target=entry_without_identity, args=(
-        tiny_bundle[0].model_dump_json(), request.model_dump_json(), str(tmp_path), ready, release,
-    ))
+    process = context.Process(
+        target=entry_without_identity,
+        args=(
+            tiny_bundle[0].model_dump_json(),
+            request.model_dump_json(),
+            str(tmp_path),
+            ready,
+            release,
+        ),
+    )
     process.start()
     try:
         assert ready.wait(timeout=10)

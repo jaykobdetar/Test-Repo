@@ -3,6 +3,7 @@
 These tests use real directories, descriptors, modes, links and file contents.
 Only ownership changes unavailable to an unprivileged test account are modeled.
 """
+
 import importlib.util
 import json
 import os
@@ -15,8 +16,7 @@ import pytest
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location(
-    "storage_group_recovery", PROJECT / "deploy/resume-controller-runtime.py")
+spec = importlib.util.spec_from_file_location("storage_group_recovery", PROJECT / "deploy/resume-controller-runtime.py")
 recovery = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recovery)
 
@@ -60,20 +60,34 @@ def storage(tmp_path, monkeypatch):
 
     monkeypatch.setattr(recovery.os, "fstat", fstat)
     monkeypatch.setattr(recovery.os, "fchown", fchown)
-    return SimpleNamespace(home=home, paths=paths, overlay=overlay, uid=uid,
-                           gid=gid, stale_gid=stale_gid, metadata=metadata,
-                           calls=calls, fchown=fchown, real_fstat=real_fstat)
+    return SimpleNamespace(
+        home=home,
+        paths=paths,
+        overlay=overlay,
+        uid=uid,
+        gid=gid,
+        stale_gid=stale_gid,
+        metadata=metadata,
+        calls=calls,
+        fchown=fchown,
+        real_fstat=real_fstat,
+    )
 
 
 def repair(storage):
-    return recovery.repair_storage_groups(storage.home, storage.uid,
-                                          storage.gid, storage.stale_gid)
+    return recovery.repair_storage_groups(storage.home, storage.uid, storage.gid, storage.stale_gid)
 
 
 def snapshot(home):
-    return {str(path.relative_to(home)): (path.lstat().st_mode, path.lstat().st_uid,
-            path.lstat().st_gid, path.read_bytes() if path.is_file() else None)
-            for path in home.rglob("*")}
+    return {
+        str(path.relative_to(home)): (
+            path.lstat().st_mode,
+            path.lstat().st_uid,
+            path.lstat().st_gid,
+            path.read_bytes() if path.is_file() else None,
+        )
+        for path in home.rglob("*")
+    }
 
 
 def test_only_four_groups_change_while_image_contents_and_private_modes_remain(storage):
@@ -184,8 +198,9 @@ def test_existing_runtime_config_requires_exact_bytes_and_metadata(runtime_confi
     assert snapshot(home) == before
 
 
-@pytest.mark.parametrize("change", ["bytes", "file_mode", "parent_mode", "symlink", "hardlink",
-                                    "parent_symlink", "owner", "group"])
+@pytest.mark.parametrize(
+    "change", ["bytes", "file_mode", "parent_mode", "symlink", "hardlink", "parent_symlink", "owner", "group"]
+)
 def test_unexpected_runtime_config_is_refused_unchanged(runtime_config, change):
     home, config = runtime_config
     owner, group = os.getuid(), os.getgid()
@@ -216,16 +231,19 @@ def test_unexpected_runtime_config_is_refused_unchanged(runtime_config, change):
     assert snapshot(home) == before
 
 
-@pytest.mark.parametrize("mapping,containers,accepted", [
-    ("0 982 1\n1 165536 65536\n", "", True),
-    ("0 981 2\n", "", False),
-    ("0 999 1\n", "", False),
-    ("0 982 0\n", "", False),
-    ("0 982 -1\n", "", False),
-    ("unexpected\n", "", False),
-    ("", "", False),
-    ("0 982 1\n", "retained-container-id\n", False),
-])
+@pytest.mark.parametrize(
+    "mapping,containers,accepted",
+    [
+        ("0 982 1\n1 165536 65536\n", "", True),
+        ("0 981 2\n", "", False),
+        ("0 999 1\n", "", False),
+        ("0 982 0\n", "", False),
+        ("0 982 -1\n", "", False),
+        ("unexpected\n", "", False),
+        ("", "", False),
+        ("0 982 1\n", "retained-container-id\n", False),
+    ],
+)
 def test_mapping_and_empty_container_inventory_are_required(mapping, containers, accepted):
     calls = []
 
@@ -233,7 +251,7 @@ def test_mapping_and_empty_container_inventory_are_required(mapping, containers,
         assert command[:7] == ["/usr/sbin/runuser", "-u", "probe-trusted", "-g", "probe-trusted", "--", "env"]
         assert kwargs["cwd"] == recovery.ROOT and kwargs["timeout"] == 30
         assert kwargs["env"] == recovery.ENV and kwargs["stdin"] == subprocess.DEVNULL
-        arguments = command[command.index("--remote=false") + 1:]
+        arguments = command[command.index("--remote=false") + 1 :]
         calls.append(arguments)
         assert arguments in (["unshare", "/usr/bin/cat", "/proc/self/gid_map"], ["ps", "--all", "--quiet"])
         output = mapping if arguments[0] == "unshare" else containers
@@ -253,6 +271,7 @@ def test_failed_inventory_command_cannot_be_mistaken_for_empty_inventory():
         if "unshare" in command:
             return subprocess.CompletedProcess(command, 0, b"0 982 1\n", b"")
         return subprocess.CompletedProcess(command, 125, b"", b"inventory unavailable")
+
     with pytest.raises(RuntimeError, match="inventory unavailable"):
         recovery.verify_storage_runtime(994, 982, 981, run=run)
 
@@ -272,12 +291,16 @@ def test_opt_in_orchestration_checks_original_state_before_mutation(tmp_path, mo
             if failure == name:
                 raise RuntimeError("injected " + name)
             return result
+
         return call
 
     verifier = SimpleNamespace(
         verify_runtime=event("release", original),
         identities=event("identities", ({"probe-trusted": 994}, {"probe-trusted": 982, "probe-research": 981})),
-        expected_units=event("expected_units", {}), verify_units=event("units"), verify_state=event("state"))
+        expected_units=event("expected_units", {}),
+        verify_units=event("units"),
+        verify_state=event("state"),
+    )
     monkeypatch.setattr(recovery.os, "geteuid", lambda: 0)
     monkeypatch.setattr(recovery, "ROOT", root)
     monkeypatch.setattr(recovery, "load_verifier", event("verifier", verifier))
@@ -300,8 +323,11 @@ def test_opt_in_orchestration_checks_original_state_before_mutation(tmp_path, mo
 
     monkeypatch.setattr(recovery, "continuation", continuation)
     real_temporary_directory = tempfile.TemporaryDirectory
-    monkeypatch.setattr(recovery.tempfile, "TemporaryDirectory",
-                        lambda **kwargs: real_temporary_directory(prefix=kwargs["prefix"], dir=tmp_path))
+    monkeypatch.setattr(
+        recovery.tempfile,
+        "TemporaryDirectory",
+        lambda **kwargs: real_temporary_directory(prefix=kwargs["prefix"], dir=tmp_path),
+    )
 
     def run(command, **kwargs):
         assert command[0] == "/bin/bash", "storage repair must neither install packages nor import images"
@@ -314,16 +340,38 @@ def test_opt_in_orchestration_checks_original_state_before_mutation(tmp_path, mo
 
     monkeypatch.setattr(recovery.subprocess, "run", run)
     before = snapshot(root)
-    arguments = ["--verification-helper", "pinned-verifier.py", "--verification-sha256", "a" * 64,
-                 "--manifest-sha256", "b" * 64, "--human", "human"]
+    arguments = [
+        "--verification-helper",
+        "pinned-verifier.py",
+        "--verification-sha256",
+        "a" * 64,
+        "--manifest-sha256",
+        "b" * 64,
+        "--human",
+        "human",
+    ]
     if failure != "no_opt_in":
         arguments.append("--repair-stale-storage-groups")
     result = recovery.main(arguments)
-    expected = ["verifier", "release", "identities", "expected_units", "units", "state", "config", "runtime",
-                "mapping", "image", "continuation", "syntax", "repair", "gate_continuation"]
+    expected = [
+        "verifier",
+        "release",
+        "identities",
+        "expected_units",
+        "units",
+        "state",
+        "config",
+        "runtime",
+        "mapping",
+        "image",
+        "continuation",
+        "syntax",
+        "repair",
+        "gate_continuation",
+    ]
     if failure == "no_opt_in":
         assert events == expected[:6] + ["config_location"]
     else:
-        assert events == (expected if failure is None else expected[:expected.index(failure) + 1])
+        assert events == (expected if failure is None else expected[: expected.index(failure) + 1])
     assert result == (23 if failure is None else 1)
     assert snapshot(root) == before

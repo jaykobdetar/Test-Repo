@@ -68,8 +68,8 @@ run supervised. The provider-management key stays on the host.
 This result does not establish hostile-code containment, nested cgroup resource
 limits, network denial, installed-ledger execution, cancellation/recovery,
 replacement, private held-out evaluation or unattended host-loss shutdown.
-Those remain separate milestones. The next useful step is the
-[first public experiment](first-public-experiment.md).
+Those remain separate milestones. See [STATUS.md](../STATUS.md) for the
+current milestone.
 
 ## Software validation
 

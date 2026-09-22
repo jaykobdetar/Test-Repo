@@ -14,9 +14,11 @@ from test_runpod_provider import runpod
 
 
 def causes(ledger, request_id):
-    return [record for record in ledger.audit_records()
-            if record["payload"].get("request_id") == request_id
-            and "reconciliation_cause" in record["payload"]]
+    return [
+        record
+        for record in ledger.audit_records()
+        if record["payload"].get("request_id") == request_id and "reconciliation_cause" in record["payload"]
+    ]
 
 
 @pytest.fixture
@@ -37,8 +39,12 @@ def test_original_status_503_survives_delete_503_and_later_shutdown(live, monkey
     path = "/v2/pods/" + started["observed_provider_id"]
     original = http.request
     attempts = []
-    headers = {"Content-Type": "application/json", "Retry-After": "2",
-               "Authorization": "PRIVATE_HEADER", "Location": "https://PRIVATE_URL.invalid"}
+    headers = {
+        "Content-Type": "application/json",
+        "Retry-After": "2",
+        "Authorization": "PRIVATE_HEADER",
+        "Location": "https://PRIVATE_URL.invalid",
+    }
 
     def unavailable(method, current_path, body=None):
         if current_path != path:
@@ -62,10 +68,11 @@ def test_original_status_503_survives_delete_503_and_later_shutdown(live, monkey
     record = causes(ledger, started["request_id"])[0]
     assert record["payload"]["decision"] == "compute_stop_requested"
     assert record["payload"]["reconciliation_cause"] == {
-        "reason": "provider_status_error", "request_state": "RUNNING",
-        "exception_type": "ProviderHTTPError", "http": {
-            "http_status": 503, "content_type": "json", "retry_after_seconds": 2,
-            "cf_mitigated_challenge": False}}
+        "reason": "provider_status_error",
+        "request_state": "RUNNING",
+        "exception_type": "ProviderHTTPError",
+        "http": {"http_status": 503, "content_type": "json", "retry_after_seconds": 2, "cf_mitigated_challenge": False},
+    }
     assert "PRIVATE" not in canonical_json(ledger.audit_records())
     assert json.loads(ledger.audit_path.read_text().splitlines()[record["sequence"] - 1]) == record
 
@@ -78,6 +85,7 @@ def test_original_status_503_survives_delete_503_and_later_shutdown(live, monkey
     assert all(job.attempt_id is None for job in ledger.list_jobs())
     ledger.sync_audit()
     from probe_core.audit import AuditLog
+
     assert AuditLog(ledger.audit_path).verify() == ledger.audit_records()
 
 
@@ -100,14 +108,16 @@ def test_one_transient_read_recovers_without_revoking_the_original_allowance(liv
     current = controller.status()[0]
     assert current["state"] == "RUNNING"
     assert (current["approval_id"], current["deadline"], current["observed_provider_id"]) == (
-        started["approval_id"], started["deadline"], started["observed_provider_id"])
+        started["approval_id"],
+        started["deadline"],
+        started["observed_provider_id"],
+    )
     assert reads == [before.timestamp(), before.timestamp() + 2]
     assert causes(ledger, started["request_id"]) == []
     assert live["watcher"].tick() == []
     assert len(http.purchases) == 1 and not any(call[0] == "DELETE" for call in http.calls)
     assert all(job.attempt_id is None for job in ledger.list_jobs())
-    assert len([entry for entry in ledger.audit_records()
-                if entry["payload"].get("decision") == "human_approved"]) == 1
+    assert len([entry for entry in ledger.audit_records() if entry["payload"].get("decision") == "human_approved"]) == 1
     # The normal deadline still terminates the same resource without renewal.
     live["clock"].advance(current["deadline"] - live["clock"]().timestamp())
     assert live["watcher"].tick()[0]["reason"] == "absolute_deadline"
@@ -122,8 +132,12 @@ def test_non_running_request_keeps_its_existing_stop_policy_and_cause(harness, s
     controller._state(request["request_id"], state)
     controller.reconcile()
     cause = causes(ledger, request["request_id"])[0]["payload"]["reconciliation_cause"]
-    assert cause == {"reason": "request_not_running", "request_state": state,
-                     "provider_state": "RUNNING", "provider_identity_changed": False}
+    assert cause == {
+        "reason": "request_not_running",
+        "request_state": state,
+        "provider_state": "RUNNING",
+        "provider_identity_changed": False,
+    }
     assert controller.status()[0]["state"] == "STOPPED"
     assert controller.status()[0]["deadline"] == started["deadline"]
 
@@ -132,14 +146,21 @@ def test_non_running_request_keeps_its_existing_stop_policy_and_cause(harness, s
 def test_deadline_stop_branches_record_fixed_cause(harness, reason):
     request, _ = provision(harness)
     if reason == "deadline_missing":
-        harness["ledger"]._submit(lambda conn, now: conn.execute(
-            "UPDATE compute_requests SET deadline=NULL WHERE request_id=?", (request["request_id"],)))
+        harness["ledger"]._submit(
+            lambda conn, now: conn.execute(
+                "UPDATE compute_requests SET deadline=NULL WHERE request_id=?", (request["request_id"],)
+            )
+        )
     else:
         harness["clock"].advance(900)
     harness["controller"].reconcile()
     cause = causes(harness["ledger"], request["request_id"])[0]["payload"]["reconciliation_cause"]
-    assert cause == {"reason": reason, "request_state": "RUNNING",
-                     "provider_state": "RUNNING", "provider_identity_changed": False}
+    assert cause == {
+        "reason": reason,
+        "request_state": "RUNNING",
+        "provider_state": "RUNNING",
+        "provider_identity_changed": False,
+    }
     assert harness["controller"].status()[0]["state"] == "STOPPED"
 
 
@@ -160,8 +181,12 @@ def test_provider_state_stop_branches_preserve_bounded_observation(harness, monk
     harness["controller"].reconcile()
     assert len(seen) == 2
     cause = causes(harness["ledger"], request["request_id"])[0]["payload"]["reconciliation_cause"]
-    assert cause == {"reason": "provider_not_running", "request_state": "RUNNING",
-                     "provider_state": state.value, "provider_identity_changed": False}
+    assert cause == {
+        "reason": "provider_not_running",
+        "request_state": "RUNNING",
+        "provider_state": state.value,
+        "provider_identity_changed": False,
+    }
 
 
 @pytest.mark.parametrize("failure", ["auth", "malformed", "identity", "custom_type"])
@@ -176,8 +201,14 @@ def test_refused_or_malformed_status_retains_only_safe_diagnostics(live, monkeyp
             reads += 1
             if reads == 1:
                 if failure == "auth":
-                    raise ProviderHTTPError(403, headers={"Content-Type": "text/html",
-                        "cf-mitigated": "challenge", "Authorization": "PRIVATE_HEADER"})
+                    raise ProviderHTTPError(
+                        403,
+                        headers={
+                            "Content-Type": "text/html",
+                            "cf-mitigated": "challenge",
+                            "Authorization": "PRIVATE_HEADER",
+                        },
+                    )
                 if failure == "malformed":
                     raise ProviderResponseError("PRIVATE_JSON_BODY")
                 if failure == "custom_type":
@@ -191,11 +222,22 @@ def test_refused_or_malformed_status_retains_only_safe_diagnostics(live, monkeyp
     controller.reconcile()
     cause = causes(ledger, started["request_id"])[0]["payload"]["reconciliation_cause"]
     assert cause["reason"] == "provider_status_error"
-    assert cause["exception_type"] == {"auth": "ProviderHTTPError", "malformed": "ProviderResponseError",
-                                       "identity": "ProviderUncertain", "custom_type": "Exception"}[failure]
+    assert (
+        cause["exception_type"]
+        == {
+            "auth": "ProviderHTTPError",
+            "malformed": "ProviderResponseError",
+            "identity": "ProviderUncertain",
+            "custom_type": "Exception",
+        }[failure]
+    )
     if failure == "auth":
-        assert cause["http"] == {"http_status": 403, "content_type": "html", "retry_after_seconds": None,
-                                  "cf_mitigated_challenge": True}
+        assert cause["http"] == {
+            "http_status": 403,
+            "content_type": "html",
+            "retry_after_seconds": None,
+            "cf_mitigated_challenge": True,
+        }
     else:
         assert "http" not in cause
     assert "PRIVATE" not in canonical_json(ledger.audit_records())
@@ -203,9 +245,25 @@ def test_refused_or_malformed_status_retains_only_safe_diagnostics(live, monkeyp
     assert len(http.purchases) == 1 and http.pods == []
 
 
-@pytest.mark.parametrize("metadata", [None, {"http_status": True},
-    {"http_status": 503, "content_type": "PRIVATE_VALUE", "retry_after_seconds": 2, "cf_mitigated_challenge": False},
-    {"http_status": 503, "content_type": "json", "retry_after_seconds": float("nan"), "cf_mitigated_challenge": False}])
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        {"http_status": True},
+        {
+            "http_status": 503,
+            "content_type": "PRIVATE_VALUE",
+            "retry_after_seconds": 2,
+            "cf_mitigated_challenge": False,
+        },
+        {
+            "http_status": 503,
+            "content_type": "json",
+            "retry_after_seconds": float("nan"),
+            "cf_mitigated_challenge": False,
+        },
+    ],
+)
 def test_invalid_http_metadata_is_omitted_without_blocking_shutdown(harness, monkeypatch, metadata):
     request, _ = provision(harness)
     backend = harness["backend"]
@@ -224,7 +282,11 @@ def test_invalid_http_metadata_is_omitted_without_blocking_shutdown(harness, mon
     monkeypatch.setattr(backend, "status", broken)
     harness["controller"].reconcile()
     cause = causes(harness["ledger"], request["request_id"])[0]["payload"]["reconciliation_cause"]
-    assert cause == {"reason": "provider_status_error", "request_state": "RUNNING", "exception_type": "ProviderHTTPError"}
+    assert cause == {
+        "reason": "provider_status_error",
+        "request_state": "RUNNING",
+        "exception_type": "ProviderHTTPError",
+    }
     assert harness["controller"].status()[0]["state"] == "STOPPED"
 
 
@@ -266,13 +328,21 @@ def test_non_running_request_reason_precedes_expired_deadline_and_provider_state
 
     def observe(worker_id):
         seen.append(worker_id)
-        return WorkerStatus(worker_id, WorkerState.UNKNOWN, "different-known-id") if len(seen) == 1 else original(worker_id)
+        return (
+            WorkerStatus(worker_id, WorkerState.UNKNOWN, "different-known-id")
+            if len(seen) == 1
+            else original(worker_id)
+        )
 
     monkeypatch.setattr(harness["backend"], "status", observe)
     harness["controller"].reconcile()
     cause = causes(harness["ledger"], request["request_id"])[0]["payload"]["reconciliation_cause"]
-    assert cause == {"reason": "request_not_running", "request_state": "UNCERTAIN",
-                     "provider_state": "UNKNOWN", "provider_identity_changed": True}
+    assert cause == {
+        "reason": "request_not_running",
+        "request_state": "UNCERTAIN",
+        "provider_state": "UNKNOWN",
+        "provider_identity_changed": True,
+    }
 
 
 def test_http_metadata_extra_fields_never_enter_audit(harness, monkeypatch):
@@ -312,36 +382,49 @@ def test_optional_reconciliation_read_receives_exact_bound_identity_and_deadline
     monkeypatch.setattr(backend, "reconcile_status", reconcile_read, raising=False)
     monkeypatch.setattr(backend, "status", ordinary_status)
     harness["controller"].reconcile()
-    assert calls == [(request["worker_id"], {"provider_id": started["observed_provider_id"], "deadline": started["deadline"]})]
+    assert calls == [
+        (request["worker_id"], {"provider_id": started["observed_provider_id"], "deadline": started["deadline"]})
+    ]
     assert causes(harness["ledger"], request["request_id"]) == []
 
 
-@pytest.mark.parametrize("change", ["STARTING", "UNCERTAIN", "STOP_REQUESTED", "missing_id",
-                                    "missing_deadline", "expired", "nan", "boolean"])
+@pytest.mark.parametrize(
+    "change", ["STARTING", "UNCERTAIN", "STOP_REQUESTED", "missing_id", "missing_deadline", "expired", "nan", "boolean"]
+)
 def test_reconciliation_read_hook_is_not_used_outside_bound_live_request(harness, monkeypatch, change):
     request, _ = provision(harness)
     if change in {"STARTING", "UNCERTAIN", "STOP_REQUESTED"}:
         harness["controller"]._state(request["request_id"], change)
     elif change == "missing_id":
-        harness["ledger"]._submit(lambda conn, now: conn.execute(
-            "UPDATE compute_requests SET observed_provider_id=NULL WHERE request_id=?", (request["request_id"],)))
+        harness["ledger"]._submit(
+            lambda conn, now: conn.execute(
+                "UPDATE compute_requests SET observed_provider_id=NULL WHERE request_id=?", (request["request_id"],)
+            )
+        )
     elif change == "missing_deadline":
-        harness["ledger"]._submit(lambda conn, now: conn.execute(
-            "UPDATE compute_requests SET deadline=NULL WHERE request_id=?", (request["request_id"],)))
+        harness["ledger"]._submit(
+            lambda conn, now: conn.execute(
+                "UPDATE compute_requests SET deadline=NULL WHERE request_id=?", (request["request_id"],)
+            )
+        )
     elif change == "expired":
         harness["clock"].advance(900)
     else:
         # SQLite normalizes NaN/booleans, so inject only the public snapshot for
         # this malformed-input branch without changing persisted authority.
         original_status = harness["controller"].status
+
         def snapshot():
             result = original_status()
             for row in result:
                 row["deadline"] = float("nan") if change == "nan" else True
             return result
+
         monkeypatch.setattr(harness["controller"], "status", snapshot)
     calls = []
-    monkeypatch.setattr(harness["backend"], "reconcile_status", lambda *args, **kwargs: calls.append(args), raising=False)
+    monkeypatch.setattr(
+        harness["backend"], "reconcile_status", lambda *args, **kwargs: calls.append(args), raising=False
+    )
     harness["controller"].reconcile()
     assert calls == []
 

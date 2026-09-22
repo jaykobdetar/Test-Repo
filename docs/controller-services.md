@@ -1,6 +1,6 @@
 # Auto Interpretability Lab: Controller and independent stop service
 
-[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+[Project overview](../README.md) · [Status](../STATUS.md) · [Validation](validation.md)
 
 This is the service and authority contract for Auto Interpretability Lab.
 The installed controller identities have passed their actual OS-boundary checks;
@@ -94,7 +94,7 @@ reproduces this mechanism, but it does not identify the historical first error.
 The source correction records the initiating cause in the same audit transaction
 as `STOP_REQUESTED`, before any deletion. It includes only fixed reason codes,
 an exception category and bounded HTTP metadata, never response bodies or raw
-headers. It is not yet part of the installed controller at the status above.
+headers. Whether it is installed is recorded in [STATUS.md](../STATUS.md).
 
 For an already running, physically identified RunPod, reconciliation may retry
 one status read after HTTP 429, 502, 503 or 504. It waits two seconds only when

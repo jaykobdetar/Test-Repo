@@ -1,4 +1,5 @@
 """Bounded transport recovery, exercised without any Drive connection."""
+
 import hashlib
 import json
 from pathlib import Path
@@ -12,8 +13,10 @@ from probe_core.artifact_store import ArtifactStore
 from probe_core.ledger import Ledger
 
 
-QUOTA = (b'googleapi: Error 403: Quota exceeded for quota metric Queries and limit '
-         b'Previous quota: Requests per minute, reason: RATE_LIMIT_EXCEEDED')
+QUOTA = (
+    b"googleapi: Error 403: Quota exceeded for quota metric Queries and limit "
+    b"Previous quota: Requests per minute, reason: RATE_LIMIT_EXCEEDED"
+)
 SECRET = "private-token-and-remote-location"
 
 
@@ -41,13 +44,14 @@ def timer(monkeypatch):
 def transport(tmp_path, timer):
     store = ArtifactStore(tmp_path / "inputs")
     with Ledger(tmp_path / "research.sqlite") as ledger:
-        receipt = backup.create_snapshot(ledger, tmp_path / "snapshot.tar", input_store=store.root,
-                                         source_commit="a" * 40)
+        receipt = backup.create_snapshot(
+            ledger, tmp_path / "snapshot.tar", input_store=store.root, source_commit="a" * 40
+        )
     config = tmp_path / "rclone.conf"
     config.write_text("[gdrive]\ntype = drive\ntoken = test-only\n")
     config.chmod(0o600)
     executable = tmp_path / "rclone"
-    executable.write_text('''#!/usr/bin/python3
+    executable.write_text("""#!/usr/bin/python3
 import hashlib, json, os, pathlib, shutil, sys
 root = pathlib.Path(__file__).parent
 scenario = json.loads((root / "scenario.json").read_text())
@@ -84,39 +88,47 @@ if attempt < len(failures):
     sys.exit(3)
 if operation == "cat":
     sys.stdout.buffer.write(b"wrong content" if scenario.get("corrupt") else remote.read_bytes())
-''')
+""")
     executable.chmod(0o700)
 
     def run(scenario):
         (tmp_path / "scenario.json").write_text(json.dumps(scenario))
-        return backup.upload_snapshot(receipt["archive"], rclone_config=config,
-                                      drive_folder_id="trustedFolder12345",
-                                      receipt_directory=tmp_path / "receipts", rclone=str(executable))
+        return backup.upload_snapshot(
+            receipt["archive"],
+            rclone_config=config,
+            drive_folder_id="trustedFolder12345",
+            receipt_directory=tmp_path / "receipts",
+            rclone=str(executable),
+        )
 
-    return SimpleNamespace(run=run, source=receipt, root=tmp_path,
-                           calls=lambda: json.loads((tmp_path / "calls.json").read_text()))
+    return SimpleNamespace(
+        run=run, source=receipt, root=tmp_path, calls=lambda: json.loads((tmp_path / "calls.json").read_text())
+    )
 
 
-@pytest.mark.parametrize("stderr,operation,code,retry", [
-    (QUOTA, "cat", "RATE_LIMITED", True),
-    (b"googleapi: Error 403: quota exceeded, rateLimitExceeded", "copyto", "RATE_LIMITED", True),
-    (b"googleapi: Error 403: userRateLimitExceeded", "cat", "RATE_LIMITED", True),
-    (b"HTTP/2 429 Too Many Requests", "copyto", "PROVIDER_TEMPORARY", True),
-    (b"googleapi: Error 503: backendError", "cat", "PROVIDER_TEMPORARY", True),
-    (b"Failed to cat: directory not found", "cat", "READBACK_NOT_VISIBLE", True),
-    (b"directory not found", "copyto", "UNCLASSIFIED_FAILURE", False),
-    (b"unexpected EOF", "cat", "NETWORK_TEMPORARY", True),
-    (b"connection reset by peer", "copyto", "NETWORK_TEMPORARY", True),
-    (b"invalid_grant; unexpected EOF", "cat", "AUTHORIZATION_REJECTED", False),
-    (b"immutable file modified; connection reset", "copyto", "IMMUTABLE_CONFLICT", False),
-    (b"Failed to save config; HTTP 503", "copyto", "CREDENTIAL_WRITE_FAILED", False),
-    (b"permission denied; unexpected EOF", "cat", "PERMISSION_REFUSED", False),
-    (b"x509: certificate signed by unknown authority", "copyto", "TLS_VERIFICATION_FAILED", False),
-    (b"googleapi: Error 401: unauthorized; EOF", "cat", "AUTHORIZATION_REFUSED", False),
-    (b"googleapi: Error 403: storageQuotaExceeded", "copyto", "AUTHORIZATION_REFUSED", False),
-    (b"unrecognized remote failure", "cat", "UNCLASSIFIED_FAILURE", False),
-    (b"x" * 65537, "copyto", "DIAGNOSTIC_TOO_LARGE", False),
-])
+@pytest.mark.parametrize(
+    "stderr,operation,code,retry",
+    [
+        (QUOTA, "cat", "RATE_LIMITED", True),
+        (b"googleapi: Error 403: quota exceeded, rateLimitExceeded", "copyto", "RATE_LIMITED", True),
+        (b"googleapi: Error 403: userRateLimitExceeded", "cat", "RATE_LIMITED", True),
+        (b"HTTP/2 429 Too Many Requests", "copyto", "PROVIDER_TEMPORARY", True),
+        (b"googleapi: Error 503: backendError", "cat", "PROVIDER_TEMPORARY", True),
+        (b"Failed to cat: directory not found", "cat", "READBACK_NOT_VISIBLE", True),
+        (b"directory not found", "copyto", "UNCLASSIFIED_FAILURE", False),
+        (b"unexpected EOF", "cat", "NETWORK_TEMPORARY", True),
+        (b"connection reset by peer", "copyto", "NETWORK_TEMPORARY", True),
+        (b"invalid_grant; unexpected EOF", "cat", "AUTHORIZATION_REJECTED", False),
+        (b"immutable file modified; connection reset", "copyto", "IMMUTABLE_CONFLICT", False),
+        (b"Failed to save config; HTTP 503", "copyto", "CREDENTIAL_WRITE_FAILED", False),
+        (b"permission denied; unexpected EOF", "cat", "PERMISSION_REFUSED", False),
+        (b"x509: certificate signed by unknown authority", "copyto", "TLS_VERIFICATION_FAILED", False),
+        (b"googleapi: Error 401: unauthorized; EOF", "cat", "AUTHORIZATION_REFUSED", False),
+        (b"googleapi: Error 403: storageQuotaExceeded", "copyto", "AUTHORIZATION_REFUSED", False),
+        (b"unrecognized remote failure", "cat", "UNCLASSIFIED_FAILURE", False),
+        (b"x" * 65537, "copyto", "DIAGNOSTIC_TOO_LARGE", False),
+    ],
+)
 def test_classification_requires_specific_retry_evidence(stderr, operation, code, retry):
     assert backup._transport_failure(stderr, operation=operation) == (code, retry)
 
@@ -145,12 +157,15 @@ def test_partial_cat_is_truncated_before_retry_and_receipt_requires_full_restore
     ]
 
 
-@pytest.mark.parametrize("failure,code", [
-    ("invalid_grant", "AUTHORIZATION_REJECTED"),
-    ("immutable file modified", "IMMUTABLE_CONFLICT"),
-    ("permission denied", "PERMISSION_REFUSED"),
-    ("a failure without temporary evidence", "UNCLASSIFIED_FAILURE"),
-])
+@pytest.mark.parametrize(
+    "failure,code",
+    [
+        ("invalid_grant", "AUTHORIZATION_REJECTED"),
+        ("immutable file modified", "IMMUTABLE_CONFLICT"),
+        ("permission denied", "PERMISSION_REFUSED"),
+        ("a failure without temporary evidence", "UNCLASSIFIED_FAILURE"),
+    ],
+)
 def test_permanent_failure_never_retries_or_writes_receipt(transport, timer, capsys, failure, code):
     with pytest.raises(backup.BackupError) as error:
         transport.run({"copyto": [failure + " " + SECRET]})
@@ -227,6 +242,10 @@ def test_pending_archives_do_not_receive_separate_transfer_budgets(tmp_path, tim
         return {"verified": True}
 
     monkeypatch.setattr(backup, "upload_snapshot", upload)
-    backup.upload_pending(outbox=outbox, rclone_config=tmp_path / "config", drive_folder_id="trustedFolder12345",
-                          receipt_directory=tmp_path / "receipts")
+    backup.upload_pending(
+        outbox=outbox,
+        rclone_config=tmp_path / "config",
+        drive_folder_id="trustedFolder12345",
+        receipt_directory=tmp_path / "receipts",
+    )
     assert seen == [340, 340]

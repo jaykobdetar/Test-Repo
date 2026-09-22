@@ -1,6 +1,9 @@
 # Auto Interpretability Lab: Historical Phase 2 verification
 
-[Project overview](README.md) · [Validation status](docs/validation.md) · [Deployment checklist](docs/live-deployment-plan.md)
+> **Historical snapshot.** Moved unchanged from `VALIDATION.md` at source `db92311`
+> (relative links adjusted). It is not current status; see [STATUS.md](../../STATUS.md).
+
+[Project overview](../../README.md) · [Validation status](2026-09-20-validation-status.md) · [Deployment checklist](2026-09-20-live-deployment-checklist.md)
 
 This is the historical Phase 2 record, retained for provenance. It does not
 describe the current installed release or its live GPU status; use the linked

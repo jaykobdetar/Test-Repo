@@ -1,4 +1,5 @@
 """Cancellation outcomes and real descriptor-fenced CPU descendant cleanup."""
+
 from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
@@ -33,8 +34,12 @@ temporary.write_text(json.dumps({'pid': child.pid}))
 os.replace(temporary, path)
 time.sleep(30)
 """
-    parent = subprocess.Popen([sys.executable, "-I", "-c", code, str(ready)],
-                              start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    parent = subprocess.Popen(
+        [sys.executable, "-I", "-c", code, str(ready)],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     descriptors = []
     supervisor = None
     try:
@@ -44,15 +49,25 @@ time.sleep(30)
             time.sleep(0.01)
         descendant = json.loads(ready.read_text())["pid"]
         descriptors.append(open_process_descriptor(descendant))
-        request = make_request(key="cancel-race").model_copy(update={"deadline": datetime.now(timezone.utc) + timedelta(seconds=20)})
+        request = make_request(key="cancel-race").model_copy(
+            update={"deadline": datetime.now(timezone.utc) + timedelta(seconds=20)}
+        )
         config = tiny_bundle[0].model_copy(update={"output_directory": str(tmp_path / "attempts")})
         directory = Path(config.output_directory) / request.attempt_id
         directory.mkdir(parents=True, mode=0o700)
-        metadata = {"pid": parent.pid, "identity": worker._process_identity(parent.pid), "boot_id": worker._boot_id(),
-                    "deadline": request.deadline.timestamp(), "monotonic_deadline": time.monotonic() + 20, "cgroup": None}
+        metadata = {
+            "pid": parent.pid,
+            "identity": worker._process_identity(parent.pid),
+            "boot_id": worker._boot_id(),
+            "deadline": request.deadline.timestamp(),
+            "monotonic_deadline": time.monotonic() + 20,
+            "cgroup": None,
+        }
         worker._json_write(directory / "process.json", metadata)
         worker._json_write(directory / "request.json", request.model_dump(mode="json"))
-        receipt = ExecutionReceipt(job_id=request.job_id, attempt_id=request.attempt_id, state="RUNNING", started_at=datetime.now(timezone.utc))
+        receipt = ExecutionReceipt(
+            job_id=request.job_id, attempt_id=request.attempt_id, state="RUNNING", started_at=datetime.now(timezone.utc)
+        )
         worker._json_write(directory / "receipt.json", receipt.model_dump(mode="json"))
         # The process is an adopted, real process-group leader, so cleanup must
         # not rely on a multiprocessing parent handle or a reusable numeric PID.
@@ -86,25 +101,42 @@ def stop_fixture(descriptors):
 
 
 def success_receipt(receipt, manifest_data):
-    return receipt.model_copy(update={"state": worker.WorkerState.SUCCEEDED, "finished_at": datetime.now(timezone.utc),
-                                      "manifest": RunManifest.model_validate(manifest_data)})
+    return receipt.model_copy(
+        update={
+            "state": worker.WorkerState.SUCCEEDED,
+            "finished_at": datetime.now(timezone.utc),
+            "manifest": RunManifest.model_validate(manifest_data),
+        }
+    )
 
 
 def test_real_cpu_cancellation_kills_original_group_and_records_proof(live_attempt):
     supervisor, request, directory, metadata, descriptors, _ = live_attempt
     result = supervisor.cancel(request.attempt_id)
-    assert result.state == worker.WorkerState.CANCELLED and result.failure_kind == "cancelled" and result.process_stopped
+    assert (
+        result.state == worker.WorkerState.CANCELLED and result.failure_kind == "cancelled" and result.process_stopped
+    )
     assert all(select.select([descriptor], [], [], 0)[0] for descriptor in descriptors)
     proof_bytes = (directory / "cancellation.json").read_bytes()
     proof = json.loads(proof_bytes)
     assert proof == {
-        "schema_version": 1, "job_id": request.job_id, "attempt_id": request.attempt_id,
-        "worker_id": request.worker_id, "approval_id": request.approval_id,
-        "request_sha256": "sha256:" + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
-        "config_sha256": "sha256:" + hashlib.sha256(canonical_json(supervisor.config.model_dump(mode="json")).encode()).hexdigest(),
-        **metadata, "signal": "SIGKILL", "signal_scope": "process_group",
-        "signal_sent_at": proof["signal_sent_at"], "stopped_at": result.finished_at.isoformat(),
-        "process_stopped": True, "job_scope_stopped": True, "result_present": False,
+        "schema_version": 1,
+        "job_id": request.job_id,
+        "attempt_id": request.attempt_id,
+        "worker_id": request.worker_id,
+        "approval_id": request.approval_id,
+        "request_sha256": "sha256:"
+        + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
+        "config_sha256": "sha256:"
+        + hashlib.sha256(canonical_json(supervisor.config.model_dump(mode="json")).encode()).hexdigest(),
+        **metadata,
+        "signal": "SIGKILL",
+        "signal_scope": "process_group",
+        "signal_sent_at": proof["signal_sent_at"],
+        "stopped_at": result.finished_at.isoformat(),
+        "process_stopped": True,
+        "job_scope_stopped": True,
+        "result_present": False,
     }
     assert datetime.fromisoformat(proof["signal_sent_at"]) <= result.finished_at < request.deadline
     assert supervisor.cancel(request.attempt_id) == result
@@ -117,7 +149,9 @@ def test_completed_between_get_and_cancel_is_preserved(live_attempt, manifest_da
     success = success_receipt(receipt, manifest_data)
     worker._json_write(directory / "result.json", success.model_dump(mode="json"))
     stop_fixture(descriptors)
-    monkeypatch.setattr(worker, "_signal_pidfd", lambda *_args, **_kwargs: pytest.fail("completed result must not probe or signal"))
+    monkeypatch.setattr(
+        worker, "_signal_pidfd", lambda *_args, **_kwargs: pytest.fail("completed result must not probe or signal")
+    )
     result = supervisor.cancel(request.attempt_id)
     assert result.state == worker.WorkerState.SUCCEEDED and result.manifest == success.manifest
     assert result.process_stopped and result.failure_kind is None
@@ -130,7 +164,9 @@ def test_result_published_during_signal_race_wins(live_attempt, manifest_data, m
 
     def publish_then_signal(descriptor, signum, **kwargs):
         if signum == signal.SIGKILL:
-            worker._json_write(directory / "result.json", success_receipt(receipt, manifest_data).model_dump(mode="json"))
+            worker._json_write(
+                directory / "result.json", success_receipt(receipt, manifest_data).model_dump(mode="json")
+            )
         return original(descriptor, signum, **kwargs)
 
     monkeypatch.setattr(worker, "_signal_pidfd", publish_then_signal)
@@ -158,8 +194,14 @@ def test_unsupported_cpu_group_signal_refuses_without_main_only_fallback(live_at
 
 def test_expired_deadline_is_not_relabelled_cancelled(live_attempt, monkeypatch):
     supervisor, request, directory, metadata, _, _ = live_attempt
-    worker._json_write(directory / "process.json", dict(metadata, deadline=time.time() - 1, monotonic_deadline=time.monotonic() - 1))
-    monkeypatch.setattr(worker, "_signal_pidfd", lambda *_args, **_kwargs: pytest.fail("expired attempt must not probe CPU cancellation support"))
+    worker._json_write(
+        directory / "process.json", dict(metadata, deadline=time.time() - 1, monotonic_deadline=time.monotonic() - 1)
+    )
+    monkeypatch.setattr(
+        worker,
+        "_signal_pidfd",
+        lambda *_args, **_kwargs: pytest.fail("expired attempt must not probe CPU cancellation support"),
+    )
     result = supervisor.cancel(request.attempt_id)
     assert result.state == worker.WorkerState.FAILED and result.failure_kind == "timeout" and result.process_stopped
     assert not (directory / "cancellation.json").exists()
@@ -220,7 +262,9 @@ def test_new_cpu_supervisor_cannot_signal_orphan_using_old_numeric_group(live_at
     try:
         assert not replacement._group_descriptors
         monkeypatch.setattr(worker.os, "killpg", lambda *_: pytest.fail("reusable numeric group must not be signalled"))
-        monkeypatch.setattr(worker, "_signal_pidfd", lambda *_args, **_kwargs: pytest.fail("no authenticated group descriptor exists"))
+        monkeypatch.setattr(
+            worker, "_signal_pidfd", lambda *_args, **_kwargs: pytest.fail("no authenticated group descriptor exists")
+        )
         with pytest.raises(WorkerRequestError, match="without a retained process-group identity"):
             replacement.cancel(request.attempt_id)
         assert not select.select([descriptors[1]], [], [], 0)[0]
@@ -261,8 +305,11 @@ def test_gpu_scope_cleanup_stops_real_orphan_without_leader(live_attempt, tmp_pa
 
     monkeypatch.setattr(worker.os, "write", kill_scope)
     monkeypatch.setattr(worker.os, "killpg", lambda *_: pytest.fail("dead leader numeric group must not be signalled"))
-    result = (supervisor.status(request.attempt_id) if acknowledgment == "refresh" else
-              supervisor._terminate(request.attempt_id, "timeout", "ExecutionDeadlineExceeded"))
+    result = (
+        supervisor.status(request.attempt_id)
+        if acknowledgment == "refresh"
+        else supervisor._terminate(request.attempt_id, "timeout", "ExecutionDeadlineExceeded")
+    )
     assert kills == [b"1"]
     assert result.process_stopped and result.failure_kind == "timeout"
     assert not (directory / "cancellation.json").exists()

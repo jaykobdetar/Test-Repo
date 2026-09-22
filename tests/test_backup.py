@@ -10,7 +10,16 @@ import tarfile
 import pytest
 
 from probe_core.artifact_store import ArtifactStore
-from probe_core.backup import BackupError, create_snapshot, restore_snapshot, upload_snapshot, upload_pending, prune_verified_outbox, publish_snapshot, verify_snapshot
+from probe_core.backup import (
+    BackupError,
+    create_snapshot,
+    restore_snapshot,
+    upload_snapshot,
+    upload_pending,
+    prune_verified_outbox,
+    publish_snapshot,
+    verify_snapshot,
+)
 from probe_core.ledger import ArtifactError, Ledger
 from test_ledger import clock, manifest_data, job_factory, approve, prepare_manifest
 
@@ -53,7 +62,9 @@ def test_live_snapshot_restores_artifacts_inputs_and_audit_independently(snapsho
         assert (path / "artifacts/result.txt").stat().st_mode & 0o222 == 0
         with ledger.read_connection() as connection:
             assert connection.execute("SELECT name FROM sqlite_master WHERE name='manifest_no_update'").fetchone()
-    assert ArtifactStore(restored / "inputs").read(retained["artifact_id"], max_bytes=100)[1] == b"retained CPU analysis"
+    assert (
+        ArtifactStore(restored / "inputs").read(retained["artifact_id"], max_bytes=100)[1] == b"retained CPU analysis"
+    )
     assert (restored / "RESTORE-OFFLINE.txt").is_file()
     with pytest.raises(BackupError, match="new"):
         restore_snapshot(receipt["archive"], restored, expected_sha256=receipt["archive_sha256"])
@@ -79,7 +90,9 @@ def test_archive_tamper_and_oversize_fail(snapshot, tmp_path):
         verify_snapshot(receipt["archive"], max_bytes=1)
 
 
-@pytest.mark.parametrize("name,kind", [("../escape", tarfile.REGTYPE), ("/absolute", tarfile.REGTYPE), ("snapshot.json", tarfile.SYMTYPE)])
+@pytest.mark.parametrize(
+    "name,kind", [("../escape", tarfile.REGTYPE), ("/absolute", tarfile.REGTYPE), ("snapshot.json", tarfile.SYMTYPE)]
+)
 def test_untrusted_archive_paths_and_links_are_rejected(tmp_path, name, kind):
     target = tmp_path / "unsafe.tar"
     with tarfile.open(target, "w") as archive:
@@ -110,7 +123,7 @@ def test_snapshot_refuses_symlink_inputs_and_existing_archive(tmp_path):
 
 def fake_rclone(tmp_path, *, failure=False, corrupt=False):
     executable = tmp_path / "rclone"
-    executable.write_text(f'''#!/usr/bin/python3
+    executable.write_text(f"""#!/usr/bin/python3
 import pathlib, shutil, sys
 args = sys.argv[1:]
 assert args[args.index('--drive-root-folder-id') + 1] == 'trustedFolder12345'
@@ -124,10 +137,10 @@ elif 'cat' in args:
     sys.stdout.buffer.write(b'corrupt' if {corrupt!r} else remote.read_bytes())
 else:
     sys.exit(2)
-''')
+""")
     executable.chmod(0o700)
     config = tmp_path / "rclone.conf"
-    config.write_text('[gdrive]\ntype = drive\ntoken = test-secret\n')
+    config.write_text("[gdrive]\ntype = drive\ntoken = test-secret\n")
     config.chmod(0o600)
     return executable, config
 
@@ -135,7 +148,13 @@ else:
 def test_drive_upload_download_and_restore_are_all_verified(snapshot, tmp_path):
     receipt, *_ = snapshot
     executable, config = fake_rclone(tmp_path)
-    result = upload_snapshot(receipt["archive"], rclone_config=config, drive_folder_id="trustedFolder12345", receipt_directory=tmp_path / "receipts", rclone=str(executable))
+    result = upload_snapshot(
+        receipt["archive"],
+        rclone_config=config,
+        drive_folder_id="trustedFolder12345",
+        receipt_directory=tmp_path / "receipts",
+        rclone=str(executable),
+    )
     assert result["archive_sha256"] == receipt["archive_sha256"]
     assert result["readback_verified"] and result["restore_verified"]
     assert list((tmp_path / "receipts").glob("*.json"))
@@ -149,7 +168,9 @@ def test_archive_replacement_after_pinning_cannot_change_verified_bytes(snapshot
     original = Path(receipt["archive"])
     empty_inputs = ArtifactStore(tmp_path / "replacement-inputs")
     with Ledger(tmp_path / "replacement.sqlite") as ledger:
-        replacement = create_snapshot(ledger, tmp_path / "replacement.tar", input_store=empty_inputs.root, source_commit="d" * 40)
+        replacement = create_snapshot(
+            ledger, tmp_path / "replacement.tar", input_store=empty_inputs.root, source_commit="d" * 40
+        )
     unpack, replaced = backup._unpack, False
 
     def replace_source_then_unpack(archive, stage, max_bytes):
@@ -169,7 +190,13 @@ def test_archive_replacement_after_pinning_cannot_change_verified_bytes(snapshot
         assert not (tmp_path / "recovered/archive.tar").exists()
     elif operation == "upload":
         executable, config = fake_rclone(tmp_path)
-        result = upload_snapshot(original, rclone_config=config, drive_folder_id="trustedFolder12345", receipt_directory=tmp_path / "receipts", rclone=str(executable))
+        result = upload_snapshot(
+            original,
+            rclone_config=config,
+            drive_folder_id="trustedFolder12345",
+            receipt_directory=tmp_path / "receipts",
+            rclone=str(executable),
+        )
         assert hashlib.sha256((tmp_path / "remote.tar").read_bytes()).hexdigest() == receipt["archive_sha256"]
     else:
         result = verify_snapshot(original, expected_sha256=receipt["archive_sha256"])
@@ -183,7 +210,13 @@ def test_drive_auth_or_readback_failure_never_claims_backup(snapshot, tmp_path, 
     receipt, *_ = snapshot
     executable, config = fake_rclone(tmp_path, failure=failure, corrupt=corrupt)
     with pytest.raises(BackupError) as error:
-        upload_snapshot(receipt["archive"], rclone_config=config, drive_folder_id="trustedFolder12345", receipt_directory=tmp_path / "receipts", rclone=str(executable))
+        upload_snapshot(
+            receipt["archive"],
+            rclone_config=config,
+            drive_folder_id="trustedFolder12345",
+            receipt_directory=tmp_path / "receipts",
+            rclone=str(executable),
+        )
     assert "sensitive-token-value" not in str(error.value)
     assert not list((tmp_path / "receipts").glob("*.json"))
 
@@ -192,9 +225,15 @@ def test_backup_identity_rejects_multi_remote_credentials(snapshot, tmp_path):
     receipt, *_ = snapshot
     executable, config = fake_rclone(tmp_path)
     with config.open("a") as stream:
-        stream.write('[other]\ntype = s3\n')
+        stream.write("[other]\ntype = s3\n")
     with pytest.raises(BackupError, match="only"):
-        upload_snapshot(receipt["archive"], rclone_config=config, drive_folder_id="trustedFolder12345", receipt_directory=tmp_path / "receipts", rclone=str(executable))
+        upload_snapshot(
+            receipt["archive"],
+            rclone_config=config,
+            drive_folder_id="trustedFolder12345",
+            receipt_directory=tmp_path / "receipts",
+            rclone=str(executable),
+        )
 
 
 def test_already_verified_unchanged_archive_skips_all_transfers(snapshot, tmp_path):
@@ -204,7 +243,13 @@ def test_already_verified_unchanged_archive_skips_all_transfers(snapshot, tmp_pa
     outbox.mkdir()
     target = outbox / "probe-20260101.tar"
     target.write_bytes(Path(receipt["archive"]).read_bytes())
-    arguments = dict(outbox=outbox, rclone_config=config, drive_folder_id="trustedFolder12345", receipt_directory=tmp_path / "receipts", rclone=str(executable))
+    arguments = dict(
+        outbox=outbox,
+        rclone_config=config,
+        drive_folder_id="trustedFolder12345",
+        receipt_directory=tmp_path / "receipts",
+        rclone=str(executable),
+    )
     first = upload_pending(**arguments)
     assert len(first) == 1 and first[0]["restore_verified"]
     executable.unlink()  # No subprocess may be needed for an unchanged receipt.
@@ -223,8 +268,17 @@ def test_local_retention_deletes_only_older_exact_verified_archives(tmp_path):
         data = str(index).encode()
         (outbox / f"probe-{index}.tar").write_bytes(data)
         if index < 4:
-            (receipts / f"{index}.json").write_text(json.dumps({"verified": True, "readback_verified": True,
-                "restore_verified": True, "drive_folder_id": "trustedFolder12345", "archive_sha256": hashlib.sha256(data).hexdigest()}))
+            (receipts / f"{index}.json").write_text(
+                json.dumps(
+                    {
+                        "verified": True,
+                        "readback_verified": True,
+                        "restore_verified": True,
+                        "drive_folder_id": "trustedFolder12345",
+                        "archive_sha256": hashlib.sha256(data).hexdigest(),
+                    }
+                )
+            )
     (outbox / "unrelated.txt").write_text("retain")
     deleted = prune_verified_outbox(outbox=outbox, receipt_directory=receipts, drive_folder_id="trustedFolder12345")
     assert set(deleted) == {"probe-0.tar", "probe-1.tar"}
@@ -237,8 +291,14 @@ def test_failed_upload_does_not_accumulate_daily_snapshots(tmp_path):
     receipts.mkdir()
     (outbox / "probe-pending.tar").write_bytes(b"pending archive")
     with Ledger(tmp_path / "research.sqlite") as ledger:
-        report = publish_snapshot(ledger, outbox=outbox, input_store=tmp_path / "inputs", source_commit="a" * 40,
-                                  receipt_directory=receipts, drive_folder_id="trustedFolder12345")
+        report = publish_snapshot(
+            ledger,
+            outbox=outbox,
+            input_store=tmp_path / "inputs",
+            source_commit="a" * 40,
+            receipt_directory=receipts,
+            drive_folder_id="trustedFolder12345",
+        )
     assert report == {"snapshot_created": False, "retry_pending_archives": 1}
     assert len(list(outbox.iterdir())) == 1
 
@@ -246,18 +306,31 @@ def test_failed_upload_does_not_accumulate_daily_snapshots(tmp_path):
 def test_provider_mapping_snapshot_is_restorable_but_not_cross_database_atomic(tmp_path):
     provider = tmp_path / "provider.sqlite"
     with closing(sqlite3.connect(provider)) as connection:
-        connection.execute("CREATE TABLE runpod_intents(worker_id TEXT, provider_id TEXT, configuration TEXT, launch_configuration TEXT)")
-        connection.execute("INSERT INTO runpod_intents VALUES(?,?,?,?)", ("logical", "physical", '{}', '{"environment":{"PUBLIC_KEY":"public-only"}}'))
+        connection.execute(
+            "CREATE TABLE runpod_intents(worker_id TEXT, provider_id TEXT, configuration TEXT, launch_configuration TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO runpod_intents VALUES(?,?,?,?)",
+            ("logical", "physical", "{}", '{"environment":{"PUBLIC_KEY":"public-only"}}'),
+        )
         connection.commit()
     with Ledger(tmp_path / "research.sqlite") as ledger:
-        report = create_snapshot(ledger, tmp_path / "snapshot.tar", input_store=tmp_path / "inputs", source_commit="a" * 40, provider_database=provider)
+        report = create_snapshot(
+            ledger,
+            tmp_path / "snapshot.tar",
+            input_store=tmp_path / "inputs",
+            source_commit="a" * 40,
+            provider_database=provider,
+        )
     with tarfile.open(report["archive"]) as archive:
         metadata = json.load(archive.extractfile("snapshot.json"))
     assert metadata["provider_state"]["cross_database_atomic"] is False
     assert metadata["provider_state"]["reconciliation_required"] is True
     restore_snapshot(report["archive"], tmp_path / "restore", expected_sha256=report["archive_sha256"])
     with closing(sqlite3.connect(tmp_path / "restore/provider.sqlite")) as connection:
-        assert connection.execute("SELECT worker_id, provider_id FROM runpod_intents").fetchall() == [("logical", "physical")]
+        assert connection.execute("SELECT worker_id, provider_id FROM runpod_intents").fetchall() == [
+            ("logical", "physical")
+        ]
 
 
 def test_provider_backup_rejects_unreviewed_secret_tables(tmp_path):
@@ -266,4 +339,10 @@ def test_provider_backup_rejects_unreviewed_secret_tables(tmp_path):
         connection.execute("CREATE TABLE credentials(api_key TEXT)")
     with Ledger(tmp_path / "research.sqlite") as ledger:
         with pytest.raises(BackupError, match="unsupported table"):
-            create_snapshot(ledger, tmp_path / "snapshot.tar", input_store=tmp_path / "inputs", source_commit="a" * 40, provider_database=provider)
+            create_snapshot(
+                ledger,
+                tmp_path / "snapshot.tar",
+                input_store=tmp_path / "inputs",
+                source_commit="a" * 40,
+                provider_database=provider,
+            )

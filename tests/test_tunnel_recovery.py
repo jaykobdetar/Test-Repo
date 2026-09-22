@@ -1,4 +1,5 @@
 """Owned SSH failure restarts transport without granting new execution authority."""
+
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
@@ -20,8 +21,12 @@ from test_ledger import approve, clock, job_factory, manifest_data
 
 def initialize_controller(ledger, tmp_path):
     # Constructor initializes durable controller schema only. No provider action.
-    Controller(ledger, SimulatedProvider(tmp_path / "simulator.sqlite"),
-               watchdog_health_path=tmp_path / "health.json", controller_idle_usd_per_day=0.0)
+    Controller(
+        ledger,
+        SimulatedProvider(tmp_path / "simulator.sqlite"),
+        watchdog_health_path=tmp_path / "health.json",
+        controller_idle_usd_per_day=0.0,
+    )
 
 
 def make_tunnel(tmp_path):
@@ -30,16 +35,19 @@ def make_tunnel(tmp_path):
     hosts.write_text("synthetic pinned-host fixture")
     key.chmod(0o600)
     hosts.chmod(0o600)
-    return SSHTunnel("fixture.example", user="root", identity_file=key,
-                     known_hosts_file=hosts, local_port=41000)
+    return SSHTunnel("fixture.example", user="root", identity_file=key, known_hosts_file=hosts, local_port=41000)
 
 
 @contextmanager
 def live_owned_child(tmp_path):
     tunnel = make_tunnel(tmp_path)
     # Poll a real owned process; no SSH/network/cloud connection is made here.
-    tunnel.process = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(60)"],
-                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    tunnel.process = subprocess.Popen(
+        [sys.executable, "-I", "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     try:
         yield tunnel
     finally:
@@ -65,7 +73,12 @@ def execution(tmp_path, clock, job_factory):
 def authority(ledger):
     with ledger.read_connection() as connection:
         return {
-            "attempts": [tuple(row) for row in connection.execute("SELECT attempt_id,job_id,attempt_number,approval_id,execution_deadline FROM attempts ORDER BY attempt_id")],
+            "attempts": [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT attempt_id,job_id,attempt_number,approval_id,execution_deadline FROM attempts ORDER BY attempt_id"
+                )
+            ],
             "approvals": [tuple(row) for row in connection.execute("SELECT * FROM approvals ORDER BY approval_id")],
             "jobs": connection.execute("SELECT count(*) FROM jobs").fetchone()[0],
             "requests": connection.execute("SELECT count(*) FROM compute_requests").fetchone()[0],
@@ -88,8 +101,15 @@ class ObservedWorker:
 
     def cancel(self, attempt_id):
         self.cancellations.append(attempt_id)
-        return ExecutionReceipt(job_id=self.job.job_id, attempt_id=attempt_id, state="CANCELLED", started_at=self.now,
-                                finished_at=self.now, failure_kind="cancelled", process_stopped=True)
+        return ExecutionReceipt(
+            job_id=self.job.job_id,
+            attempt_id=attempt_id,
+            state="CANCELLED",
+            started_at=self.now,
+            finished_at=self.now,
+            failure_kind="cancelled",
+            process_stopped=True,
+        )
 
 
 def service_for(ledger, client, tmp_path, tunnel):
@@ -117,9 +137,11 @@ def test_death_during_http_request_is_fatal_and_restart_queries_same_attempt(exe
         ledger.start_job(job.job_id, job.attempt_id, "worker-1")
     before = authority(ledger)
     with live_owned_child(tmp_path) as tunnel:
+
         def lose_connection():
             kill_owned_child(tunnel)
             raise TransportError("connection lost after remote acceptance")
+
         client = ObservedWorker(job, clock(), failure=lose_connection)
         with pytest.raises(TunnelExited):
             service_for(ledger, client, tmp_path, tunnel).tick()
@@ -138,8 +160,10 @@ def test_live_tunnel_http_outage_remains_retryable(execution, tmp_path):
     ledger, job, clock = execution
     before = authority(ledger)
     with live_owned_child(tmp_path) as tunnel:
+
         def temporarily_unavailable():
             raise TransportError("worker HTTP temporarily unavailable")
+
         client = ObservedWorker(job, clock(), failure=temporarily_unavailable)
         service = service_for(ledger, client, tmp_path, tunnel)
         assert service.tick() == []
@@ -169,7 +193,10 @@ def test_restart_after_deadline_cancels_original_attempt_without_renewal(executi
     assert result[0].attempt_count == 1 and result[0].retry_count == 0
     assert authority(ledger) == before
     with ledger.read_connection() as connection:
-        assert connection.execute("SELECT stopped_at FROM attempts WHERE attempt_id=?", (job.attempt_id,)).fetchone()[0] is not None
+        assert (
+            connection.execute("SELECT stopped_at FROM attempts WHERE attempt_id=?", (job.attempt_id,)).fetchone()[0]
+            is not None
+        )
 
 
 def test_real_dispatcher_process_exits_nonzero_when_owned_ssh_exits(tmp_path):
@@ -197,15 +224,34 @@ sys.exit(255)
         initialize_controller(ledger, tmp_path)
         before = authority(ledger)
     config = tmp_path / "dispatcher.json"
-    config.write_text(json.dumps({"ledger_path": str(database), "worker_id": "worker-1",
-        "transfer_directory": str(tmp_path / "transfers"), "input_artifact_root": str(tmp_path / "inputs"),
-        "bearer_secret_file": str(secret), "poll_seconds": 0.05,
-        "ssh": {"host": "fixture.example", "user": "root", "identity_file": str(tunnel.identity_file),
-                "known_hosts_file": str(tunnel.known_hosts_file)}}))
+    config.write_text(
+        json.dumps(
+            {
+                "ledger_path": str(database),
+                "worker_id": "worker-1",
+                "transfer_directory": str(tmp_path / "transfers"),
+                "input_artifact_root": str(tmp_path / "inputs"),
+                "bearer_secret_file": str(secret),
+                "poll_seconds": 0.05,
+                "ssh": {
+                    "host": "fixture.example",
+                    "user": "root",
+                    "identity_file": str(tunnel.identity_file),
+                    "known_hosts_file": str(tunnel.known_hosts_file),
+                },
+            }
+        )
+    )
     config.chmod(0o600)
-    result = subprocess.run([sys.executable, "-m", "probe_core.dispatcher", "--config", str(config)],
-        cwd=Path(__file__).resolve().parents[1], env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]},
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+    result = subprocess.run(
+        [sys.executable, "-m", "probe_core.dispatcher", "--config", str(config)],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+    )
     assert result.returncode != 0 and b"TunnelExited" in result.stderr
     assert secret.read_bytes() not in result.stderr
     with Ledger(database) as ledger:

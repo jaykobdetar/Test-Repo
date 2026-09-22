@@ -1,4 +1,5 @@
 """Trusted Unix service entry point, supervised independently of MCP sessions."""
+
 from __future__ import annotations
 
 import argparse
@@ -52,19 +53,35 @@ def main() -> None:
     cloud = None
     if config.controller_socket is not None:
         from .controller import ControllerClient
+
         cloud = ControllerClient(config.controller_socket, expected_server_uid=config.controller_uid)
     sandbox = None
     if config.sandbox_image is not None:
         from .sandbox import PodmanSandbox
+
         if config.sandbox_workspace is None or config.sandbox_seccomp_profile is None:
             raise ValueError("sandbox workspace and seccomp profile are required")
-        sandbox = PodmanSandbox(image=config.sandbox_image, workspace=Path(config.sandbox_workspace),
-                                podman=config.podman_path, seccomp_profile=Path(config.sandbox_seccomp_profile))
+        sandbox = PodmanSandbox(
+            image=config.sandbox_image,
+            workspace=Path(config.sandbox_workspace),
+            podman=config.podman_path,
+            seccomp_profile=Path(config.sandbox_seccomp_profile),
+        )
     with Ledger(config.ledger_path) as ledger:
-        service = ResearchService(ledger, config.policy, cloud=cloud, sandbox=sandbox,
-                                  artifact_store=ArtifactStore(config.input_artifact_root))
-        with UnixRPCServer(config.socket_path, service.dispatch, allowed_uids={config.research_uid},
-                           socket_gid=config.socket_gid, timeout_seconds=60) as server:
+        service = ResearchService(
+            ledger,
+            config.policy,
+            cloud=cloud,
+            sandbox=sandbox,
+            artifact_store=ArtifactStore(config.input_artifact_root),
+        )
+        with UnixRPCServer(
+            config.socket_path,
+            service.dispatch,
+            allowed_uids={config.research_uid},
+            socket_gid=config.socket_gid,
+            timeout_seconds=60,
+        ) as server:
             server.serve_forever()
 
 

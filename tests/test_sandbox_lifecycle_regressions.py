@@ -1,4 +1,5 @@
 """Deterministic host-observer regressions; real containment is a separate gate."""
+
 import io
 import json
 from types import SimpleNamespace
@@ -12,14 +13,28 @@ from probe_core import sandbox as module
 def test_eof_after_attestation_retains_observed_timer_outcome(tmp_path, monkeypatch, timer_during_final_select):
     """The last select may return EOF after timeout(), with no next loop turn."""
     limits = module.SandboxLimits(wall_seconds=10)
-    attestation = {"uid": 1000, "cap_eff": "0000000000000000", "seccomp": "2", "no_new_privs": "1",
-        "socket_denied": True, "input_readonly": True, "root_readonly": True,
-        "memory_max": str(limits.memory_bytes), "pids_max": str(limits.pids),
-        "cpu_max": "100000 100000", "interfaces": ["lo"]}
+    attestation = {
+        "uid": 1000,
+        "cap_eff": "0000000000000000",
+        "seccomp": "2",
+        "no_new_privs": "1",
+        "socket_denied": True,
+        "input_readonly": True,
+        "root_readonly": True,
+        "memory_max": str(limits.memory_bytes),
+        "pids_max": str(limits.pids),
+        "cpu_max": "100000 100000",
+        "interfaces": ["lo"],
+    }
     frame = b"PROBE_RUNTIME:" + json.dumps(attestation).encode() + b"\nPROBE_TIME_STARTED\n"
     streams = [io.BytesIO() for _ in range(3)]
-    process = SimpleNamespace(stdin=streams[0], stdout=streams[1], stderr=streams[2],
-                              pid=1234567, returncode=255 if timer_during_final_select else 0)
+    process = SimpleNamespace(
+        stdin=streams[0],
+        stdout=streams[1],
+        stderr=streams[2],
+        pid=1234567,
+        returncode=255 if timer_during_final_select else 0,
+    )
     process.poll = lambda: process.returncode
     process.wait = lambda timeout: process.returncode
     timers, commands, outcomes = [], [], []
@@ -67,8 +82,9 @@ def test_eof_after_attestation_retains_observed_timer_outcome(tmp_path, monkeypa
     reads = {id(process.stdout): [frame, b""], id(process.stderr): [b""]}
     monkeypatch.setattr(module.os, "read", lambda fd, size: reads[fd].pop(0))
     monkeypatch.setattr(module.subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(module.subprocess, "run", lambda command, **kwargs:
-                        commands.append(command) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(
+        module.subprocess, "run", lambda command, **kwargs: commands.append(command) or SimpleNamespace(returncode=0)
+    )
     monkeypatch.setattr(module.selectors, "DefaultSelector", Selector)
     monkeypatch.setattr(module.threading, "Timer", Timer)
     sandbox = module.PodmanSandbox(image="sha256:" + "a" * 64, workspace=tmp_path)

@@ -19,6 +19,7 @@ classifiers = [
 
 [project.optional-dependencies]
 test = ["pytest==9.1.1", "pytest-asyncio==1.4.0"]
+lint = ["ruff==0.16.8"]
 mcp = ["mcp==2.2.0"]
 controller = ["numpy==2.5.3", "safetensors==0.8.0"]
 worker = ["torch==2.14.0", "transformers==5.17.0", "nnsight==0.7.0", "safetensors==0.8.0", "scikit-learn==1.9.1", "scipy==1.18.1", "httpx==0.28.1", "uvicorn==0.53.0"]
@@ -38,3 +39,11 @@ probe_core = ["py.typed", "resources/*.json"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+# Deployment scripts are staged into images and pinned by SHA-256 (for example
+# deploy/sandbox/image-lock.json); reformatting them would change pinned identities.
+extend-exclude = ["deploy"]
+force-exclude = true

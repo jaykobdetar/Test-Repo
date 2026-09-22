@@ -11,12 +11,25 @@ import threading
 import pytest
 
 from probe_core.controller import (
-    BudgetError, Controller, ControllerClient, ControllerConflict, StartUncertain,
-    StopWatchdog, WatchdogUnavailable, serve_controller,
+    BudgetError,
+    Controller,
+    ControllerClient,
+    ControllerConflict,
+    StartUncertain,
+    StopWatchdog,
+    WatchdogUnavailable,
+    serve_controller,
 )
 from probe_core.ledger import Ledger
 from probe_core.ledger import ApprovalError
-from probe_core.provider import DeploymentSpec, PriceQuote, SimulatedProvider, StopOnlyBackend, WorkerState, WorkerStatus
+from probe_core.provider import (
+    DeploymentSpec,
+    PriceQuote,
+    SimulatedProvider,
+    StopOnlyBackend,
+    WorkerState,
+    WorkerStatus,
+)
 from probe_core.rpc import RPCError, UnixRPCClient
 from probe_core.schemas import JobSpec
 from probe_core.schemas import ApprovalNonce
@@ -34,8 +47,13 @@ class Clock:
 
 
 def deployment(**overrides):
-    fields = dict(gpu_model="RTX-A5000", image_digest="sha256:" + "a" * 64,
-                  volume_id="research-volume", volume_gb=100, region="test-region")
+    fields = dict(
+        gpu_model="RTX-A5000",
+        image_digest="sha256:" + "a" * 64,
+        volume_id="research-volume",
+        volume_gb=100,
+        region="test-region",
+    )
     fields.update(overrides)
     return DeploymentSpec(**fields)
 
@@ -46,10 +64,14 @@ def harness(tmp_path):
     ledger = Ledger(tmp_path / "research.sqlite", clock=clock)
     backend = SimulatedProvider(tmp_path / "provider.sqlite", clock=clock)
     health = tmp_path / "watchdog" / "health.json"
-    controller = Controller(ledger, backend, watchdog_health_path=health,
-                            controller_idle_usd_per_day=0.20, clock=clock)
-    watcher = StopWatchdog(ledger.path, StopOnlyBackend(backend),
-                           state_path=tmp_path / "watchdog" / "state.sqlite", health_path=health, clock=clock)
+    controller = Controller(ledger, backend, watchdog_health_path=health, controller_idle_usd_per_day=0.20, clock=clock)
+    watcher = StopWatchdog(
+        ledger.path,
+        StopOnlyBackend(backend),
+        state_path=tmp_path / "watchdog" / "state.sqlite",
+        health_path=health,
+        clock=clock,
+    )
     watcher.tick()
     original_ack = controller._await_watchdog_ack
 
@@ -61,12 +83,24 @@ def harness(tmp_path):
 
     controller._await_watchdog_ack = acknowledge
     data = json.loads((Path(__file__).parent / "fixtures" / "manifest.json").read_text())
-    spec = JobSpec(idempotency_key="controller-job", model=data["model"], inputs=data["inputs"],
-                   operation={"kind": "capture", "modules": [{"layer": 0, "component": "residual"}], "positions": ["last"]},
-                   limits={"max_runtime_seconds": 60, "max_output_bytes": 1000000})
+    spec = JobSpec(
+        idempotency_key="controller-job",
+        model=data["model"],
+        inputs=data["inputs"],
+        operation={"kind": "capture", "modules": [{"layer": 0, "component": "residual"}], "positions": ["last"]},
+        limits={"max_runtime_seconds": 60, "max_output_bytes": 1000000},
+    )
     job = ledger.submit_job(spec)
-    yield dict(clock=clock, ledger=ledger, backend=backend, controller=controller, watcher=watcher,
-               health=health, job=job, tmp_path=tmp_path)
+    yield dict(
+        clock=clock,
+        ledger=ledger,
+        backend=backend,
+        controller=controller,
+        watcher=watcher,
+        health=health,
+        job=job,
+        tmp_path=tmp_path,
+    )
     ledger.close()
 
 
@@ -78,8 +112,11 @@ def provision(harness, runtime=900):
 
 def test_human_infrastructure_allowance_creates_no_dispatchable_research_jobs(harness):
     controller = harness["controller"]
-    params = {"deployment": deployment().model_dump(), "script_sha256": "sha256:" + "c" * 64,
-              "max_runtime_seconds": 300}
+    params = {
+        "deployment": deployment().model_dump(),
+        "script_sha256": "sha256:" + "c" * 64,
+        "max_runtime_seconds": 300,
+    }
     with pytest.raises(PermissionError):
         controller.research_dispatch("request_preflight", params)
     request = controller.admin_dispatch("request_preflight", params)
@@ -88,8 +125,17 @@ def test_human_infrastructure_allowance_creates_no_dispatchable_research_jobs(ha
     started = controller.approve_and_start(request["request_id"])
     assert started["state"] == "RUNNING"
     with harness["ledger"].read_connection() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM approval_jobs WHERE approval_id=?", (request["approval_id"],)).fetchone()[0] == 0
-        body = json.loads(connection.execute("SELECT document FROM approvals WHERE approval_id=?", (request["approval_id"],)).fetchone()[0])
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM approval_jobs WHERE approval_id=?", (request["approval_id"],)
+            ).fetchone()[0]
+            == 0
+        )
+        body = json.loads(
+            connection.execute(
+                "SELECT document FROM approvals WHERE approval_id=?", (request["approval_id"],)
+            ).fetchone()[0]
+        )
     assert body["purpose"] == "infrastructure_preflight"
     assert harness["ledger"].dispatch_next(request["worker_id"], approval_id=request["approval_id"]) is None
     harness["clock"].advance(300)
@@ -100,18 +146,22 @@ def test_human_infrastructure_allowance_creates_no_dispatchable_research_jobs(ha
 
 def test_ephemeral_preflight_cannot_be_provisioned_replaced_or_reused_for_research(harness):
     controller = harness["controller"]
-    spec = deployment(storage_mode="ephemeral_preflight", volume_id=None, volume_gb=0,
-                      image_repository="ghcr.io/test/diagnostic", launch_config_hash="sha256:" + "d" * 64)
+    spec = deployment(
+        storage_mode="ephemeral_preflight",
+        volume_id=None,
+        volume_gb=0,
+        image_repository="ghcr.io/test/diagnostic",
+        launch_config_hash="sha256:" + "d" * 64,
+    )
     for replaces in (None, "old-worker"):
         with pytest.raises(ControllerConflict, match="infrastructure preflight"):
             controller.request_provision(spec, [harness["job"].job_id], 300, replaces_worker_id=replaces)
-    params = {"deployment": spec.model_dump(), "script_sha256": "sha256:" + "c" * 64,
-              "max_runtime_seconds": 300}
+    params = {"deployment": spec.model_dump(), "script_sha256": "sha256:" + "c" * 64, "max_runtime_seconds": 300}
     with pytest.raises(PermissionError):
         controller.research_dispatch("request_preflight", params)
     request = controller.admin_dispatch("request_preflight", params)
     assert request["job_ids"] == [] and request["configuration_hash"] == spec.digest
-    controller.approve_and_start(request["request_id"], price_ceiling_usd_per_hour=.80)
+    controller.approve_and_start(request["request_id"], price_ceiling_usd_per_hour=0.80)
     assert harness["ledger"].dispatch_next(request["worker_id"], approval_id=request["approval_id"]) is None
     harness["clock"].advance(300)
     harness["watcher"].tick()
@@ -123,8 +173,13 @@ def test_ephemeral_preflight_cannot_be_provisioned_replaced_or_reused_for_resear
 
 
 def disposable_deployment():
-    return deployment(storage_mode="disposable_research", volume_id=None, volume_gb=0,
-                      image_repository="ghcr.io/test/worker", launch_config_hash="sha256:" + "d" * 64)
+    return deployment(
+        storage_mode="disposable_research",
+        volume_id=None,
+        volume_gb=0,
+        image_repository="ghcr.io/test/worker",
+        launch_config_hash="sha256:" + "d" * 64,
+    )
 
 
 def test_disposable_research_requires_research_batch_and_cannot_reuse_worker(harness):
@@ -157,11 +212,16 @@ def test_disposable_replacement_accepts_exact_deleted_identity_only_with_new_app
     prior = original_status(first["worker_id"])
 
     def status(worker_id):
-        return WorkerStatus(worker_id, WorkerState.ABSENT, prior.provider_id) if worker_id == first["worker_id"] else original_status(worker_id)
+        return (
+            WorkerStatus(worker_id, WorkerState.ABSENT, prior.provider_id)
+            if worker_id == first["worker_id"]
+            else original_status(worker_id)
+        )
 
     monkeypatch.setattr(backend, "status", status)
-    replacement = controller.request_provision(disposable_deployment(), [harness["job"].job_id], 300,
-                                              replaces_worker_id=first["worker_id"])
+    replacement = controller.request_provision(
+        disposable_deployment(), [harness["job"].job_id], 300, replaces_worker_id=first["worker_id"]
+    )
     assert replacement["worker_id"] != first["worker_id"] and replacement["approval_id"] != started["approval_id"]
     assert len(calls(harness, "create")) == 1
     second = controller.approve_and_start(replacement["request_id"])
@@ -178,16 +238,27 @@ def test_disposable_replacement_never_treats_empty_inventory_as_closed_authority
         controller.stop_gpu(first["worker_id"])
     original_status = backend.status
     prior = original_status(first["worker_id"])
-    observed = WorkerStatus(first["worker_id"], WorkerState.UNKNOWN if fault == "unknown" else WorkerState.ABSENT,
-                           None if fault == "unseen" else "different" if fault == "different_provider" else prior.provider_id)
-    monkeypatch.setattr(backend, "status", lambda worker_id: observed if worker_id == first["worker_id"] else original_status(worker_id))
-    replacement = controller.request_provision(disposable_deployment(), [harness["job"].job_id], 300,
-                                              replaces_worker_id=first["worker_id"])
+    observed = WorkerStatus(
+        first["worker_id"],
+        WorkerState.UNKNOWN if fault == "unknown" else WorkerState.ABSENT,
+        None if fault == "unseen" else "different" if fault == "different_provider" else prior.provider_id,
+    )
+    monkeypatch.setattr(
+        backend, "status", lambda worker_id: observed if worker_id == first["worker_id"] else original_status(worker_id)
+    )
+    replacement = controller.request_provision(
+        disposable_deployment(), [harness["job"].job_id], 300, replaces_worker_id=first["worker_id"]
+    )
     with pytest.raises(ControllerConflict, match="confirmed stopped"):
         controller.approve_and_start(replacement["request_id"])
     assert len(calls(harness, "create")) == 1
     with harness["ledger"].read_connection() as reader:
-        assert reader.execute("SELECT count(*) FROM approvals WHERE approval_id=?", (replacement["approval_id"],)).fetchone()[0] == 0
+        assert (
+            reader.execute(
+                "SELECT count(*) FROM approvals WHERE approval_id=?", (replacement["approval_id"],)
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_disposable_pod_loss_never_turns_unfinished_job_into_success_or_replays_it(harness, monkeypatch):
@@ -197,7 +268,9 @@ def test_disposable_pod_loss_never_turns_unfinished_job_into_success_or_replays_
     active = ledger.dispatch_next(request["worker_id"], approval_id=started["approval_id"])
     ledger.start_job(active.job_id, active.attempt_id, request["worker_id"])
     prior = backend.status(request["worker_id"])
-    monkeypatch.setattr(backend, "status", lambda worker_id: WorkerStatus(worker_id, WorkerState.ABSENT, prior.provider_id))
+    monkeypatch.setattr(
+        backend, "status", lambda worker_id: WorkerStatus(worker_id, WorkerState.ABSENT, prior.provider_id)
+    )
     # Only a provider with confirmed whole-Pod destruction can acknowledge stop.
     monkeypatch.setattr(backend, "stop_confirms_execution", True, raising=False)
     result = controller.reconcile()[0]
@@ -216,9 +289,17 @@ def test_disposable_pod_loss_never_turns_unfinished_job_into_success_or_replays_
 def test_research_and_infrastructure_approval_scopes_cannot_cross(harness, purpose):
     ledger, clock = harness["ledger"], harness["clock"]
     digest = ledger.batch_hash([harness["job"].job_id])
-    approval = ApprovalNonce(approval_id="scope-test", token="s" * 48, pod_id="worker-scope", batch_hash=digest,
-                             purpose=purpose, max_runtime_seconds=300, price_ceiling_usd_per_hour=1.0,
-                             issued_at=clock(), expires_at=clock() + timedelta(seconds=300))
+    approval = ApprovalNonce(
+        approval_id="scope-test",
+        token="s" * 48,
+        pod_id="worker-scope",
+        batch_hash=digest,
+        purpose=purpose,
+        max_runtime_seconds=300,
+        price_ceiling_usd_per_hour=1.0,
+        issued_at=clock(),
+        expires_at=clock() + timedelta(seconds=300),
+    )
     ledger.register_approval(approval)
     common = dict(pod_id="worker-scope", live_price_usd_per_hour=0.50, requested_runtime_seconds=300)
     with pytest.raises(ApprovalError, match="different purpose"):
@@ -227,7 +308,9 @@ def test_research_and_infrastructure_approval_scopes_cannot_cross(harness, purpo
         else:
             ledger.consume_approval("scope-test", "s" * 48, job_ids=[harness["job"].job_id], **common)
     with ledger.read_connection() as connection:
-        assert connection.execute("SELECT consumed_at FROM approvals WHERE approval_id='scope-test'").fetchone()[0] is None
+        assert (
+            connection.execute("SELECT consumed_at FROM approvals WHERE approval_id='scope-test'").fetchone()[0] is None
+        )
 
 
 def test_infrastructure_cannot_overlap_an_unclosed_research_allowance(harness):
@@ -256,7 +339,9 @@ def test_provisioning_requires_admin_action_and_binds_exact_configuration(harnes
     assert observed.configuration_hash == spec.digest
     assert started["observed_provider_id"] == observed.provider_id
     with harness["ledger"].read_connection() as connection:
-        row = connection.execute("SELECT document,deadline FROM approvals WHERE approval_id=?", (request["approval_id"],)).fetchone()
+        row = connection.execute(
+            "SELECT document,deadline FROM approvals WHERE approval_id=?", (request["approval_id"],)
+        ).fetchone()
     assert json.loads(row["document"])["pod_id"] == request["worker_id"]
     assert row["deadline"] == started["deadline"]
     with pytest.raises(ControllerConflict):
@@ -269,8 +354,11 @@ def test_paid_action_observes_committed_absolute_deadline(harness, monkeypatch):
 
     def checked_create(worker_id, config, *, request_key, **limits):
         with harness["ledger"].read_connection() as connection:
-            row = connection.execute("""SELECT r.state,r.deadline,a.consumed_at,a.deadline AS grant_deadline
-                FROM compute_requests r JOIN approvals a USING(approval_id) WHERE r.request_id=?""", (request_key,)).fetchone()
+            row = connection.execute(
+                """SELECT r.state,r.deadline,a.consumed_at,a.deadline AS grant_deadline
+                FROM compute_requests r JOIN approvals a USING(approval_id) WHERE r.request_id=?""",
+                (request_key,),
+            ).fetchone()
         assert row["state"] == "STARTING"
         assert row["consumed_at"] is not None
         assert row["deadline"] == row["grant_deadline"] == (harness["clock"]() + timedelta(seconds=300)).timestamp()
@@ -292,8 +380,13 @@ def test_provider_price_gate_is_strict_and_never_accepts_caller_prices(harness, 
 
 
 def test_total_idle_cost_includes_storage_and_controller(harness):
-    controller = Controller(harness["ledger"], harness["backend"], watchdog_health_path=harness["health"],
-                            controller_idle_usd_per_day=1.95, clock=harness["clock"])
+    controller = Controller(
+        harness["ledger"],
+        harness["backend"],
+        watchdog_health_path=harness["health"],
+        controller_idle_usd_per_day=1.95,
+        clock=harness["clock"],
+    )
     request = controller.request_provision(deployment(), [harness["job"].job_id], 300)
     with pytest.raises(BudgetError):
         controller.approve_and_start(request["request_id"])
@@ -303,8 +396,11 @@ def test_total_idle_cost_includes_storage_and_controller(harness):
 @pytest.mark.parametrize("quote", ["nan", "stale", "future"])
 def test_unknown_or_stale_provider_quote_fails_closed(harness, monkeypatch, quote):
     now = harness["clock"]()
-    supplied = PriceQuote(float("nan") if quote == "nan" else 0.50, 0.25,
-                          now + timedelta(seconds=-31 if quote == "stale" else 1 if quote == "future" else 0))
+    supplied = PriceQuote(
+        float("nan") if quote == "nan" else 0.50,
+        0.25,
+        now + timedelta(seconds=-31 if quote == "stale" else 1 if quote == "future" else 0),
+    )
     monkeypatch.setattr(harness["backend"], "quote", lambda **kwargs: supplied)
     request = harness["controller"].request_provision(deployment(), [harness["job"].job_id], 300)
     with pytest.raises(BudgetError):
@@ -328,7 +424,9 @@ def test_watchdog_stops_after_five_minutes_idle_and_reads_back(harness):
     harness["clock"].advance(299)
     assert harness["watcher"].tick() == []
     harness["clock"].advance(1)
-    assert harness["watcher"].tick() == [{"worker_id": request["worker_id"], "reason": "five_minute_idle", "confirmed_off": True}]
+    assert harness["watcher"].tick() == [
+        {"worker_id": request["worker_id"], "reason": "five_minute_idle", "confirmed_off": True}
+    ]
     assert harness["backend"].status(request["worker_id"]).state == WorkerState.STOPPED
     harness["controller"].reconcile()
     assert harness["controller"].status()[0]["state"] == "STOPPED"
@@ -338,8 +436,13 @@ def test_watchdog_idle_deadline_survives_its_own_restart(harness):
     request, _ = provision(harness)
     harness["watcher"].tick()
     harness["clock"].advance(200)
-    restarted = StopWatchdog(harness["ledger"].path, StopOnlyBackend(harness["backend"]),
-                             state_path=harness["watcher"].state_path, health_path=harness["health"], clock=harness["clock"])
+    restarted = StopWatchdog(
+        harness["ledger"].path,
+        StopOnlyBackend(harness["backend"]),
+        state_path=harness["watcher"].state_path,
+        health_path=harness["health"],
+        clock=harness["clock"],
+    )
     assert restarted.tick() == []
     harness["clock"].advance(100)
     assert restarted.tick()[0]["reason"] == "five_minute_idle"
@@ -396,7 +499,11 @@ def test_absent_uncertain_creation_stays_blocked_until_resource_can_be_stopped(h
     original = harness["backend"].create
     request = harness["controller"].request_provision(deployment(), [harness["job"].job_id], 300)
     with monkeypatch.context() as patch:
-        patch.setattr(harness["backend"], "create", lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("ambiguous submission")))
+        patch.setattr(
+            harness["backend"],
+            "create",
+            lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("ambiguous submission")),
+        )
         with pytest.raises(StartUncertain):
             harness["controller"].approve_and_start(request["request_id"])
     assert harness["controller"].status()[0]["state"] == "UNCERTAIN"
@@ -424,8 +531,13 @@ def test_restart_reconciles_crash_boundaries_without_repeating_paid_action(harne
         patch.setattr(controller, "_state", interrupted)
         with pytest.raises(SystemExit):
             controller.approve_and_start(request["request_id"])
-    restarted = Controller(harness["ledger"], harness["backend"], watchdog_health_path=harness["health"],
-                           controller_idle_usd_per_day=0.2, clock=harness["clock"])
+    restarted = Controller(
+        harness["ledger"],
+        harness["backend"],
+        watchdog_health_path=harness["health"],
+        controller_idle_usd_per_day=0.2,
+        clock=harness["clock"],
+    )
     restarted.reconcile()
     assert restarted.status()[0]["state"] == ("REJECTED" if crash_at == "STARTING" else "STOPPED")
     assert len(calls(harness, "create")) == (0 if crash_at == "STARTING" else 1)
@@ -434,8 +546,12 @@ def test_restart_reconciles_crash_boundaries_without_repeating_paid_action(harne
 def test_replacement_and_restart_each_require_new_human_approval(harness):
     request, _ = provision(harness)
     harness["controller"].stop_gpu(request["worker_id"])
-    replacement = harness["controller"].request_provision(deployment(image_digest="sha256:" + "b" * 64),
-        [harness["job"].job_id], 300, replaces_worker_id=request["worker_id"])
+    replacement = harness["controller"].request_provision(
+        deployment(image_digest="sha256:" + "b" * 64),
+        [harness["job"].job_id],
+        300,
+        replaces_worker_id=request["worker_id"],
+    )
     assert len(calls(harness, "create")) == 1
     assert replacement["worker_id"] != request["worker_id"]
     harness["controller"].approve_and_start(replacement["request_id"])
@@ -459,18 +575,36 @@ def test_simulated_shutdown_waits_for_positive_executor_stop_receipt(harness):
     assert stopped["last_error_code"] == "WorkerStopPending"
     assert ledger.get_job(active.job_id).state.value == "FAILED"
     with ledger.read_connection() as reader:
-        assert reader.execute("SELECT stopped_at FROM attempts WHERE attempt_id=?", (active.attempt_id,)).fetchone()[0] is None
-        assert reader.execute("SELECT ended_at FROM approvals WHERE approval_id=?", (started["approval_id"],)).fetchone()[0] is None
+        assert (
+            reader.execute("SELECT stopped_at FROM attempts WHERE attempt_id=?", (active.attempt_id,)).fetchone()[0]
+            is None
+        )
+        assert (
+            reader.execute("SELECT ended_at FROM approvals WHERE approval_id=?", (started["approval_id"],)).fetchone()[
+                0
+            ]
+            is None
+        )
 
     # The trusted dispatcher supplies this only after checking the worker's
     # authenticated process-stop receipt. Controller restart must preserve it.
-    restarted = Controller(ledger, harness["backend"], watchdog_health_path=harness["health"],
-                           controller_idle_usd_per_day=0.2, clock=harness["clock"])
+    restarted = Controller(
+        ledger,
+        harness["backend"],
+        watchdog_health_path=harness["health"],
+        controller_idle_usd_per_day=0.2,
+        clock=harness["clock"],
+    )
     assert restarted.reconcile()[0]["state"] == "STOP_REQUESTED"
     ledger.confirm_stopped(active.job_id, active.attempt_id)
     assert restarted.reconcile()[0]["state"] == "STOPPED"
     with ledger.read_connection() as reader:
-        assert reader.execute("SELECT ended_at FROM approvals WHERE approval_id=?", (started["approval_id"],)).fetchone()[0] is not None
+        assert (
+            reader.execute("SELECT ended_at FROM approvals WHERE approval_id=?", (started["approval_id"],)).fetchone()[
+                0
+            ]
+            is not None
+        )
     assert len(calls(harness, "create")) == 1
 
 
@@ -481,32 +615,50 @@ def test_research_dispatch_has_no_approval_or_arbitrary_provider_route(harness):
     assert harness["controller"].research_dispatch("status", {}) == []
 
 
-@pytest.mark.parametrize("facade_offset,admin_offset,agent_offset", [
-    (0, 0, 2),   # Human and trusted service are one identity.
-    (0, 1, 1),   # Human and untrusted MCP client are one identity.
-    (0, 1, 0),   # Agent and controller/facade are one identity.
-    (1, 2, 1),   # Agent and a separate trusted facade are one identity.
-    (1, 1, 2),   # Human and a separate trusted facade are one identity.
-])
+@pytest.mark.parametrize(
+    "facade_offset,admin_offset,agent_offset",
+    [
+        (0, 0, 2),  # Human and trusted service are one identity.
+        (0, 1, 1),  # Human and untrusted MCP client are one identity.
+        (0, 1, 0),  # Agent and controller/facade are one identity.
+        (1, 2, 1),  # Agent and a separate trusted facade are one identity.
+        (1, 1, 2),  # Human and a separate trusted facade are one identity.
+    ],
+)
 def test_trusted_human_and_agent_identities_are_distinct(harness, facade_offset, admin_offset, agent_offset):
     with pytest.raises(PermissionError):
-        serve_controller(harness["controller"], harness["tmp_path"] / "research.sock",
-                         harness["tmp_path"] / "admin.sock", research_uid=os.geteuid() + facade_offset,
-                         admin_uid=os.geteuid() + admin_offset, agent_uid=os.geteuid() + agent_offset)
+        serve_controller(
+            harness["controller"],
+            harness["tmp_path"] / "research.sock",
+            harness["tmp_path"] / "admin.sock",
+            research_uid=os.geteuid() + facade_offset,
+            admin_uid=os.geteuid() + admin_offset,
+            agent_uid=os.geteuid() + agent_offset,
+        )
     assert not (harness["tmp_path"] / "research.sock").exists()
 
 
 def test_agent_identity_is_mandatory(harness):
     with pytest.raises(TypeError, match="agent_uid"):
-        serve_controller(harness["controller"], harness["tmp_path"] / "research.sock",
-                         harness["tmp_path"] / "admin.sock", research_uid=os.geteuid(), admin_uid=os.geteuid() + 1)
+        serve_controller(
+            harness["controller"],
+            harness["tmp_path"] / "research.sock",
+            harness["tmp_path"] / "admin.sock",
+            research_uid=os.geteuid(),
+            admin_uid=os.geteuid() + 1,
+        )
 
 
 def test_real_research_socket_can_request_but_cannot_approve(harness):
-    research, admin = serve_controller(harness["controller"], harness["tmp_path"] / "research.sock",
-        harness["tmp_path"] / "admin.sock", research_uid=os.geteuid(), admin_uid=os.geteuid() + 1,
+    research, admin = serve_controller(
+        harness["controller"],
+        harness["tmp_path"] / "research.sock",
+        harness["tmp_path"] / "admin.sock",
+        research_uid=os.geteuid(),
+        admin_uid=os.geteuid() + 1,
         agent_uid=os.geteuid() + 2,
-        allow_service_uid=True)  # Test-only same-process peer identity.
+        allow_service_uid=True,
+    )  # Test-only same-process peer identity.
     threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (research, admin)]
     for thread in threads:
         thread.start()
@@ -519,7 +671,9 @@ def test_real_research_socket_can_request_but_cannot_approve(harness):
         # A denied peer may be disconnected before sendall or before a JSON
         # response can be read; both are an actual refusal by the admin socket.
         with pytest.raises((RPCError, BrokenPipeError, ConnectionResetError)):
-            UnixRPCClient(admin.path, expected_server_uid=os.geteuid()).call("approve", {"request_id": request["request_id"]})
+            UnixRPCClient(admin.path, expected_server_uid=os.geteuid()).call(
+                "approve", {"request_id": request["request_id"]}
+            )
         assert calls(harness, "create") == []
     finally:
         for server in (research, admin):
@@ -531,8 +685,13 @@ def test_real_research_socket_can_request_but_cannot_approve(harness):
 
 def test_watchdog_ack_must_match_exact_worker_approval_and_deadline(harness):
     request, started = provision(harness)
-    controller = Controller(harness["ledger"], harness["backend"], watchdog_health_path=harness["health"],
-                            controller_idle_usd_per_day=0.2, clock=harness["clock"])
+    controller = Controller(
+        harness["ledger"],
+        harness["backend"],
+        watchdog_health_path=harness["health"],
+        controller_idle_usd_per_day=0.2,
+        clock=harness["clock"],
+    )
     controller._await_watchdog_ack(request, started["deadline"], timeout_seconds=0.03)
     with pytest.raises(WatchdogUnavailable, match="exact compute deadline"):
         controller._await_watchdog_ack(request, started["deadline"] + 1, timeout_seconds=0.03)
@@ -540,8 +699,13 @@ def test_watchdog_ack_must_match_exact_worker_approval_and_deadline(harness):
 
 def test_cached_watchdog_schedule_stops_after_ledger_becomes_unavailable(harness, monkeypatch):
     request, _ = provision(harness)
-    restarted = StopWatchdog(harness["ledger"].path, StopOnlyBackend(harness["backend"]),
-                             state_path=harness["watcher"].state_path, health_path=harness["health"], clock=harness["clock"])
+    restarted = StopWatchdog(
+        harness["ledger"].path,
+        StopOnlyBackend(harness["backend"]),
+        state_path=harness["watcher"].state_path,
+        health_path=harness["health"],
+        clock=harness["clock"],
+    )
     original_connect = sqlite3.connect
 
     def unavailable(database, *args, **kwargs):
@@ -560,8 +724,12 @@ def test_cached_watchdog_schedule_stops_after_ledger_becomes_unavailable(harness
 def test_storage_gate_keeps_old_replacement_volumes_in_total(harness):
     old, _ = provision(harness)
     harness["controller"].stop_gpu(old["worker_id"])
-    request = harness["controller"].request_provision(deployment(volume_id="another-volume", volume_gb=900),
-        [harness["job"].job_id], 300, replaces_worker_id=old["worker_id"])
+    request = harness["controller"].request_provision(
+        deployment(volume_id="another-volume", volume_gb=900),
+        [harness["job"].job_id],
+        300,
+        replaces_worker_id=old["worker_id"],
+    )
     with pytest.raises(BudgetError):
         harness["controller"].approve_and_start(request["request_id"])
     assert len(calls(harness, "create")) == 1
@@ -584,8 +752,13 @@ def _approve_process(database, provider, health, clock_value, request_id, replie
     clock = lambda: datetime.fromtimestamp(clock_value.value, timezone.utc)
     try:
         with Ledger(database, clock=clock) as ledger:
-            controller = Controller(ledger, SimulatedProvider(provider, clock=clock),
-                                    watchdog_health_path=health, controller_idle_usd_per_day=0.2, clock=clock)
+            controller = Controller(
+                ledger,
+                SimulatedProvider(provider, clock=clock),
+                watchdog_health_path=health,
+                controller_idle_usd_per_day=0.2,
+                clock=clock,
+            )
             replies.put(controller.approve_and_start(request_id))
     except Exception as exc:
         replies.put({"error": type(exc).__name__})
@@ -598,10 +771,29 @@ def test_separate_watchdog_process_enforces_deadline_after_starting_process_exit
     stops = context.Queue()
     starts = context.Queue()
     request = harness["controller"].request_provision(deployment(), [harness["job"].job_id], 60)
-    watcher = context.Process(target=_watchdog_process, args=(str(harness["ledger"].path), str(harness["backend"].path),
-        str(harness["watcher"].state_path), str(harness["health"]), clock_value, stopped, stops))
-    starter = context.Process(target=_approve_process, args=(str(harness["ledger"].path), str(harness["backend"].path),
-        str(harness["health"]), clock_value, request["request_id"], starts))
+    watcher = context.Process(
+        target=_watchdog_process,
+        args=(
+            str(harness["ledger"].path),
+            str(harness["backend"].path),
+            str(harness["watcher"].state_path),
+            str(harness["health"]),
+            clock_value,
+            stopped,
+            stops,
+        ),
+    )
+    starter = context.Process(
+        target=_approve_process,
+        args=(
+            str(harness["ledger"].path),
+            str(harness["backend"].path),
+            str(harness["health"]),
+            clock_value,
+            request["request_id"],
+            starts,
+        ),
+    )
     watcher.start()
     starter.start()
     try:

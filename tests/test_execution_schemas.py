@@ -21,8 +21,13 @@ def test_fixture_model_cannot_be_canonical_confirmation():
     data["model"]["repo"] = "probe/testing-tiny-qwen3"
     with pytest.raises(ValidationError, match="calibration"):
         RunManifest.model_validate(data)
-    spec = dict(idempotency_key="cpu", model=data["model"], inputs=data["inputs"], operation={"kind": "generate"},
-                limits={"max_runtime_seconds": 10, "max_output_bytes": 1024})
+    spec = dict(
+        idempotency_key="cpu",
+        model=data["model"],
+        inputs=data["inputs"],
+        operation={"kind": "generate"},
+        limits={"max_runtime_seconds": 10, "max_output_bytes": 1024},
+    )
     with pytest.raises(ValidationError, match="calibration"):
         JobSpec.model_validate(spec)
     assert JobSpec.model_validate(spec | {"experiment_stage": "calibration"}).operation.kind == "generate"

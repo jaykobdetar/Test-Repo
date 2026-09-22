@@ -1,13 +1,13 @@
 # Auto Interpretability Lab: Core API and persistence
 
-[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+[Project overview](../README.md) · [Status](../STATUS.md) · [Validation](validation.md)
 
 This is the API reference for Auto Interpretability Lab's local durable core:
 queue transactions, approvals, accepted artifacts, hypotheses and audit records.
 The core remains usable without importing worker or MCP modules. The deployment
 branch also supplies a simulator and a guarded live RunPod adapter; provider
 operations are outside this persistence API. See [implementation boundaries](../IMPLEMENTATION.md)
-for the full service design and the linked validation status for accepted evidence.
+for the full service design and [STATUS.md](../STATUS.md) for accepted evidence.
 
 ## Install and test
 

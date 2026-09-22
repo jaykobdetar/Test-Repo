@@ -1,4 +1,5 @@
 """Controller-owned immutable inputs for later jobs, independent of GPU lifetime."""
+
 from __future__ import annotations
 
 import hashlib
@@ -65,12 +66,21 @@ class ArtifactStore:
             tensor_refs = []
             if name.endswith(".safetensors"):
                 from safetensors import safe_open
+
                 with safe_open(str(destination), framework="numpy") as tensors:
                     for tensor_name in tensors.keys():
-                        tensor_refs.append(TensorArtifact(path=f"{artifact_id}/{name}", sha256="sha256:" + artifact_id,
-                                                          tensor_name=tensor_name).model_dump(mode="json"))
-            record = {"artifact_id": artifact_id, "path": f"{artifact_id}/{name}",
-                      "bytes": total, "sha256": "sha256:" + artifact_id, "tensor_refs": tensor_refs}
+                        tensor_refs.append(
+                            TensorArtifact(
+                                path=f"{artifact_id}/{name}", sha256="sha256:" + artifact_id, tensor_name=tensor_name
+                            ).model_dump(mode="json")
+                        )
+            record = {
+                "artifact_id": artifact_id,
+                "path": f"{artifact_id}/{name}",
+                "bytes": total,
+                "sha256": "sha256:" + artifact_id,
+                "tensor_refs": tensor_refs,
+            }
             with (staging / "record.json").open("x") as stream:
                 json.dump(record, stream, allow_nan=False, separators=(",", ":"))
                 stream.flush()
@@ -102,7 +112,8 @@ class ArtifactStore:
             raise ValueError("artifact record exceeds limit")
         record = json.loads(data)
         if record["artifact_id"] != artifact_id or record["path"] not in {
-            f"{artifact_id}/tensor.safetensors", f"{artifact_id}/data.bin"
+            f"{artifact_id}/tensor.safetensors",
+            f"{artifact_id}/data.bin",
         }:
             raise ValueError("artifact record is inconsistent")
         return record

@@ -17,14 +17,28 @@ from probe_core.research_service import ServiceConfig
 
 
 def identities():
-    return Identities(trusted_uid=991, research_uid=992, watchdog_uid=993, backup_uid=994,
-                      human_uid=1000, ipc_gid=981, research_gid=992, stop_gid=982, backup_read_gid=983)
+    return Identities(
+        trusted_uid=991,
+        research_uid=992,
+        watchdog_uid=993,
+        backup_uid=994,
+        human_uid=1000,
+        ipc_gid=981,
+        research_gid=992,
+        stop_gid=982,
+        backup_read_gid=983,
+    )
 
 
 def render(tmp_path, **changes):
-    return render_configuration(tmp_path / "rendered", identities=identities(),
-                                templates=Path(__file__).resolve().parents[1] / "deploy/live",
-                                source_commit="a" * 40, drive_folder_id="pinnedDriveFolder123", **changes)
+    return render_configuration(
+        tmp_path / "rendered",
+        identities=identities(),
+        templates=Path(__file__).resolve().parents[1] / "deploy/live",
+        source_commit="a" * 40,
+        drive_folder_id="pinnedDriveFolder123",
+        **changes,
+    )
 
 
 def test_generated_facade_policy_and_paths_are_consistent(tmp_path):
@@ -66,9 +80,24 @@ def test_cpu_acceptance_uses_the_actual_research_service_security_profile(tmp_pa
     root = tmp_path / "rendered"
     research = (root / "probe-research.service").read_text().splitlines()
     acceptance = (root / "probe-sandbox-acceptance.service").read_text().splitlines()
-    profile_keys = {"User", "Group", "SupplementaryGroups", "WorkingDirectory", "Environment", "ExecStartPre",
-                    "ProtectSystem", "ProtectHome", "ReadWritePaths", "PrivateTmp", "NoNewPrivileges",
-                    "KillMode", "Delegate", "UMask", "RuntimeDirectory", "RuntimeDirectoryMode"}
+    profile_keys = {
+        "User",
+        "Group",
+        "SupplementaryGroups",
+        "WorkingDirectory",
+        "Environment",
+        "ExecStartPre",
+        "ProtectSystem",
+        "ProtectHome",
+        "ReadWritePaths",
+        "PrivateTmp",
+        "NoNewPrivileges",
+        "KillMode",
+        "Delegate",
+        "UMask",
+        "RuntimeDirectory",
+        "RuntimeDirectoryMode",
+    }
     profile = lambda lines: [line for line in lines if line.split("=", 1)[0] in profile_keys]
     assert profile(research) == profile(acceptance)
     assert "Type=oneshot" in acceptance
@@ -92,19 +121,24 @@ def test_rootless_units_keep_primary_group_and_prepare_socket_in_main_command(tm
     preparation = [line.removeprefix("ExecStartPre=") for line in lines if line.startswith("ExecStartPre=")]
     assert preparation == ["/usr/bin/test -S /run/user/991/bus"]
     assert lines.index("ExecStartPre=" + preparation[0]) < next(
-        index for index, line in enumerate(lines) if line.startswith("ExecStart="))
+        index for index, line in enumerate(lines) if line.startswith("ExecStart=")
+    )
     command = shlex.split(settings["ExecStart"])
     assert command[:2] == ["/bin/sh", "-ec"] and len(command) == 3
     if unit == "probe-research.service":
-        assert command[2] == ("/usr/bin/chgrp probe-research /run/probe-research; exec "
-                              "/opt/probe-core/venv/bin/python -I -m probe_core.research_service "
-                              "--config /etc/probe-core/research.json")
+        assert command[2] == (
+            "/usr/bin/chgrp probe-research /run/probe-research; exec "
+            "/opt/probe-core/venv/bin/python -I -m probe_core.research_service "
+            "--config /etc/probe-core/research.json"
+        )
     else:
-        assert command[2] == ("/usr/bin/chgrp probe-research /run/probe-research; exec "
-                              "/opt/probe-core/venv/bin/python -I -m probe_core.sandbox_acceptance "
-                              "--image ${SANDBOX_IMAGE} --workspace /var/lib/probe-sandbox/acceptance "
-                              "--podman /usr/bin/podman --seccomp-profile /opt/probe-core/seccomp.json "
-                              "--output /var/lib/probe-sandbox/acceptance-report.json")
+        assert command[2] == (
+            "/usr/bin/chgrp probe-research /run/probe-research; exec "
+            "/opt/probe-core/venv/bin/python -I -m probe_core.sandbox_acceptance "
+            "--image ${SANDBOX_IMAGE} --workspace /var/lib/probe-sandbox/acceptance "
+            "--podman /usr/bin/podman --seccomp-profile /opt/probe-core/seccomp.json "
+            "--output /var/lib/probe-sandbox/acceptance-report.json"
+        )
     assert not any(line.startswith("ExecStartPost=") for line in lines)
     configuration = ServiceConfig.model_validate_json((root / "research.json").read_bytes())
     assert configuration.socket_gid == identities().research_gid
@@ -121,17 +155,23 @@ def test_main_prologue_execs_same_pid_only_after_successful_group_change(tmp_pat
     directory.mkdir(mode=0o750)
     # Execute the actual shell prologue with only its fixed host paths replaced
     # by this test's owned directory and a process that reports its identity.
-    group_command = (shlex.join(["/usr/bin/chgrp", str(os.getgid()), str(directory)])
-                     if group_change_succeeds else "/usr/bin/false")
-    original_python = ("/opt/probe-core/venv/bin/python -I -m probe_core.research_service "
-                       "--config /etc/probe-core/research.json")
+    group_command = (
+        shlex.join(["/usr/bin/chgrp", str(os.getgid()), str(directory)]) if group_change_succeeds else "/usr/bin/false"
+    )
+    original_python = (
+        "/opt/probe-core/venv/bin/python -I -m probe_core.research_service --config /etc/probe-core/research.json"
+    )
     if unit_name == "probe-sandbox-acceptance.service":
-        original_python = ("/opt/probe-core/venv/bin/python -I -m probe_core.sandbox_acceptance "
-                           "--image ${SANDBOX_IMAGE} --workspace /var/lib/probe-sandbox/acceptance "
-                           "--podman /usr/bin/podman --seccomp-profile /opt/probe-core/seccomp.json "
-                           "--output /var/lib/probe-sandbox/acceptance-report.json")
+        original_python = (
+            "/opt/probe-core/venv/bin/python -I -m probe_core.sandbox_acceptance "
+            "--image ${SANDBOX_IMAGE} --workspace /var/lib/probe-sandbox/acceptance "
+            "--podman /usr/bin/podman --seccomp-profile /opt/probe-core/seccomp.json "
+            "--output /var/lib/probe-sandbox/acceptance-report.json"
+        )
     command[2] = command[2].replace("/usr/bin/chgrp probe-research /run/probe-research", group_command)
-    command[2] = command[2].replace(original_python, shlex.join([sys.executable, "-I", "-c", "import os; print(os.getpid())"]))
+    command[2] = command[2].replace(
+        original_python, shlex.join([sys.executable, "-I", "-c", "import os; print(os.getpid())"])
+    )
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, error = process.communicate(timeout=5)
     assert not error
@@ -142,11 +182,14 @@ def test_main_prologue_execs_same_pid_only_after_successful_group_change(tmp_pat
         assert process.returncode != 0 and out == b""
 
 
-@pytest.mark.parametrize("before,after", [
-    ("; exec /opt/probe-core", "; /opt/probe-core"),
-    ("chgrp probe-research /run/probe-research", "chgrp probe-trusted /run/probe-research"),
-    ("--config /etc/probe-core/research.json'", "--config /etc/probe-core/research.json; /usr/bin/true'"),
-])
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        ("; exec /opt/probe-core", "; /opt/probe-core"),
+        ("chgrp probe-research /run/probe-research", "chgrp probe-trusted /run/probe-research"),
+        ("--config /etc/probe-core/research.json'", "--config /etc/probe-core/research.json; /usr/bin/true'"),
+    ],
+)
 def test_acceptance_derivation_rejects_changed_main_prologue(tmp_path, before, after):
     templates = tmp_path / "templates"
     shutil.copytree(Path(__file__).resolve().parents[1] / "deploy/live", templates)
@@ -155,8 +198,13 @@ def test_acceptance_derivation_rejects_changed_main_prologue(tmp_path, before, a
     assert original.count(before) == 1
     research.write_text(original.replace(before, after))
     with pytest.raises(ValueError, match="exact reviewed directory preparation and exec prologue"):
-        render_configuration(tmp_path / "rendered", identities=identities(), templates=templates,
-                             source_commit="a" * 40, drive_folder_id="pinnedDriveFolder123")
+        render_configuration(
+            tmp_path / "rendered",
+            identities=identities(),
+            templates=templates,
+            source_commit="a" * 40,
+            drive_folder_id="pinnedDriveFolder123",
+        )
 
 
 def test_installer_podman_calls_execute_with_account_primary_group(tmp_path):
@@ -178,14 +226,23 @@ def test_installer_podman_calls_execute_with_account_primary_group(tmp_path):
     )
     runuser.chmod(0o700)
     shell = "set -euo pipefail\n" + "\n".join(commands).replace(
-        "/opt/probe-core/images/cpu-sandbox.tar", '"$PROBE_TEST_ARCHIVE"')
+        "/opt/probe-core/images/cpu-sandbox.tar", '"$PROBE_TEST_ARCHIVE"'
+    )
     shell += '\n[ "$PROBE_LOADED_IMAGE" = "$PROBE_SANDBOX_IMAGE" ]\n'
     image = "sha256:" + "a" * 64
-    subprocess.run(["/bin/bash", "-c", shell], check=True, capture_output=True, env={
-        **os.environ, "PATH": str(binary_directory) + ":/usr/bin:/bin",
-        "PROBE_TEST_ARCHIVE": str(archive), "PROBE_TEST_ARGUMENT_LOG": str(command_log),
-        "PROBE_SANDBOX_IMAGE": image, "PROBE_TRUSTED_UID": "991",
-    })
+    subprocess.run(
+        ["/bin/bash", "-c", shell],
+        check=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "PATH": str(binary_directory) + ":/usr/bin:/bin",
+            "PROBE_TEST_ARCHIVE": str(archive),
+            "PROBE_TEST_ARGUMENT_LOG": str(command_log),
+            "PROBE_SANDBOX_IMAGE": image,
+            "PROBE_TRUSTED_UID": "991",
+        },
+    )
     calls = [json.loads(line) for line in command_log.read_text().splitlines()]
     assert len(calls) == 2
     for arguments in calls:
@@ -205,11 +262,17 @@ def test_installer_selects_maintained_crun_for_probe_before_import_and_gate(tmp_
     package_command = next(line for line in installer.splitlines() if "apt-get install -y" in line)
     assert "crun" in package_command.split()
     assert "'deploy/sandbox/containers.conf'" in installer
-    install_command = next(line for line in installer.splitlines()
-                           if line.startswith("install -o root -g probe-trusted -m 0640 /opt/probe-core/deploy/sandbox/containers.conf"))
+    install_command = next(
+        line
+        for line in installer.splitlines()
+        if line.startswith("install -o root -g probe-trusted -m 0640 /opt/probe-core/deploy/sandbox/containers.conf")
+    )
     destination = "/var/lib/probe-sandbox/.config/containers/containers.conf"
     assert install_command.endswith(" " + destination)
-    assert "install -d -o root -g probe-trusted -m 0750 /var/lib/probe-sandbox/.config /var/lib/probe-sandbox/.config/containers" in installer
+    assert (
+        "install -d -o root -g probe-trusted -m 0750 /var/lib/probe-sandbox/.config /var/lib/probe-sandbox/.config/containers"
+        in installer
+    )
     assert installer.index(install_command) < installer.index("/usr/bin/podman --remote=false load")
     assert installer.index(install_command) < installer.index("systemctl start probe-sandbox-acceptance.service")
 
@@ -252,19 +315,22 @@ def test_sandbox_requires_immutable_image(tmp_path):
 
 def test_first_backup_has_provider_state_before_async_service_start():
     installer = (Path(__file__).resolve().parents[1] / "deploy/install-controller.sh").read_text()
-    initialization = ('runuser -u probe-trusted -g probe-trusted -- /opt/probe-core/venv/bin/python -I -c '
-                      '\'from probe_core.runpod_provider import RunPodConfig, RunPodProvider; '
-                      'RunPodProvider(RunPodConfig.load("/etc/probe-core/runpod.json"))\'')
+    initialization = (
+        "runuser -u probe-trusted -g probe-trusted -- /opt/probe-core/venv/bin/python -I -c "
+        "'from probe_core.runpod_provider import RunPodConfig, RunPodProvider; "
+        'RunPodProvider(RunPodConfig.load("/etc/probe-core/runpod.json"))\''
+    )
     assert initialization in installer
-    assert installer.index('install -o probe-trusted -g probe-trusted -m 0600') < installer.index(initialization)
-    assert installer.index(initialization) < installer.index('systemctl enable --now probe-provider-stop.service')
-    assert installer.index(initialization) < installer.index('systemctl start probe-backup.service')
+    assert installer.index("install -o probe-trusted -g probe-trusted -m 0600") < installer.index(initialization)
+    assert installer.index(initialization) < installer.index("systemctl enable --now probe-provider-stop.service")
+    assert installer.index(initialization) < installer.index("systemctl start probe-backup.service")
 
 
 def test_staged_runtime_restores_only_verified_interpreter_execution(tmp_path):
     installer = (Path(__file__).resolve().parents[1] / "deploy/install-controller.sh").read_text()
-    copy_command = next(line for line in installer.splitlines()
-                        if line.startswith("cp -R --no-preserve=all --no-dereference -- "))
+    copy_command = next(
+        line for line in installer.splitlines() if line.startswith("cp -R --no-preserve=all --no-dereference -- ")
+    )
     repair_command = 'chmod 0755 "$PROBE_STAGE/python/bin/python3.13"'
     assert repair_command in installer
     assert installer.index('chown -hR root:root "$PROBE_STAGE"') < installer.index(repair_command)
@@ -277,25 +343,37 @@ def test_staged_runtime_restores_only_verified_interpreter_execution(tmp_path):
     shutil.copyfile("/usr/bin/true", source)
     source.chmod(0o755)
     (source.parent / "python3").symlink_to("python3.13")
-    (bundle / "data.json").write_text('{}\n')
+    (bundle / "data.json").write_text("{}\n")
     (bundle / "data.json").chmod(0o644)
     stage = tmp_path / "stage"
     stage.mkdir(mode=0o700)
-    subprocess.run([
-        "/bin/bash", "-c",
-        'set -euo pipefail\numask 077\nPROBE_BUNDLE=$1\nPROBE_STAGE=$2\n' + copy_command,
-        "installer-copy-test", str(bundle), str(stage),
-    ], check=True)
+    subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -euo pipefail\numask 077\nPROBE_BUNDLE=$1\nPROBE_STAGE=$2\n" + copy_command,
+            "installer-copy-test",
+            str(bundle),
+            str(stage),
+        ],
+        check=True,
+    )
     copied = stage / "python/bin/python3.13"
     assert stat.S_IMODE(copied.stat().st_mode) == 0o600
     assert hashlib.sha256(copied.read_bytes()).digest() == hashlib.sha256(source.read_bytes()).digest()
     with pytest.raises(PermissionError):
         subprocess.run([str(copied)], check=True)
 
-    subprocess.run([
-        "/bin/bash", "-c", 'set -euo pipefail\nPROBE_STAGE=$1\n' + repair_command,
-        "installer-permission-test", str(stage),
-    ], check=True)
+    subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "set -euo pipefail\nPROBE_STAGE=$1\n" + repair_command,
+            "installer-permission-test",
+            str(stage),
+        ],
+        check=True,
+    )
     subprocess.run([str(copied)], check=True)
     alias = stage / "python/bin/python3"
     assert alias.is_symlink()
