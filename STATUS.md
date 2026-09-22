@@ -69,8 +69,9 @@ Milestone 0 is complete ([PR #2](https://github.com/jaykobdetar/Test-Repo/pull/2
   issued on the installed controller.
 - 1b recipes and 1c metrics: implemented and tested on CPU (see the table
   above). The standalone command now runs any registered suite.
-- 1d the [first public experiment](docs/first-public-experiment.md): not run.
-  Its frozen recipe, token IDs and cost estimate await the operator's checkpoint.
+- 1d the [first public experiment](docs/first-public-experiment.md): recipes
+  approved and registered on 2026-09-22 (about $0.25 estimated). Not run yet:
+  worker images containing the recipe code must be rebuilt first.
 
 GPU budget: the operator's cumulative authorization is $20, of which about $3
 was spent before envelopes existed (operator report, 2026-09-22).

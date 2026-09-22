@@ -34,6 +34,11 @@ confirms deletion, the reservation settles at the measured interval times the
 quoted price; if deletion is unconfirmed, the full reservation stays held. The
 same accounting code serves the installed controller.
 
+Images built from this branch also bake the registered experiment datasets. A
+managed-launcher configuration for such an image must list every baked dataset,
+because `probe_core/gpu_launch.py` requires an exact match (that profile is
+deferred).
+
 A recipe result is reported as `completed`, never `passed`: the host verifies
 provenance, the no-op checks, the retained tensor inventory and that every prompt
 is reported for every metric, but the measurements are exploratory.

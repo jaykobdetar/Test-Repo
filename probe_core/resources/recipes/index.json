@@ -9,8 +9,94 @@
         "path": "datasets/public-calibration-prompts.json",
         "sha256": "sha256:6867f3b38b8587c8f7b71955bbb597eac27445ee69b2aa033904619df4df5bbe"
       },
-      "prompt_ids": ["public-short", "public-long"],
-      "models": ["Qwen/Qwen3-1.7B-Base", "Qwen/Qwen3-1.7B"]
+      "prompt_ids": [
+        "public-short",
+        "public-long"
+      ],
+      "models": [
+        "Qwen/Qwen3-1.7B-Base",
+        "Qwen/Qwen3-1.7B"
+      ]
+    },
+    {
+      "name": "subject_verb_l14_mlp_base_v1",
+      "kind": "recipe",
+      "stage": "exploratory",
+      "dataset": {
+        "path": "datasets/subject-verb-base.json",
+        "sha256": "sha256:26c9461012769835029542de99f79e0d0ecbee041d09ca94aa4b36e34e720c9b"
+      },
+      "prompt_ids": [
+        "sv-01-singular",
+        "sv-01-plural",
+        "sv-02-singular",
+        "sv-02-plural",
+        "sv-03-singular",
+        "sv-03-plural",
+        "sv-04-singular",
+        "sv-04-plural",
+        "sv-05-singular",
+        "sv-05-plural",
+        "sv-06-singular",
+        "sv-06-plural",
+        "sv-07-singular",
+        "sv-07-plural",
+        "sv-08-singular",
+        "sv-08-plural",
+        "sv-09-singular",
+        "sv-09-plural",
+        "sv-10-singular",
+        "sv-10-plural",
+        "sv-11-singular",
+        "sv-11-plural",
+        "sv-12-singular",
+        "sv-12-plural"
+      ],
+      "models": [
+        "Qwen/Qwen3-1.7B-Base"
+      ],
+      "recipe_file": "subject_verb_l14_mlp_base_v1.json",
+      "recipe_sha256": "sha256:6239613c389f42a806e8ed600f568591720ff136e70aca0fd76dc28337317f07"
+    },
+    {
+      "name": "subject_verb_l14_mlp_posttrained_v1",
+      "kind": "recipe",
+      "stage": "exploratory",
+      "dataset": {
+        "path": "datasets/subject-verb-posttrained.json",
+        "sha256": "sha256:b8e7d542f46650077e228005f621803b2771ae74996af04e5ceda38cbe0d8b1a"
+      },
+      "prompt_ids": [
+        "sv-01-singular",
+        "sv-01-plural",
+        "sv-02-singular",
+        "sv-02-plural",
+        "sv-03-singular",
+        "sv-03-plural",
+        "sv-04-singular",
+        "sv-04-plural",
+        "sv-05-singular",
+        "sv-05-plural",
+        "sv-06-singular",
+        "sv-06-plural",
+        "sv-07-singular",
+        "sv-07-plural",
+        "sv-08-singular",
+        "sv-08-plural",
+        "sv-09-singular",
+        "sv-09-plural",
+        "sv-10-singular",
+        "sv-10-plural",
+        "sv-11-singular",
+        "sv-11-plural",
+        "sv-12-singular",
+        "sv-12-plural"
+      ],
+      "models": [
+        "Qwen/Qwen3-1.7B"
+      ],
+      "recipe_file": "subject_verb_l14_mlp_posttrained_v1.json",
+      "recipe_sha256": "sha256:f354fc8937c73917c9e04c793e8d7bc732b978d9edac40bdb0daf9f1486f9dae"
     }
   ]
 }

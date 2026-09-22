@@ -41,6 +41,35 @@ same declared comparison on the separately pinned posttrained checkpoint, with
 its own explicit formatting. Report the checkpoints separately; a difference
 between them is not by itself evidence about training's causal effect.
 
+## Frozen recipes (approved 2026-09-22)
+
+The operator approved these recipes at the Milestone 1 checkpoint. They are
+registered in `probe_core/resources/recipes/` and pinned by canonical SHA-256:
+
+| Suite | Recipe hash | Dataset hash |
+| --- | --- | --- |
+| `subject_verb_l14_mlp_base_v1` | `sha256:6239613c389f42a806e8ed600f568591720ff136e70aca0fd76dc28337317f07` | `sha256:26c9461012769835029542de99f79e0d0ecbee041d09ca94aa4b36e34e720c9b` |
+| `subject_verb_l14_mlp_posttrained_v1` | `sha256:f354fc8937c73917c9e04c793e8d7bc732b978d9edac40bdb0daf9f1486f9dae` | `sha256:b8e7d542f46650077e228005f621803b2771ae74996af04e5ceda38cbe0d8b1a` |
+
+- Prompts: 12 singular/plural pairs, each with an opposite-number attractor,
+  such as "The key near the cabinets" and "The keys near the cabinet" (24 prompts).
+- Base formatting: the raw text; metric tokens `" is"` (374) and `" are"` (525).
+- Posttrained formatting: the pinned chat template with thinking disabled and the
+  user message "Continue this sentence with exactly one word: " followed by the
+  text; metric tokens `"is"` (285) and `"are"` (546), because the reply starts
+  without a leading space.
+- Every token is a single token under its checkpoint's pinned tokenizer, and both
+  tokenizers were checked against their locked hashes.
+- Conditions: unmodified baseline, the automatic exact no-op check, zero ablation
+  of the layer-14 MLP output at the last prompt token (primary), and three
+  norm-matched random displacements of that activation (seeds 1 to 3, controls).
+- Primary metric: correct-minus-incorrect verb logit difference per prompt and
+  its paired mean change. Target log-probability, KL to baseline and the top-5
+  tokens are also reported.
+
+Each run is charged to budget envelope `m1-exploratory-001`. The estimate is
+about $0.25 for both Pods; the envelope reserves up to $0.27 per Pod.
+
 ## Completion criterion
 
 Produce one reproducible exploratory report with per-prompt results, controls,

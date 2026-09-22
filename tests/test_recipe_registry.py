@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import time
 
 import pytest
@@ -23,7 +24,7 @@ RECIPE_DATASET = b'{"prompts":[{"prompt_id":"short","text":"a"},{"prompt_id":"lo
 def registry(tmp_path, monkeypatch):
     """A temporary registry holding the real parity entry plus one recipe suite."""
     root = tmp_path / "recipes"
-    root.mkdir()
+    shutil.copytree(recipe_registry.RESOURCES, root)
     index = json.loads((recipe_registry.RESOURCES / "index.json").read_text())
     body = Recipe.model_validate(tiny_recipe())
     (root / "tiny_recipe_v1.json").write_text(body.model_dump_json())
@@ -316,3 +317,33 @@ def test_budget_cli_sets_identity_and_closes(tmp_path, capsys):
         assert issued[0]["payload"]["approved_by"] == f"uid:{os.geteuid()}"
     finally:
         ledger.close()
+
+
+@pytest.mark.parametrize(
+    "name,manifest,repo",
+    [
+        ("subject_verb_l14_mlp_base_v1", "public-assets.json", "Qwen/Qwen3-1.7B-Base"),
+        ("subject_verb_l14_mlp_posttrained_v1", "public-assets-posttrained.json", "Qwen/Qwen3-1.7B"),
+    ],
+)
+def test_first_experiment_recipes_are_baked_into_their_model_images(name, manifest, repo):
+    from pathlib import Path
+
+    from probe_core.worker import prompt_set_hash  # noqa: F401
+    from probe_core.worker_contracts import PromptDataset
+
+    suite = recipe_registry.registered(name)
+    assert suite.models == {repo} and suite.stage.value == "exploratory" and len(suite.prompt_ids) == 24
+    baked = json.loads((Path(__file__).resolve().parents[1] / "deploy/gpu" / manifest).read_text())
+    entry = next(item for item in baked["assets"] if item["path"] == suite.dataset_path)
+    raw = base64.b64decode(entry["inline_base64"])
+    assert entry["sha256"] == suite.dataset_sha256 == "sha256:" + hashlib.sha256(raw).hexdigest()
+    dataset = PromptDataset.model_validate_json(raw)
+    assert tuple(p.prompt_id for p in dataset.prompts) == suite.prompt_ids
+    assert baked["assets"][-1]["path"] == "datasets/public-calibration-prompts.json"
+    recipe = suite.recipe
+    assert recipe.primary_step == "zero_l14_mlp" and len(recipe.control_steps) == 3
+    for prompt, row in zip(recipe.prompts, dataset.prompts):
+        singular = prompt.prompt_id.endswith("singular")
+        verbs = (374, 525) if repo.endswith("Base") else (285, 546)
+        assert (prompt.target_token_id, prompt.alternative_token_id) == (verbs if singular else verbs[::-1])
