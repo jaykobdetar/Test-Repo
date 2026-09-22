@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "suites": [
+    {
+      "name": "backend_parity_v1",
+      "kind": "backend_parity",
+      "stage": "calibration",
+      "dataset": {
+        "path": "datasets/public-calibration-prompts.json",
+        "sha256": "sha256:6867f3b38b8587c8f7b71955bbb597eac27445ee69b2aa033904619df4df5bbe"
+      },
+      "prompt_ids": ["public-short", "public-long"],
+      "models": ["Qwen/Qwen3-1.7B-Base", "Qwen/Qwen3-1.7B"]
+    }
+  ]
+}

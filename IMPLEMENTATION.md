@@ -71,6 +71,9 @@ do not prove Phase 5 complete.
 
 ## Phase 4 requirements
 
+- A `recipe` operation composes these into a frozen multi-step experiment in one
+  loaded model, with worker-side metrics and an automatic exact no-op check
+  before any intervention result (see [worker and dispatcher](docs/worker-dispatcher.md#recipes-and-metrics)).
 - The fixed operation vocabulary includes capture, patch, ablation, steering,
   fitting a probe, bounded generation, and read-only parameter inspection.
 - NNsight is checked against raw HF/PyTorch. Test coverage must include no-op

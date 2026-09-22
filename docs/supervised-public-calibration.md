@@ -1,9 +1,42 @@
 # Supervised public calibration
 
 This is the smaller deployment milestone selected by the operator on September
-20, 2026 after repeated startup failures. It runs the fixed `backend_parity_v1`
-calibration on one disposable RunPod using the public, pinned Qwen3-1.7B assets.
-It does not require a controller installation or nested cgroup delegation.
+20, 2026 after repeated startup failures. It runs one registered suite on one
+disposable RunPod using the public, pinned Qwen3-1.7B assets: the fixed
+`backend_parity_v1` calibration, or a frozen exploratory recipe. It does not
+require a controller installation or nested cgroup delegation.
+
+## Registered suites and budget envelopes
+
+The command accepts only a suite named in `probe_core/resources/recipes/index.json`
+(`probe_core/recipe_registry.py`). Each entry pins its public prompt dataset by
+content hash, the checkpoints it may run on, and, for a recipe, the frozen recipe
+file by the SHA-256 of its canonical JSON. An unknown suite, changed recipe file
+or unregistered model is refused. An image may bake several registered datasets
+and nothing else. Set `"suite"` in `run.json`; it defaults to `backend_parity_v1`.
+
+A recipe run must be charged to an open budget envelope in an operator-owned
+ledger named by `"budget_ledger"` in `run.json`. Issue, inspect and close it with:
+
+```sh
+python -m probe_core.budget --ledger ~/probe-budget/budget.sqlite issue --envelope-file envelope.json
+python -m probe_core.budget --ledger ~/probe-budget/budget.sqlite status
+python -m probe_core.budget --ledger ~/probe-budget/budget.sqlite close --envelope-id m1-exploratory-001
+```
+
+The envelope file has the fields shown in
+[controller services](controller-services.md#budget-envelopes). Before creating
+the Pod, the runner reserves `(remaining deadline + 300 s) × envelope hourly
+ceiling` and refuses without creating anything if no envelope is open, the model
+or stage is outside it, or the remainder cannot cover the reservation. Creation
+uses the lower of $0.80/hour and the envelope's ceiling. After the provider
+confirms deletion, the reservation settles at the measured interval times the
+quoted price; if deletion is unconfirmed, the full reservation stays held. The
+same accounting code serves the installed controller.
+
+A recipe result is reported as `completed`, never `passed`: the host verifies
+provenance, the no-op checks, the retained tensor inventory and that every prompt
+is reported for every metric, but the measurements are exploratory.
 
 The host creates one price-capped Pod, verifies its SSH host key through the
 provider's logs, submits one fixed command, copies the result files, verifies
@@ -12,7 +45,7 @@ their hashes, and deletes the Pod. A separate user service retains the original
 stays on the host. Numerical code runs as UID10001 in a clean environment; the
 image already contains its model assets, and model loading remains offline.
 
-A successful result requires all 29 original numerical checks, including 25
+A successful calibration result requires all 29 original numerical checks, including 25
 exact comparisons, nine retained tensors, matching model/image provenance, an
 observed process exit, and independent provider confirmation that the Pod is
 absent. Numerical tolerances are unchanged. Outputs describe this as standalone

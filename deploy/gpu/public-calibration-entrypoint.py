@@ -41,8 +41,10 @@ def stop_group(process):
     process.wait(timeout=10)
 
 
-def run(config, absolute_deadline):
+def run(config, absolute_deadline, suite='backend_parity_v1'):
     deadline = deadline_seconds(absolute_deadline)
+    if not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', suite):
+        raise ValueError('invalid suite name')
     ROOT.mkdir(mode=0o700)  # One execution only; never reuse or overwrite outputs.
     os.chown(ROOT, 10001, 10001)
     source = Path(config)
@@ -54,7 +56,7 @@ def run(config, absolute_deadline):
     configuration.chmod(0o444)
     command = [PYTHON, '-I', SCRIPT, '--config', str(configuration),
                '--absolute-deadline', absolute_deadline,
-               '--run-id', 'public-calibration', '--output', str(ROOT / 'result')]
+               '--run-id', 'public-calibration', '--output', str(ROOT / 'result'), '--suite', suite]
     with (ROOT / 'stdout.log').open('wb') as out, (ROOT / 'stderr.log').open('wb') as err:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
             env=clean_environment(), preexec_fn=drop_identity, start_new_session=True, cwd=ROOT)
@@ -118,11 +120,12 @@ def main():
     parser.add_argument('mode', choices=['ssh', 'run'], default='ssh', nargs='?')
     parser.add_argument('--config')
     parser.add_argument('--absolute-deadline')
+    parser.add_argument('--suite', default='backend_parity_v1')
     args = parser.parse_args()
     if args.mode == 'run':
         if not args.config or not args.absolute_deadline:
             parser.error('run requires a configuration and deadline')
-        return run(args.config, args.absolute_deadline)
+        return run(args.config, args.absolute_deadline, args.suite)
     serve()
     return 0
 

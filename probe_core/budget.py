@@ -11,11 +11,20 @@ from reservation to confirmation times the quoted live price. That interval
 starts before creation and ends at the controller's confirmation, so it is an
 upper bound on billed time. A request that never reached a provider action
 settles at zero. An uncertain request keeps its full reservation.
+
+The supervised standalone GPU command, which runs outside the installed
+controller, charges the same way through ``reserve_standalone`` and
+``settle_standalone`` against an operator-owned ledger. Run
+``python -m probe_core.budget --help`` to issue or inspect envelopes there.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+import argparse
+from datetime import datetime, timedelta, timezone
+import json
+import os
+from pathlib import Path
 import sqlite3
 from typing import Any
 
@@ -127,16 +136,18 @@ def committed_usd(connection: sqlite3.Connection, envelope_id: str) -> tuple[flo
     return round(settled, 6), round(held, 6)
 
 
+def check_model_and_stage(envelope: BudgetEnvelope, repo: str, revision_sha: str, stage: ExperimentStage) -> None:
+    if (repo, revision_sha) not in {(model.repo, model.revision_sha) for model in envelope.allowed_models}:
+        raise BudgetRefused("a job's model is not allowed by the envelope")
+    if ExperimentStage(stage) not in {ExperimentStage(value) for value in envelope.allowed_stages}:
+        raise BudgetRefused("a job's scientific stage is not allowed by the envelope")
+
+
 def check_scope(envelope: BudgetEnvelope, specs: list[JobSpec], runtime_seconds: int) -> None:
     if runtime_seconds > envelope.max_wall_seconds_per_pod:
         raise BudgetRefused("requested runtime exceeds the envelope's per-Pod ceiling")
-    allowed = {(model.repo, model.revision_sha) for model in envelope.allowed_models}
-    stages = {ExperimentStage(stage) for stage in envelope.allowed_stages}
     for spec in specs:
-        if (spec.model.repo, spec.model.revision_sha) not in allowed:
-            raise BudgetRefused("a job's model is not allowed by the envelope")
-        if spec.experiment_stage not in stages:
-            raise BudgetRefused("a job's scientific stage is not allowed by the envelope")
+        check_model_and_stage(envelope, spec.model.repo, spec.model.revision_sha, spec.experiment_stage)
 
 
 def reserve(
@@ -239,3 +250,90 @@ def summary(connection: sqlite3.Connection, now: datetime) -> dict[str, Any]:
         if view["open"]:
             active = view
     return {"active_envelope": active, "envelopes": envelopes, "deletion_reserve_seconds": DELETION_RESERVE_SECONDS}
+
+
+def open_ledger(path: str | Path):
+    from .ledger import Ledger
+
+    ledger = Ledger(path)
+    ledger._submit(lambda connection, now: initialize(connection))
+    return ledger
+
+
+def reserve_standalone(
+    ledger,
+    *,
+    request_id: str,
+    runtime_seconds: int,
+    quoted_usd_per_hour: float,
+    repo: str,
+    revision_sha: str,
+    stage: ExperimentStage,
+) -> dict[str, Any]:
+    """Reserve a standalone run's worst case against the open envelope, or refuse."""
+
+    def reserve_one(connection, now):
+        envelope = active_envelope(connection, now)
+        if envelope is None:
+            raise BudgetRefused("no open budget envelope")
+        check_model_and_stage(envelope, repo, revision_sha, stage)
+        amount = reserve(
+            connection,
+            now,
+            envelope.envelope_id,
+            request_id=request_id,
+            runtime_seconds=runtime_seconds,
+            quoted_usd_per_hour=quoted_usd_per_hour,
+        )
+        return {
+            "envelope_id": envelope.envelope_id,
+            "reserved_usd": amount,
+            "price_ceiling_usd_per_hour": envelope.max_gpu_usd_per_hour,
+        }
+
+    return ledger._submit(reserve_one)
+
+
+def settle_standalone(ledger, request_id: str, *, provider_resource: bool) -> None:
+    ledger._submit(lambda connection, now: settle(connection, now, request_id, provider_resource=provider_resource))
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Issue, inspect or close a budget envelope in a local ledger")
+    parser.add_argument("--ledger", required=True, type=Path)
+    commands = parser.add_subparsers(dest="command", required=True)
+    issue_command = commands.add_parser("issue")
+    issue_command.add_argument("--envelope-file", required=True, type=Path)
+    commands.add_parser("status")
+    close_command = commands.add_parser("close")
+    close_command.add_argument("--envelope-id", required=True)
+    close_command.add_argument("--reason", default="closed by operator")
+    args = parser.parse_args(argv)
+    ledger = open_ledger(args.ledger)
+    try:
+        if args.command == "issue":
+            fields = json.loads(args.envelope_file.read_text())
+            if {"approved_by", "issued_at", "expires_at"} & set(fields):
+                raise SystemExit("approval identity and timestamps are set by this command")
+            lifetime = fields.pop("lifetime_hours")
+            now = datetime.now(timezone.utc)
+            envelope = BudgetEnvelope.model_validate(
+                {
+                    **fields,
+                    "issued_at": now,
+                    "expires_at": now + timedelta(hours=lifetime),
+                    "approved_by": f"uid:{os.geteuid()}",
+                }
+            )
+            ledger._submit(lambda connection, now: issue(connection, now, envelope))
+        elif args.command == "close":
+            ledger._submit(lambda connection, now: close(connection, now, args.envelope_id, args.reason))
+        with ledger.read_connection() as connection:
+            print(json.dumps(summary(connection, datetime.now(timezone.utc)), indent=2))
+    finally:
+        ledger.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
