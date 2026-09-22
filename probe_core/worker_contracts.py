@@ -1,4 +1,5 @@
 """Versioned, data-only contracts between the trusted dispatcher and executor."""
+
 from __future__ import annotations
 
 from enum import StrEnum
@@ -8,15 +9,27 @@ from typing import Annotated, Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 
 from .schemas import (
-    ArtifactRecord, Controls, FrozenModel, GitSHA, Identifier, JobSpec, ModelIdentity,
-    SHA256, SoftwareIdentity, HardwareIdentity, UTCTimestamp, RunManifest,
+    ArtifactRecord,
+    Controls,
+    FrozenModel,
+    GitSHA,
+    Identifier,
+    JobSpec,
+    ModelIdentity,
+    SHA256,
+    SoftwareIdentity,
+    HardwareIdentity,
+    UTCTimestamp,
+    RunManifest,
 )
 
 
 class Prompt(FrozenModel):
     prompt_id: Identifier
     text: Annotated[str, Field(min_length=1, max_length=131072)] | None = None
-    token_ids: Annotated[tuple[Annotated[int, Field(strict=True, ge=0)], ...], Field(min_length=1, max_length=32768)] | None = None
+    token_ids: (
+        Annotated[tuple[Annotated[int, Field(strict=True, ge=0)], ...], Field(min_length=1, max_length=32768)] | None
+    ) = None
 
     @model_validator(mode="after")
     def exactly_one_input(self):
@@ -49,7 +62,12 @@ class FileDigest(FrozenModel):
     @classmethod
     def safe_relative(cls, value):
         path = Path(value)
-        if path.is_absolute() or not path.parts or any(part in {"..", "."} for part in value.split("/")) or "\\" in value:
+        if (
+            path.is_absolute()
+            or not path.parts
+            or any(part in {"..", "."} for part in value.split("/"))
+            or "\\" in value
+        ):
             raise ValueError("model assets must be relative paths without traversal")
         return value
 
@@ -61,6 +79,7 @@ class WorkerConfig(FrozenModel):
     installed versions, hardware, model/config/tokenizer bytes are checked locally.
     CUDA execution requires a delegated cgroup v2 directory for hard RAM/CPU/PID caps.
     """
+
     model_directory: str
     model: ModelIdentity
     assets: Annotated[tuple[FileDigest, ...], Field(min_length=1, max_length=128)]
@@ -104,7 +123,9 @@ class ScienceMetadata(FrozenModel):
     predicted_direction: Literal["increase", "decrease", "no_change"] = "no_change"
     falsifier: str = "This execution makes no scientific claim; inspect retained observations."
     alternative_explanations: tuple[str, ...] = ("measurement artifact",)
-    controls: Controls = Controls(random_component=False, norm_matched_direction=False, unrelated_behavior_suite="not_scored")
+    controls: Controls = Controls(
+        random_component=False, norm_matched_direction=False, unrelated_behavior_suite="not_scored"
+    )
     preregistration_hash: SHA256 | None = None
     session_id: Identifier = "trusted-dispatcher"
     replicator_blinded: bool = False
@@ -143,7 +164,6 @@ class ExecutionReceipt(FrozenModel):
     generated_tokens: Annotated[int, Field(strict=True, ge=0)] = 0
     peak_rss_bytes: Annotated[int, Field(strict=True, ge=0)] = 0
     peak_vram_bytes: Annotated[int, Field(strict=True, ge=0)] = 0
-
 
     @model_validator(mode="after")
     def consistent_outcome(self):

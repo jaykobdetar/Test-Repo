@@ -3,6 +3,7 @@
 Only a fixed synthetic program runs. The observer never stops the container until
 its observation has passed or failed; cleanup cannot count as evidence of success.
 """
+
 from __future__ import annotations
 
 from contextlib import ExitStack
@@ -60,20 +61,24 @@ def _driver(settings: dict, wall_seconds: int, marker: str, events):
         launched_at = time.monotonic()
         process = original_popen(command, *args, **kwargs)
         if isinstance(command, list) and command[1:3] == ["--remote=false", "run"]:
-            events.send({"client_pid": process.pid, "name": command[command.index("--name") + 1],
-                         "launched_at": launched_at})
+            events.send(
+                {"client_pid": process.pid, "name": command[command.index("--name") + 1], "launched_at": launched_at}
+            )
         return process
 
     subprocess.Popen = observed_popen
     try:
         sandbox = PodmanSandbox(**settings)
-        code = ("import os, pathlib, signal, time\n"
-                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-                f"pathlib.Path('/output/lifecycle-ready').write_text({marker!r})\n"
-                "for fd in (0, 1, 2): os.close(fd)\n"
-                "while True: time.sleep(1)\n")
-        result = sandbox.run(code, limits=SandboxLimits(wall_seconds=wall_seconds,
-                            memory_bytes=128 * 1024**2, max_broker_requests=0))
+        code = (
+            "import os, pathlib, signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            f"pathlib.Path('/output/lifecycle-ready').write_text({marker!r})\n"
+            "for fd in (0, 1, 2): os.close(fd)\n"
+            "while True: time.sleep(1)\n"
+        )
+        result = sandbox.run(
+            code, limits=SandboxLimits(wall_seconds=wall_seconds, memory_bytes=128 * 1024**2, max_broker_requests=0)
+        )
         events.send({"early_exit": result.returncode, "reason": result.termination_reason})
     except BaseException as error:
         # Do not send arbitrary subprocess/exception text across this channel.
@@ -87,31 +92,51 @@ def _finished(pidfd: int) -> bool:
     return bool(select.select([pidfd], [], [], 0)[0])
 
 
-def run_lifecycle_check(sandbox: PodmanSandbox, *, wall_seconds: int = 12,
-                        startup_seconds: int = 30, cleanup_seconds: int = 10) -> dict:
+def run_lifecycle_check(
+    sandbox: PodmanSandbox, *, wall_seconds: int = 12, startup_seconds: int = 30, cleanup_seconds: int = 10
+) -> dict:
     """Prove independent termination AND removal, using actual processes/PID FDs."""
     if os.geteuid() == 0:
         raise LifecycleError("lifecycle acceptance requires rootless Linux with PID descriptors")
-    if not (type(wall_seconds) is int and 5 <= wall_seconds <= 30
-            and type(startup_seconds) is int and 5 <= startup_seconds <= 60
-            and type(cleanup_seconds) is int and 1 <= cleanup_seconds <= 20):
+    if not (
+        type(wall_seconds) is int
+        and 5 <= wall_seconds <= 30
+        and type(startup_seconds) is int
+        and 5 <= startup_seconds <= 60
+        and type(cleanup_seconds) is int
+        and 1 <= cleanup_seconds <= 20
+    ):
         raise ValueError("lifecycle test durations must be bounded")
-    settings = {"image": sandbox.image, "workspace": sandbox.workspace,
-                "podman": sandbox.podman, "seccomp_profile": sandbox.seccomp_profile}
+    settings = {
+        "image": sandbox.image,
+        "workspace": sandbox.workspace,
+        "podman": sandbox.podman,
+        "seccomp_profile": sandbox.seccomp_profile,
+    }
     context = multiprocessing.get_context("spawn")
     receive, send = context.Pipe(duplex=False)
     marker = uuid.uuid4().hex
     driver = context.Process(target=_driver, args=(settings, wall_seconds, marker, send))
     name = None
     client_fd = None
-    report = {"wall_seconds": wall_seconds, "cleanup_seconds": cleanup_seconds,
-              "launchers_killed": False, "program_started": False,
-              "container_processes_stopped": False, "container_removed": False}
+    report = {
+        "wall_seconds": wall_seconds,
+        "cleanup_seconds": cleanup_seconds,
+        "launchers_killed": False,
+        "program_started": False,
+        "container_processes_stopped": False,
+        "container_removed": False,
+    }
 
     def command(*arguments, timeout=5):
-        return subprocess.run(sandbox._command(*arguments), stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=timeout, check=False,
-                              env=sandbox._environment())
+        return subprocess.run(
+            sandbox._command(*arguments),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            env=sandbox._environment(),
+        )
 
     driver.start()
     send.close()
@@ -122,8 +147,10 @@ def run_lifecycle_check(sandbox: PodmanSandbox, *, wall_seconds: int = 12,
             deadline = time.monotonic() + startup_seconds
             while time.monotonic() < deadline:
                 if receive.poll(0.1):
-                    try: event = receive.recv()
-                    except EOFError: raise LifecycleError("lifecycle driver exited before startup") from None
+                    try:
+                        event = receive.recv()
+                    except EOFError:
+                        raise LifecycleError("lifecycle driver exited before startup") from None
                     if "client_pid" not in event:
                         raise LifecycleError("lifecycle driver did not start the container")
                     name = event["name"]
@@ -143,8 +170,14 @@ def run_lifecycle_check(sandbox: PodmanSandbox, *, wall_seconds: int = 12,
             while time.monotonic() < deadline:
                 if not driver.is_alive() or _finished(client_fd):
                     raise LifecycleError("lifecycle launcher exited before the program started")
-                ready = command("exec", name, "/usr/local/bin/python", "-I", "-c",
-                                "from pathlib import Path; p=Path('/output/lifecycle-ready'); print(p.read_text() if p.exists() else '')")
+                ready = command(
+                    "exec",
+                    name,
+                    "/usr/local/bin/python",
+                    "-I",
+                    "-c",
+                    "from pathlib import Path; p=Path('/output/lifecycle-ready'); print(p.read_text() if p.exists() else '')",
+                )
                 if ready.returncode == 0 and ready.stdout.decode().strip() == marker:
                     report["program_started"] = True
                     break

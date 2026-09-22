@@ -3,6 +3,7 @@
 Planning is offline. Downloading requires an explicit byte allowance; no Hugging
 Face token, user cache, remote Python, or mutable branch is used.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,7 +26,16 @@ from .schemas import FrozenModel, GitSHA, ModelIdentity, SHA256
 from .worker_contracts import FileDigest
 
 CANONICAL_REPOS = ("Qwen/Qwen3-1.7B-Base", "Qwen/Qwen3-1.7B")
-ALLOWED_SMALL_FILES = {"config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "merges.txt", "vocab.json", "model.safetensors.index.json", "LICENSE"}
+ALLOWED_SMALL_FILES = {
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "merges.txt",
+    "vocab.json",
+    "model.safetensors.index.json",
+    "LICENSE",
+}
 
 
 class LockedFile(FrozenModel):
@@ -36,7 +46,9 @@ class LockedFile(FrozenModel):
 
     @model_validator(mode="after")
     def safe(self):
-        if self.path not in ALLOWED_SMALL_FILES and not re.fullmatch(r"model(?:-\d{5}-of-\d{5})?\.safetensors", self.path):
+        if self.path not in ALLOWED_SMALL_FILES and not re.fullmatch(
+            r"model(?:-\d{5}-of-\d{5})?\.safetensors", self.path
+        ):
             raise ValueError("only known tokenizer/config files and safetensors weights are allowed")
         if self.sha256 is None and self.git_blob_sha1 is None:
             raise ValueError("every source file needs a cryptographic content identity")
@@ -54,7 +66,11 @@ class ModelLock(FrozenModel):
     @model_validator(mode="after")
     def complete(self):
         names = {item.path for item in self.files}
-        if len(names) != len(self.files) or not {"config.json", "tokenizer.json", "tokenizer_config.json"} <= names or not any(name.endswith(".safetensors") for name in names):
+        if (
+            len(names) != len(self.files)
+            or not {"config.json", "tokenizer.json", "tokenizer_config.json"} <= names
+            or not any(name.endswith(".safetensors") for name in names)
+        ):
             raise ValueError("asset inventory is incomplete or repeats a filename")
         return self
 
@@ -120,10 +136,16 @@ def plan(root: Path, locks: tuple[ModelLock, ...]):
                 verify_file(path, entry)
             else:
                 missing += entry.size_bytes
-    return {"model_bytes": sum(lock.size_bytes for lock in locks), "download_bytes": missing,
-            "free_bytes": shutil.disk_usage(anchor).free, "reserve_bytes": 512 * 1024**2,
-            "models": [{"repo": lock.repo, "revision": lock.revision, "size_bytes": lock.size_bytes,
-                        "lock_hash": lock_hash(lock)} for lock in locks]}
+    return {
+        "model_bytes": sum(lock.size_bytes for lock in locks),
+        "download_bytes": missing,
+        "free_bytes": shutil.disk_usage(anchor).free,
+        "reserve_bytes": 512 * 1024**2,
+        "models": [
+            {"repo": lock.repo, "revision": lock.revision, "size_bytes": lock.size_bytes, "lock_hash": lock_hash(lock)}
+            for lock in locks
+        ],
+    }
 
 
 def prepare(root: Path, locks: tuple[ModelLock, ...], *, max_download_bytes: int, opener=urlopen):
@@ -152,7 +174,10 @@ def prepare(root: Path, locks: tuple[ModelLock, ...], *, max_download_bytes: int
             try:
                 with temporary.open("xb") as output:
                     created = True
-                    request = Request(f"https://huggingface.co/{lock.repo}/resolve/{lock.revision}/{entry.path}", headers={"User-Agent": "probe-core-model-preparation/1"})
+                    request = Request(
+                        f"https://huggingface.co/{lock.repo}/resolve/{lock.revision}/{entry.path}",
+                        headers={"User-Agent": "probe-core-model-preparation/1"},
+                    )
                     with opener(request, timeout=60) as response:
                         remaining = entry.size_bytes
                         while remaining:
@@ -188,11 +213,24 @@ def inventory(directory: Path, lock: ModelLock, *, thinking_mode: bool | None = 
         raise ValueError("Base uses raw text/token input, never a chat mode")
     if not lock.repo.endswith("-Base") and type(thinking_mode) is not bool:
         raise ValueError("posttrained preparation requires explicit thinking true or false")
-    assets = tuple(FileDigest(path=entry.path, sha256=verify_file(directory / entry.path, entry)) for entry in lock.files)
+    assets = tuple(
+        FileDigest(path=entry.path, sha256=verify_file(directory / entry.path, entry)) for entry in lock.files
+    )
     config = json.loads((directory / "config.json").read_text())
-    expected = {"model_type": "qwen3", "num_hidden_layers": 28, "num_attention_heads": 16,
-                "num_key_value_heads": 8, "hidden_size": 2048, "head_dim": 128, "vocab_size": 151936}
-    if any(config.get(key) != value for key, value in expected.items()) or config.get("quantization_config") or config.get("auto_map"):
+    expected = {
+        "model_type": "qwen3",
+        "num_hidden_layers": 28,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 8,
+        "hidden_size": 2048,
+        "head_dim": 128,
+        "vocab_size": 151936,
+    }
+    if (
+        any(config.get(key) != value for key, value in expected.items())
+        or config.get("quantization_config")
+        or config.get("auto_map")
+    ):
         raise ValueError("downloaded checkpoint is not the canonical unquantized architecture")
     template_hash = None
     if thinking_mode is not None:
@@ -200,10 +238,16 @@ def inventory(directory: Path, lock: ModelLock, *, thinking_mode: bool | None = 
         if not isinstance(template, str) or "enable_thinking" not in template:
             raise ValueError("posttrained tokenizer lacks a verifiable thinking template")
         template_hash = "sha256:" + hashlib.sha256(template.encode()).hexdigest()
-    model = ModelIdentity(repo=lock.repo, revision_sha=lock.revision,
-                          local_weight_hashes=[asset.sha256 for asset in assets if asset.path.endswith(".safetensors")],
-                          tokenizer_revision=lock.revision, dtype="bfloat16", quantized=False,
-                          chat_template_hash=template_hash, thinking_mode=thinking_mode)
+    model = ModelIdentity(
+        repo=lock.repo,
+        revision_sha=lock.revision,
+        local_weight_hashes=[asset.sha256 for asset in assets if asset.path.endswith(".safetensors")],
+        tokenizer_revision=lock.revision,
+        dtype="bfloat16",
+        quantized=False,
+        chat_template_hash=template_hash,
+        thinking_mode=thinking_mode,
+    )
     return PreparedBundle(model=model, assets=assets, source_lock_hash=lock_hash(lock))
 
 
@@ -227,7 +271,9 @@ def main():
             parser.error("inventory requires one --repo")
         lock = locks[0]
         directory = args.root / lock.repo.split("/")[-1] / lock.revision
-        result = inventory(directory, lock, thinking_mode=None if args.thinking is None else args.thinking == "true").model_dump(mode="json")
+        result = inventory(
+            directory, lock, thinking_mode=None if args.thinking is None else args.thinking == "true"
+        ).model_dump(mode="json")
     print(json.dumps(result, indent=2))
 
 

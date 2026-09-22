@@ -1,4 +1,5 @@
 """Trusted research facade. No direct ledger access is given to MCP clients."""
+
 from __future__ import annotations
 
 import hashlib
@@ -11,8 +12,13 @@ from pydantic import Field
 from .audit import canonical_json
 from .ledger import JobRecord, JobState, Ledger
 from .schemas import (
-    ExperimentStage, FrozenModel, HypothesisRecord, HypothesisState, Identifier,
-    JobSpec, SHA256,
+    ExperimentStage,
+    FrozenModel,
+    HypothesisRecord,
+    HypothesisState,
+    Identifier,
+    JobSpec,
+    SHA256,
 )
 
 
@@ -20,8 +26,9 @@ class CloudRequests(Protocol):
     def request_start(self, worker_id: str, job_ids: list[str], max_runtime_seconds: int) -> Any: ...
     def status(self) -> Any: ...
     def stop_gpu(self, worker_id: str | None = None) -> Any: ...
-    def request_provision(self, deployment: dict, job_ids: list[str], max_runtime_seconds: int,
-                          replaces_worker_id: str | None = None) -> Any: ...
+    def request_provision(
+        self, deployment: dict, job_ids: list[str], max_runtime_seconds: int, replaces_worker_id: str | None = None
+    ) -> Any: ...
 
 
 class Query(FrozenModel):
@@ -79,17 +86,22 @@ class SandboxRequest(FrozenModel):
 
 class ResearchPolicy(FrozenModel):
     """Administrator-controlled corpus allowlist; an empty list permits no jobs."""
+
     discovery_datasets: tuple[SHA256, ...] = ()
     allow_calibration: bool = False
 
 
 def job_view(job: JobRecord) -> dict[str, Any]:
     return {
-        "job_id": job.job_id, "state": job.state.value,
-        "operation": job.spec.operation.kind, "hypothesis_id": job.spec.hypothesis_id,
+        "job_id": job.job_id,
+        "state": job.state.value,
+        "operation": job.spec.operation.kind,
+        "hypothesis_id": job.spec.hypothesis_id,
         "stage": job.spec.experiment_stage.value,
-        "created_at": job.created_at.isoformat(), "updated_at": job.updated_at.isoformat(),
-        "attempt_count": job.attempt_count, "failure_kind": job.failure_kind,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "attempt_count": job.attempt_count,
+        "failure_kind": job.failure_kind,
     }
 
 
@@ -99,9 +111,17 @@ class ResearchService:
     Trusted controller and this service may share a service UID. The model-facing
     MCP process must have a separate UID and no access to their database/config.
     """
-    def __init__(self, ledger: Ledger, policy: ResearchPolicy, *,
-                 cloud: CloudRequests | None = None, sandbox: Any = None,
-                 cancel_execution: Any = None, artifact_store: Any = None):
+
+    def __init__(
+        self,
+        ledger: Ledger,
+        policy: ResearchPolicy,
+        *,
+        cloud: CloudRequests | None = None,
+        sandbox: Any = None,
+        cancel_execution: Any = None,
+        artifact_store: Any = None,
+    ):
         self.ledger = ledger
         self.policy = ResearchPolicy.model_validate_json(policy.model_dump_json())
         self.cloud = cloud
@@ -110,15 +130,21 @@ class ResearchService:
         self.artifact_store = artifact_store
         self._sandbox_slot = threading.BoundedSemaphore(1)
         self.methods = {
-            "lab_status": self.lab_status, "query_runs": self.query_runs,
-            "job_status": self.job_status, "submit_job": self.submit_job,
-            "cancel_job": self.cancel_job, "read_manifest": self.read_manifest,
+            "lab_status": self.lab_status,
+            "query_runs": self.query_runs,
+            "job_status": self.job_status,
+            "submit_job": self.submit_job,
+            "cancel_job": self.cancel_job,
+            "read_manifest": self.read_manifest,
             "read_artifact_summary": self.read_artifact_summary,
-            "list_hypotheses": self.list_hypotheses, "register_hypothesis": self.register_hypothesis,
+            "list_hypotheses": self.list_hypotheses,
+            "register_hypothesis": self.register_hypothesis,
             "freeze_hypothesis": self.freeze_hypothesis,
-            "request_gpu_start": self.request_gpu_start, "gpu_status": self.gpu_status,
+            "request_gpu_start": self.request_gpu_start,
+            "gpu_status": self.gpu_status,
             "request_gpu_provision": self.request_gpu_provision,
-            "stop_gpu": self.stop_gpu, "run_sandboxed_experiment": self.run_sandboxed_experiment,
+            "stop_gpu": self.stop_gpu,
+            "run_sandboxed_experiment": self.run_sandboxed_experiment,
             "import_run_artifact": self.import_run_artifact,
         }
 
@@ -139,23 +165,35 @@ class ResearchService:
         # the audit through generic logging. Failed method guesses are retained.
         arguments_hash = "sha256:" + hashlib.sha256(canonical_json(params).encode()).hexdigest()
         permitted = method in self.methods
-        self.ledger.record_event("tool_call", {"tool": method if permitted else "unknown_method", "arguments_hash": arguments_hash,
-                                              "policy_decision": "allowed_surface" if permitted else "denied"})
+        self.ledger.record_event(
+            "tool_call",
+            {
+                "tool": method if permitted else "unknown_method",
+                "arguments_hash": arguments_hash,
+                "policy_decision": "allowed_surface" if permitted else "denied",
+            },
+        )
         if not permitted:
             raise PermissionError("method is not exposed to research clients")
         try:
             return self.methods[method](params)
         except Exception:
-            self.ledger.record_event("policy_evaluation", {"tool": method[:64], "arguments_hash": arguments_hash,
-                                                           "policy_decision": "request_failed"})
+            self.ledger.record_event(
+                "policy_evaluation",
+                {"tool": method[:64], "arguments_hash": arguments_hash, "policy_decision": "request_failed"},
+            )
             raise
 
     def lab_status(self, params: dict[str, Any]) -> dict[str, Any]:
         FrozenModel.model_validate(params)
         jobs = self.query_runs({"limit": 100})
-        return {"jobs": jobs, "sandbox_configured": self.sandbox is not None,
-                "cloud_controller_configured": self.cloud is not None,
-                "gpu_start_authority": False, "evaluation_authority": False}
+        return {
+            "jobs": jobs,
+            "sandbox_configured": self.sandbox is not None,
+            "cloud_controller_configured": self.cloud is not None,
+            "gpu_start_authority": False,
+            "evaluation_authority": False,
+        }
 
     def query_runs(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         query = Query.model_validate(params)
@@ -166,7 +204,7 @@ class ResearchService:
             except PermissionError:
                 continue
             visible.append(job_view(job))
-        return visible[query.offset:query.offset + query.limit]
+        return visible[query.offset : query.offset + query.limit]
 
     def job_status(self, params: dict[str, Any]) -> dict[str, Any]:
         request = JobID.model_validate(params)
@@ -199,8 +237,9 @@ class ResearchService:
     def list_hypotheses(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         query = Query.model_validate(params)
         with self.ledger.read_connection() as conn:
-            rows = conn.execute("SELECT document FROM hypotheses ORDER BY hypothesis_id LIMIT ? OFFSET ?",
-                                (query.limit, query.offset)).fetchall()
+            rows = conn.execute(
+                "SELECT document FROM hypotheses ORDER BY hypothesis_id LIMIT ? OFFSET ?", (query.limit, query.offset)
+            ).fetchall()
         return [HypothesisRecord.model_validate_json(row[0]).model_dump(mode="json") for row in rows]
 
     def import_run_artifact(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -209,8 +248,9 @@ class ResearchService:
         if self.artifact_store is None:
             raise PermissionError("retained input store is not configured")
         artifact = self.ledger.get_manifest(source.job_id).artifacts[source.artifact_index]
-        return self.artifact_store.register(self.ledger.get_artifact_root(source.job_id) / artifact.path,
-                                            expected_sha256=artifact.sha256)
+        return self.artifact_store.register(
+            self.ledger.get_artifact_root(source.job_id) / artifact.path, expected_sha256=artifact.sha256
+        )
 
     def register_hypothesis(self, params: dict[str, Any]) -> dict[str, Any]:
         hypothesis = HypothesisSubmission.model_validate(params).hypothesis
@@ -232,18 +272,27 @@ class ResearchService:
 
     def gpu_status(self, params: dict[str, Any]) -> Any:
         FrozenModel.model_validate(params)
-        return {"configured": False, "requests": []} if self.cloud is None else {"configured": True, "requests": self.cloud.status()}
+        return (
+            {"configured": False, "requests": []}
+            if self.cloud is None
+            else {"configured": True, "requests": self.cloud.status()}
+        )
 
     def request_gpu_provision(self, params: dict[str, Any]) -> Any:
         from .provider import DeploymentSpec
+
         request = ProvisionRequest.model_validate(params)
         deployment = DeploymentSpec.model_validate(request.deployment)
         for job_id in request.job_ids:
             self._job(job_id)
         if self.cloud is None:
             raise RuntimeError("controller is not configured")
-        return self.cloud.request_provision(deployment.model_dump(mode="json"), list(request.job_ids),
-                                            request.max_runtime_seconds, request.replaces_worker_id)
+        return self.cloud.request_provision(
+            deployment.model_dump(mode="json"),
+            list(request.job_ids),
+            request.max_runtime_seconds,
+            request.replaces_worker_id,
+        )
 
     def stop_gpu(self, params: dict[str, Any]) -> Any:
         request = StopRequest.model_validate(params)
@@ -253,6 +302,7 @@ class ResearchService:
 
     def run_sandboxed_experiment(self, params: dict[str, Any]) -> dict[str, Any]:
         from .sandbox import GPURequestBroker, SandboxLimits
+
         request = SandboxRequest.model_validate(params)
         if self.sandbox is None:
             raise PermissionError("CPU sandbox is not configured")
@@ -292,8 +342,12 @@ class ResearchService:
                 if self.artifact_store is None:
                     raise PermissionError("retained input store is not configured")
                 artifacts.append({"name": path.name, **self.artifact_store.register(path)})
-            return {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr,
-                    "termination_reason": result.termination_reason,
-                    "artifacts": artifacts}
+            return {
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "termination_reason": result.termination_reason,
+                "artifacts": artifacts,
+            }
         finally:
             self._sandbox_slot.release()

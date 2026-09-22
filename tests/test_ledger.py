@@ -65,6 +65,7 @@ def job_factory(manifest_data):
             },
             limits={"max_runtime_seconds": runtime, "max_output_bytes": 1000000},
         )
+
     return make
 
 
@@ -297,7 +298,9 @@ def test_one_infrastructure_retry_is_idempotent_and_fences_old_attempt(ledger, c
 def test_scientific_failure_and_oom_are_never_retried(ledger, clock, job_factory, kind):
     record, _ = dispatch(ledger, clock, job_factory)
     ledger.start_job(record.job_id, record.attempt_id, "worker-1")
-    failed = ledger.fail_job(record.job_id, record.attempt_id, "worker-1", failure_kind=kind, reason="experiment did not succeed")
+    failed = ledger.fail_job(
+        record.job_id, record.attempt_id, "worker-1", failure_kind=kind, reason="experiment did not succeed"
+    )
     assert state(failed) == "FAILED"
     ledger.confirm_stopped(record.job_id, record.attempt_id)
     with pytest.raises(RetryNotAllowed):
@@ -332,7 +335,14 @@ def test_approval_nonce_is_one_time_and_secret_is_not_persisted(ledger, clock, j
     secret = "a-sensitive-one-time-value-" + "9" * 32
     approve(ledger, clock, [job], token=secret)
     with pytest.raises(ApprovalError):
-        ledger.consume_approval("wake-1", secret, pod_id="pod-1", job_ids=[job.job_id], live_price_usd_per_hour=1.0, requested_runtime_seconds=300)
+        ledger.consume_approval(
+            "wake-1",
+            secret,
+            pod_id="pod-1",
+            job_ids=[job.job_id],
+            live_price_usd_per_hour=1.0,
+            requested_runtime_seconds=300,
+        )
     ledger.sync_audit()
     for path in tmp_path.iterdir():
         if path.is_file():
@@ -341,30 +351,49 @@ def test_approval_nonce_is_one_time_and_secret_is_not_persisted(ledger, clock, j
 
 def make_nonce(ledger, clock, jobs, *, expires_in=300):
     return ApprovalNonce(
-        approval_id="wake-1", token="test-nonce-" + "a" * 40, pod_id="pod-1",
-        batch_hash=ledger.batch_hash([job.job_id for job in jobs]), max_runtime_seconds=300,
-        price_ceiling_usd_per_hour=1.20, issued_at=clock(),
+        approval_id="wake-1",
+        token="test-nonce-" + "a" * 40,
+        pod_id="pod-1",
+        batch_hash=ledger.batch_hash([job.job_id for job in jobs]),
+        max_runtime_seconds=300,
+        price_ceiling_usd_per_hour=1.20,
+        issued_at=clock(),
         expires_at=clock() + timedelta(seconds=expires_in),
     )
 
 
-@pytest.mark.parametrize("change", [
-    {"token": "wrong-token-" + "b" * 40},
-    {"pod_id": "other-pod"},
-    {"live_price_usd_per_hour": 1.21},
-    {"live_price_usd_per_hour": 1.5},
-    {"requested_runtime_seconds": 301},
-    {"job_ids": []},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"token": "wrong-token-" + "b" * 40},
+        {"pod_id": "other-pod"},
+        {"live_price_usd_per_hour": 1.21},
+        {"live_price_usd_per_hour": 1.5},
+        {"requested_runtime_seconds": 301},
+        {"job_ids": []},
+    ],
+)
 def test_approval_boundaries_are_enforced_without_consuming_nonce(ledger, clock, job_factory, change):
     job = ledger.submit_job(job_factory())
     nonce = make_nonce(ledger, clock, [job])
     ledger.register_approval(nonce)
-    arguments = dict(token=nonce.token.get_secret_value(), pod_id="pod-1", job_ids=[job.job_id], live_price_usd_per_hour=1.0, requested_runtime_seconds=300)
+    arguments = dict(
+        token=nonce.token.get_secret_value(),
+        pod_id="pod-1",
+        job_ids=[job.job_id],
+        live_price_usd_per_hour=1.0,
+        requested_runtime_seconds=300,
+    )
     arguments.update(change)
     with pytest.raises(ApprovalError):
         ledger.consume_approval("wake-1", **arguments)
-    arguments = dict(token=nonce.token.get_secret_value(), pod_id="pod-1", job_ids=[job.job_id], live_price_usd_per_hour=1.0, requested_runtime_seconds=300)
+    arguments = dict(
+        token=nonce.token.get_secret_value(),
+        pod_id="pod-1",
+        job_ids=[job.job_id],
+        live_price_usd_per_hour=1.0,
+        requested_runtime_seconds=300,
+    )
     assert ledger.consume_approval("wake-1", **arguments).approval_id == "wake-1"
 
 
@@ -374,7 +403,14 @@ def test_expired_approval_cannot_be_consumed(ledger, clock, job_factory):
     ledger.register_approval(nonce)
     clock.advance(10)
     with pytest.raises(ApprovalError):
-        ledger.consume_approval("wake-1", nonce.token.get_secret_value(), pod_id="pod-1", job_ids=[job.job_id], live_price_usd_per_hour=1.0, requested_runtime_seconds=300)
+        ledger.consume_approval(
+            "wake-1",
+            nonce.token.get_secret_value(),
+            pod_id="pod-1",
+            job_ids=[job.job_id],
+            live_price_usd_per_hour=1.0,
+            requested_runtime_seconds=300,
+        )
 
 
 def test_racing_approval_consumers_have_exactly_one_winner(ledger, clock, job_factory):
@@ -386,7 +422,14 @@ def test_racing_approval_consumers_have_exactly_one_winner(ledger, clock, job_fa
     def consume(_):
         start.wait(timeout=10)
         try:
-            return ledger.consume_approval("wake-1", nonce.token.get_secret_value(), pod_id="pod-1", job_ids=[job.job_id], live_price_usd_per_hour=1.0, requested_runtime_seconds=300)
+            return ledger.consume_approval(
+                "wake-1",
+                nonce.token.get_secret_value(),
+                pod_id="pod-1",
+                job_ids=[job.job_id],
+                live_price_usd_per_hour=1.0,
+                requested_runtime_seconds=300,
+            )
         except ApprovalError:
             return None
 
@@ -412,11 +455,19 @@ def test_approval_deadline_persists_and_is_not_renewed_by_activity(ledger, clock
 
 def test_hypothesis_freeze_is_durable_and_backward_transitions_are_rejected(ledger, clock, manifest_data, job_factory):
     draft = HypothesisRecord(
-        preregistration_plan={"model": manifest_data["model"], "operation": job_factory().operation, "primary_metric": "target_behavior_delta", "minimum_effect": 0.01, "controls": manifest_data["controls"]},
-        hypothesis_id="H-1", proposition="Layer zero mediates the measured contrast",
+        preregistration_plan={
+            "model": manifest_data["model"],
+            "operation": job_factory().operation,
+            "primary_metric": "target_behavior_delta",
+            "minimum_effect": 0.01,
+            "controls": manifest_data["controls"],
+        },
+        hypothesis_id="H-1",
+        proposition="Layer zero mediates the measured contrast",
         alignment_relevance="Tests causal influence over the behavioral contrast",
         predicted_causal_intervention="Capture then patch residual states at layer zero",
-        predicted_direction="increase", predictions=["Patching increases the primary score"],
+        predicted_direction="increase",
+        predictions=["Patching increases the primary score"],
         falsifier="The score remains unchanged under matched interventions",
     )
     ledger.register_hypothesis(draft)
@@ -436,10 +487,20 @@ def test_hypothesis_freeze_is_durable_and_backward_transitions_are_rejected(ledg
 
 def test_hypothesis_cannot_be_validated_without_replication(ledger, manifest_data, job_factory):
     draft = HypothesisRecord(
-        preregistration_plan={"model": manifest_data["model"], "operation": job_factory().operation, "primary_metric": "target_behavior_delta", "minimum_effect": 0.01, "controls": manifest_data["controls"]},
-        hypothesis_id="H-2", proposition="An effect exists", alignment_relevance="Behavioral relevance",
-        predicted_causal_intervention="Ablate the hypothesized component", predicted_direction="decrease",
-        predictions=["The score decreases"], falsifier="The score stays the same",
+        preregistration_plan={
+            "model": manifest_data["model"],
+            "operation": job_factory().operation,
+            "primary_metric": "target_behavior_delta",
+            "minimum_effect": 0.01,
+            "controls": manifest_data["controls"],
+        },
+        hypothesis_id="H-2",
+        proposition="An effect exists",
+        alignment_relevance="Behavioral relevance",
+        predicted_causal_intervention="Ablate the hypothesized component",
+        predicted_direction="decrease",
+        predictions=["The score decreases"],
+        falsifier="The score stays the same",
     )
     ledger.register_hypothesis(draft)
     ledger.transition_hypothesis("H-2", "FROZEN")
@@ -494,8 +555,10 @@ def test_reopen_reconciles_audit_export_from_authoritative_database(tmp_path, cl
     audit_path = tmp_path / "recover-audit.jsonl"
     with Ledger(database, audit_path=audit_path, clock=clock) as instance:
         with monkeypatch.context() as patch:
+
             def disk_unavailable(self, records):
                 raise OSError("simulated storage failure")
+
             patch.setattr(AuditLog, "sync_records", disk_unavailable)
             created = instance.submit_job(job_factory())
             expected = instance.audit_records()
@@ -522,20 +585,26 @@ def prepare_manifest(manifest_data, record, artifact_root, clock, *, content=b"v
     data["model"] = record.spec.model.model_dump(mode="json")
     data["inputs"] = record.spec.inputs.model_dump(mode="json")
     data["experiment"].update(tool="capture_activation", modules=["model.layers.0"], positions=["last"])
-    normalized = json.dumps(record.spec.operation.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    normalized = json.dumps(
+        record.spec.operation.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     data["experiment"]["intervention_hash"] = "sha256:" + hashlib.sha256(normalized.encode()).hexdigest()
     data["hardware"]["live_price_usd_per_hour"] = 1.0
     data["results"]["heldout"] = False
     data["results"]["replication_status"] = "not_applicable"
     data["cost"] = {"gpu_seconds": 0, "estimated_compute_usd": 0.0, "bytes_persisted": len(content)}
-    data["artifacts"] = [{"path": "artifacts/result.txt", "sha256": hashlib.sha256(content).hexdigest(), "retention_class": "validated"}]
+    data["artifacts"] = [
+        {"path": "artifacts/result.txt", "sha256": hashlib.sha256(content).hexdigest(), "retention_class": "validated"}
+    ]
     directory = artifact_root / "artifacts"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "result.txt").write_bytes(content)
     return RunManifest.model_validate(data)
 
 
-def test_completed_job_atomically_persists_manifest_and_releases_gpu(ledger, clock, job_factory, manifest_data, tmp_path):
+def test_completed_job_atomically_persists_manifest_and_releases_gpu(
+    ledger, clock, job_factory, manifest_data, tmp_path
+):
     jobs = [ledger.submit_job(job_factory(f"completion-{index}")) for index in range(2)]
     grant = approve(ledger, clock, jobs)
     record = ledger.dispatch_next("worker-1", approval_id=grant.approval_id)
@@ -560,7 +629,9 @@ def test_completed_job_atomically_persists_manifest_and_releases_gpu(ledger, clo
 
 
 @pytest.mark.parametrize("corruption", ["missing", "modified", "symlink"])
-def test_artifact_verification_failure_preserves_finalizing_state(ledger, clock, job_factory, manifest_data, tmp_path, corruption):
+def test_artifact_verification_failure_preserves_finalizing_state(
+    ledger, clock, job_factory, manifest_data, tmp_path, corruption
+):
     record, _ = dispatch(ledger, clock, job_factory)
     ledger.start_job(record.job_id, record.attempt_id, "worker-1")
     ledger.begin_finalization(record.job_id, record.attempt_id, "worker-1")
@@ -585,7 +656,9 @@ def test_artifact_verification_failure_preserves_finalizing_state(ledger, clock,
 
 
 @pytest.mark.parametrize("mismatch", ["model", "inputs", "approval", "operation"])
-def test_completion_rejects_manifest_that_does_not_match_execution(ledger, clock, job_factory, manifest_data, tmp_path, mismatch):
+def test_completion_rejects_manifest_that_does_not_match_execution(
+    ledger, clock, job_factory, manifest_data, tmp_path, mismatch
+):
     record, _ = dispatch(ledger, clock, job_factory)
     ledger.start_job(record.job_id, record.attempt_id, "worker-1")
     ledger.begin_finalization(record.job_id, record.attempt_id, "worker-1")
@@ -619,7 +692,10 @@ def test_database_mutations_have_explicit_transaction_boundaries(tmp_path, clock
             normalized = statement.lstrip().upper()
             if normalized.startswith("BEGIN"):
                 transaction_starts.append(normalized)
-            if normalized.startswith(("INSERT ", "UPDATE ", "DELETE ", "REPLACE ", "CREATE ", "ALTER ", "DROP ")) and not connection.in_transaction:
+            if (
+                normalized.startswith(("INSERT ", "UPDATE ", "DELETE ", "REPLACE ", "CREATE ", "ALTER ", "DROP "))
+                and not connection.in_transaction
+            ):
                 untransactional.append(statement)
 
         connection.set_trace_callback(trace)
@@ -644,7 +720,9 @@ def test_database_mutations_have_explicit_transaction_boundaries(tmp_path, clock
 
 
 def test_tool_and_policy_events_are_audited_and_secrets_roll_back(ledger):
-    tool = ledger.record_event("tool_call", {"tool": "capture", "job_id": "job-1", "arguments_hash": "sha256:" + "a" * 64})
+    tool = ledger.record_event(
+        "tool_call", {"tool": "capture", "job_id": "job-1", "arguments_hash": "sha256:" + "a" * 64}
+    )
     policy = ledger.record_event("policy_evaluation", {"decision": "allow", "job_id": "job-1"})
     assert tool["event_type"] == "tool_call"
     assert policy["previous_hash"] == tool["hash"]
@@ -671,7 +749,9 @@ def test_audit_failure_before_commit_rolls_back_job_submission(ledger, job_facto
     assert state(ledger.submit_job(job_factory())) == "PENDING"
 
 
-def test_completion_commit_failure_rolls_back_manifest_and_job_together(ledger, clock, job_factory, manifest_data, tmp_path, monkeypatch):
+def test_completion_commit_failure_rolls_back_manifest_and_job_together(
+    ledger, clock, job_factory, manifest_data, tmp_path, monkeypatch
+):
     record, _ = dispatch(ledger, clock, job_factory)
     ledger.start_job(record.job_id, record.attempt_id, "worker-1")
     ledger.begin_finalization(record.job_id, record.attempt_id, "worker-1")
@@ -691,7 +771,10 @@ def test_completion_commit_failure_rolls_back_manifest_and_job_together(ledger, 
     assert ledger.audit_records() == before
     with pytest.raises(NotFoundError):
         ledger.get_manifest(record.job_id)
-    assert state(ledger.complete_job(record.job_id, record.attempt_id, "worker-1", manifest, artifact_root=root)) == "COMPLETED"
+    assert (
+        state(ledger.complete_job(record.job_id, record.attempt_id, "worker-1", manifest, artifact_root=root))
+        == "COMPLETED"
+    )
 
 
 def test_completed_manifest_cannot_be_replaced(ledger, clock, job_factory, manifest_data, tmp_path):
@@ -705,7 +788,9 @@ def test_completed_manifest_cannot_be_replaced(ledger, clock, job_factory, manif
     altered = manifest.model_dump(mode="json")
     altered["results"]["effect_size"] = 0.99
     with pytest.raises(IdempotencyConflict):
-        ledger.complete_job(record.job_id, record.attempt_id, "worker-1", RunManifest.model_validate(altered), artifact_root=root)
+        ledger.complete_job(
+            record.job_id, record.attempt_id, "worker-1", RunManifest.model_validate(altered), artifact_root=root
+        )
     assert ledger.get_manifest(record.job_id) == manifest
 
 
@@ -730,7 +815,9 @@ def test_batch_digest_is_order_independent_and_bound_to_submitted_jobs(ledger, j
         ledger.batch_hash(["unknown-job"])
 
 
-def test_completion_requires_positive_supervisor_stop_acknowledgement(ledger, clock, job_factory, manifest_data, tmp_path):
+def test_completion_requires_positive_supervisor_stop_acknowledgement(
+    ledger, clock, job_factory, manifest_data, tmp_path
+):
     record, _ = dispatch(ledger, clock, job_factory)
     ledger.start_job(record.job_id, record.attempt_id, "worker-1")
     ledger.begin_finalization(record.job_id, record.attempt_id, "worker-1")
@@ -749,9 +836,14 @@ def test_expired_compute_interval_cannot_be_replaced_until_pod_is_confirmed_off(
     clock.advance(61)
     second = ledger.submit_job(job_factory("second-interval"))
     nonce = ApprovalNonce(
-        approval_id="wake-2", token="second-approval-" + "b" * 40, pod_id="pod-1",
-        batch_hash=ledger.batch_hash([second.job_id]), max_runtime_seconds=60,
-        price_ceiling_usd_per_hour=1.20, issued_at=clock(), expires_at=clock() + timedelta(minutes=5),
+        approval_id="wake-2",
+        token="second-approval-" + "b" * 40,
+        pod_id="pod-1",
+        batch_hash=ledger.batch_hash([second.job_id]),
+        max_runtime_seconds=60,
+        price_ceiling_usd_per_hour=1.20,
+        issued_at=clock(),
+        expires_at=clock() + timedelta(minutes=5),
     )
     ledger.register_approval(nonce)
     arguments = dict(pod_id="pod-1", job_ids=[second.job_id], live_price_usd_per_hour=1.0, requested_runtime_seconds=60)
@@ -832,7 +924,9 @@ def test_completed_outputs_are_sealed_and_persist_after_source_changes(tmp_path,
 
 
 @pytest.mark.parametrize("failure", ["declared_bytes", "output_limit"])
-def test_completed_output_must_match_accounting_and_stay_within_limit(ledger, clock, job_factory, manifest_data, tmp_path, failure):
+def test_completed_output_must_match_accounting_and_stay_within_limit(
+    ledger, clock, job_factory, manifest_data, tmp_path, failure
+):
     record, _ = dispatch(ledger, clock, job_factory)
     ledger.start_job(record.job_id, record.attempt_id, "worker-1")
     ledger.begin_finalization(record.job_id, record.attempt_id, "worker-1")
@@ -843,7 +937,9 @@ def test_completed_output_must_match_accounting_and_stay_within_limit(ledger, cl
     if failure == "declared_bytes":
         data["cost"]["bytes_persisted"] += 1
     with pytest.raises(ArtifactError):
-        ledger.complete_job(record.job_id, record.attempt_id, "worker-1", RunManifest.model_validate(data), artifact_root=source)
+        ledger.complete_job(
+            record.job_id, record.attempt_id, "worker-1", RunManifest.model_validate(data), artifact_root=source
+        )
     assert state(ledger.get_job(record.job_id)) == "FINALIZING"
 
 
@@ -857,16 +953,20 @@ def register_frozen_hypothesis(ledger, manifest_data, job_factory, hypothesis_id
         predictions=["The effect is positive and exceeds the registered minimum"],
         falsifier=manifest_data["experiment"]["falsifier"],
         preregistration_plan={
-            "model": manifest_data["model"], "operation": job_factory().operation,
+            "model": manifest_data["model"],
+            "operation": job_factory().operation,
             "primary_metric": manifest_data["experiment"]["primary_metric"],
-            "minimum_effect": 0.01, "controls": manifest_data["controls"],
+            "minimum_effect": 0.01,
+            "controls": manifest_data["controls"],
         },
     )
     ledger.register_hypothesis(record)
     return ledger.transition_hypothesis(hypothesis_id, "FROZEN")
 
 
-def test_hypothesis_can_be_validated_only_with_persisted_passed_replication(ledger, clock, job_factory, manifest_data, tmp_path):
+def test_hypothesis_can_be_validated_only_with_persisted_passed_replication(
+    ledger, clock, job_factory, manifest_data, tmp_path
+):
     frozen = register_frozen_hypothesis(ledger, manifest_data, job_factory)
     ledger.transition_hypothesis(frozen.hypothesis_id, "TESTING")
     ledger.transition_hypothesis(frozen.hypothesis_id, "REPLICATING")
@@ -883,8 +983,10 @@ def test_hypothesis_can_be_validated_only_with_persisted_passed_replication(ledg
     source = tmp_path / "replication-output"
     data = prepare_manifest(manifest_data, record, source, clock).model_dump(mode="json")
     data["run"].update(
-        experiment_stage="replication", hypothesis_id=frozen.hypothesis_id,
-        preregistration_hash=frozen.preregistration_hash, replicator_blinded=True,
+        experiment_stage="replication",
+        hypothesis_id=frozen.hypothesis_id,
+        preregistration_hash=frozen.preregistration_hash,
+        replicator_blinded=True,
     )
     data["results"].update(heldout=True, replication_status="passed")
     manifest = RunManifest.model_validate(data)
@@ -913,7 +1015,9 @@ def test_confirmation_cannot_change_frozen_intervention(ledger, job_factory, man
 
 
 @pytest.mark.parametrize("changed", ["metric", "controls", "direction", "falsifier"])
-def test_confirmation_manifest_is_bound_to_frozen_scientific_plan(ledger, clock, job_factory, manifest_data, tmp_path, changed):
+def test_confirmation_manifest_is_bound_to_frozen_scientific_plan(
+    ledger, clock, job_factory, manifest_data, tmp_path, changed
+):
     frozen = register_frozen_hypothesis(ledger, manifest_data, job_factory)
     ledger.transition_hypothesis(frozen.hypothesis_id, "TESTING")
     spec_data = job_factory("confirmation").model_dump(mode="json")
@@ -926,7 +1030,11 @@ def test_confirmation_manifest_is_bound_to_frozen_scientific_plan(ledger, clock,
     ledger.confirm_stopped(record.job_id, record.attempt_id)
     source = tmp_path / "confirmation-output"
     data = prepare_manifest(manifest_data, record, source, clock).model_dump(mode="json")
-    data["run"].update(experiment_stage="confirmatory", hypothesis_id=frozen.hypothesis_id, preregistration_hash=frozen.preregistration_hash)
+    data["run"].update(
+        experiment_stage="confirmatory",
+        hypothesis_id=frozen.hypothesis_id,
+        preregistration_hash=frozen.preregistration_hash,
+    )
     data["results"]["heldout"] = True
     if changed == "metric":
         data["experiment"]["primary_metric"] = "posthoc_metric"
@@ -937,5 +1045,7 @@ def test_confirmation_manifest_is_bound_to_frozen_scientific_plan(ledger, clock,
     else:
         data["experiment"]["falsifier"] = "A different posthoc falsifier"
     with pytest.raises(ArtifactError):
-        ledger.complete_job(record.job_id, record.attempt_id, "worker-1", RunManifest.model_validate(data), artifact_root=source)
+        ledger.complete_job(
+            record.job_id, record.attempt_id, "worker-1", RunManifest.model_validate(data), artifact_root=source
+        )
     assert state(ledger.get_job(record.job_id)) == "FINALIZING"

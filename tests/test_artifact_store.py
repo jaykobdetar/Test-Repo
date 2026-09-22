@@ -15,8 +15,9 @@ def test_generated_tensor_becomes_stable_job_input(tmp_path):
     record = store.register(source)
     expected = hashlib.sha256(source.read_bytes()).hexdigest()
     assert record["artifact_id"] == expected
-    assert record["tensor_refs"] == [{"path": f"{expected}/tensor.safetensors", "sha256": "sha256:" + expected,
-                                       "tensor_name": "direction"}]
+    assert record["tensor_refs"] == [
+        {"path": f"{expected}/tensor.safetensors", "sha256": "sha256:" + expected, "tensor_name": "direction"}
+    ]
     source.unlink()
     assert store.read(expected, max_bytes=1024)[1]
     assert store.describe(expected) == record
