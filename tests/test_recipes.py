@@ -122,7 +122,9 @@ def test_metrics_match_an_independent_zero_ablation(run, make_request):
         assert zero["target_log_prob"]["per_prompt"][index]["condition"] == pytest.approx(float(log_probs[target]))
     assert all(row["condition"] > 0 for row in zero["kl"]["per_prompt"])
     assert summary["primary"] == {"step": "zero", "metric": "agreement", "mean_delta": zero["agreement"]["mean_delta"]}
-    assert summary["controls"]["random_control"] == step(summary, "random_control")["metrics"]["agreement"]["mean_delta"]
+    assert (
+        summary["controls"]["random_control"] == step(summary, "random_control")["metrics"]["agreement"]["mean_delta"]
+    )
     assert len(zero["top"]["per_prompt"][0]["condition"]["token_ids"]) == 3
 
 
