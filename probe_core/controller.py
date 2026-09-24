@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
+import functools
 from datetime import datetime, timedelta, timezone
 import json
 import hashlib
@@ -23,6 +24,7 @@ import threading
 import time
 import uuid
 
+from . import budget
 from .audit import canonical_json
 from .compute_timing import startup_dispatch_cutoff
 from .ledger import JobState, Ledger
@@ -37,7 +39,7 @@ from .provider import (
     WorkerState,
 )
 from .rpc import UnixRPCClient, UnixRPCServer
-from .schemas import ApprovalNonce, JobSpec
+from .schemas import ApprovalNonce, BudgetEnvelope, JobSpec
 
 
 UTC = timezone.utc
@@ -204,6 +206,7 @@ class Controller:
             """)
             if "infrastructure" not in {row[1] for row in connection.execute("PRAGMA table_info(compute_requests)")}:
                 connection.execute("ALTER TABLE compute_requests ADD COLUMN infrastructure TEXT")
+            budget.initialize(connection)
 
         ledger._submit(initialize)
 
@@ -376,6 +379,10 @@ class Controller:
                 observed_provider_id=COALESCE(?,observed_provider_id),last_error_code=? WHERE request_id=?""",
                 (state, deadline, provider_id, error, request_id),
             )
+            if state == "STOPPED":
+                budget.settle(connection, now, request_id, provider_resource=True)
+            elif state == "REJECTED":
+                budget.settle(connection, now, request_id, provider_resource=False)
             payload = {
                 "decision": "compute_" + state.lower(),
                 "request_id": request_id,
@@ -417,6 +424,9 @@ class Controller:
 
     def approve_and_start(self, request_id: str, *, price_ceiling_usd_per_hour: float = 1.49) -> dict:
         """Human admin endpoint: consume approval once, then attempt one paid action."""
+        return self._approve_and_start(request_id, price_ceiling_usd_per_hour, envelope_id=None)
+
+    def _approve_and_start(self, request_id: str, price_ceiling_usd_per_hour: float, *, envelope_id: str | None):
         _identifier(request_id, "request ID")
         ceiling = _finite(price_ceiling_usd_per_hour, "price ceiling")
         if not 0 < ceiling < 1.50:
@@ -482,13 +492,25 @@ class Controller:
                 )
                 if actual_hash != request["batch_hash"]:
                     raise ControllerConflict("approved batch changed")
+                if envelope_id is not None:
+                    # Reserved in the same transaction that consumes the request,
+                    # so concurrent starts cannot both fit the remaining envelope.
+                    budget.reserve(
+                        connection,
+                        now,
+                        envelope_id,
+                        request_id=request_id,
+                        runtime_seconds=request["max_runtime_seconds"],
+                        quoted_usd_per_hour=price,
+                    )
                 connection.execute("UPDATE compute_requests SET state='PREPARING' WHERE request_id=?", (request_id,))
                 Ledger._event(
                     connection,
                     now,
                     "policy_evaluation",
                     {
-                        "decision": "human_approved",
+                        "decision": "human_approved" if envelope_id is None else "envelope_approved",
+                        "envelope_id": envelope_id,
                         "request_id": request_id,
                         "configuration_hash": request["configuration_hash"],
                         "batch_hash": request["batch_hash"],
@@ -499,7 +521,15 @@ class Controller:
                     },
                 )
 
-            self.ledger._submit(claim)
+            try:
+                self.ledger._submit(claim)
+            except budget.BudgetRefused as exc:
+                # The refused claim rolled back; retain the refusal separately.
+                self.ledger.record_event(
+                    "policy_evaluation",
+                    {"decision": "budget_reservation_refused", "envelope_id": envelope_id, "request_id": request_id},
+                )
+                raise BudgetError(str(exc)) from exc
             now = _now(self.clock)
             approval = ApprovalNonce(
                 approval_id=request["approval_id"],
@@ -695,27 +725,105 @@ class Controller:
                     )
             return self.status()
 
+    def issue_envelope(self, *, approved_by: str, lifetime_hours: float, **fields) -> dict:
+        """Human admin endpoint: open one spending envelope. It is never renewed."""
+        if type(lifetime_hours) not in (int, float) or not 0 < lifetime_hours <= 7 * 24:
+            raise ValueError("envelope lifetime must be between zero and seven days")
+        now = _now(self.clock)
+        envelope = BudgetEnvelope.model_validate(
+            {
+                **fields,
+                "issued_at": now,
+                "expires_at": now + timedelta(hours=lifetime_hours),
+                "approved_by": approved_by,
+            }
+        )
+
+        def issue(connection, now):
+            budget.issue(connection, now, envelope)
+            return budget.summary(connection, now)
+
+        try:
+            return self.ledger._submit(issue)
+        except budget.BudgetRefused as exc:
+            raise BudgetError(str(exc)) from exc
+
+    def close_envelope(self, envelope_id: str, reason: str = "closed by administrator") -> dict:
+        _identifier(envelope_id, "envelope ID")
+        if type(reason) is not str or not 0 < len(reason) <= 256:
+            raise ValueError("a short closure reason is required")
+
+        def close(connection, now):
+            budget.close(connection, now, envelope_id, reason)
+            return budget.summary(connection, now)
+
+        try:
+            return self.ledger._submit(close)
+        except budget.BudgetRefused as exc:
+            raise BudgetError(str(exc)) from exc
+
+    def budget_status(self) -> dict:
+        with self.ledger.read_connection() as connection:
+            return budget.summary(connection, _now(self.clock))
+
+    def start_within_envelope(self, request_id: str) -> dict:
+        """Approve one pending disposable research Pod against the open envelope.
+
+        The envelope replaces only the per-start human action. Every check in
+        the human approval path still runs, at the envelope's price ceiling.
+        """
+        _identifier(request_id, "request ID")
+        with self.ledger.read_connection() as connection:
+            envelope = budget.active_envelope(connection, _now(self.clock))
+            request = self._public(self._row(connection, request_id))
+            specs = [Ledger._job(Ledger._row(connection, job_id)).spec for job_id in request["job_ids"]]
+        if envelope is None:
+            raise BudgetError("no open budget envelope; a human must approve this start")
+        configuration = request["configuration"] or {}
+        if (
+            request["action"] not in {"CREATE", "REPLACE"}
+            or request["infrastructure"] is not None
+            or configuration.get("storage_mode") != "disposable_research"
+            or not specs
+        ):
+            raise BudgetError("envelopes cover only newly created disposable research Pods with research jobs")
+        try:
+            budget.check_scope(envelope, specs, request["max_runtime_seconds"])
+        except budget.BudgetRefused as exc:
+            raise BudgetError(str(exc)) from exc
+        return self._approve_and_start(request_id, envelope.max_gpu_usd_per_hour, envelope_id=envelope.envelope_id)
+
     def research_dispatch(self, method: str, params: dict):
         handlers = {
             "request_start": self.request_start,
             "request_provision": self.request_provision,
             "status": self.status,
             "stop_gpu": self.stop_gpu,
+            "budget_status": self.budget_status,
+            "start_within_envelope": self.start_within_envelope,
         }
         if method not in handlers:
             raise PermissionError("method is not available to research clients")
         return handlers[method](**params)
 
-    def admin_dispatch(self, method: str, params: dict):
+    def admin_dispatch(self, method: str, params: dict, *, admin_identity: str | None = None):
         handlers = {
             "approve": self.approve_and_start,
             "status": self.status,
             "stop_gpu": self.stop_gpu,
             "reconcile": self.reconcile,
             "request_preflight": self.request_infrastructure_preflight,
+            "issue_envelope": self.issue_envelope,
+            "close_envelope": self.close_envelope,
+            "budget_status": self.budget_status,
         }
         if method not in handlers:
             raise PermissionError("unknown administrative method")
+        if method == "issue_envelope":
+            if {"approved_by", "issued_at", "expires_at"} & set(params):
+                raise PermissionError("approval identity and timestamps are set by the controller")
+            # The admin socket admits only the configured human UID.
+            params = {**params, "approved_by": admin_identity or f"uid:{os.geteuid()}"}
         return handlers[method](**params)
 
 
@@ -748,6 +856,12 @@ class ControllerClient:
 
     def stop_gpu(self, worker_id=None):
         return self.rpc.call("stop_gpu", dict(worker_id=worker_id))
+
+    def budget_status(self):
+        return self.rpc.call("budget_status")
+
+    def start_within_envelope(self, request_id):
+        return self.rpc.call("start_within_envelope", dict(request_id=request_id))
 
 
 def _calibration_startup_deadline(reader, request, *, now):
@@ -1040,7 +1154,7 @@ def serve_controller(
     try:
         admin = UnixRPCServer(
             admin_socket,
-            controller.admin_dispatch,
+            functools.partial(controller.admin_dispatch, admin_identity=f"uid:{admin_uid}"),
             allowed_uids={admin_uid},
             socket_gid=socket_gid,
             allow_service_uid=allow_service_uid,
@@ -1087,11 +1201,29 @@ def main():
     admin.add_argument("--socket", required=True)
     admin.add_argument("--expected-server-uid", type=int, required=True)
     admin.add_argument(
-        "--method", choices=("status", "approve", "stop_gpu", "reconcile", "request_preflight"), required=True
+        "--method",
+        choices=(
+            "status",
+            "approve",
+            "stop_gpu",
+            "reconcile",
+            "request_preflight",
+            "issue_envelope",
+            "close_envelope",
+            "budget_status",
+        ),
+        required=True,
     )
     admin.add_argument("--request-id")
     admin.add_argument("--price-ceiling", type=float, default=1.49)
     admin.add_argument("--preflight-file", help="JSON containing deployment, script_sha256 and max_runtime_seconds")
+    admin.add_argument(
+        "--envelope-file",
+        help="JSON with envelope_id, max_gpu_usd, max_llm_usd, max_gpu_usd_per_hour, "
+        "max_wall_seconds_per_pod, allowed_models, allowed_stages and lifetime_hours",
+    )
+    admin.add_argument("--envelope-id")
+    admin.add_argument("--reason", default="closed by administrator")
     args = parser.parse_args()
     if args.command == "admin":
         params = {}
@@ -1103,6 +1235,14 @@ def main():
             if args.request_id is None:
                 parser.error("--request-id is required for approval")
             params = {"request_id": args.request_id, "price_ceiling_usd_per_hour": args.price_ceiling}
+        if args.method == "issue_envelope":
+            if args.envelope_file is None:
+                parser.error("--envelope-file is required to issue an envelope")
+            params = json.loads(Path(args.envelope_file).read_text())
+        if args.method == "close_envelope":
+            if args.envelope_id is None:
+                parser.error("--envelope-id is required to close an envelope")
+            params = {"envelope_id": args.envelope_id, "reason": args.reason}
         print(
             canonical_json(
                 UnixRPCClient(args.socket, expected_server_uid=args.expected_server_uid).call(args.method, params)

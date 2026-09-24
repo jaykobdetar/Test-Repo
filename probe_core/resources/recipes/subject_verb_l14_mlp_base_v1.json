@@ -1,0 +1,219 @@
+{
+  "recipe_id": "subject_verb_l14_mlp_base",
+  "version": 1,
+  "description": "Zero the layer-14 MLP output at the last prompt token and measure the change in the correct-minus-incorrect verb logit difference (is/are) on 24 public subject-verb agreement prompts with opposite-number attractor nouns; three norm-matched random displacements of the same activation are controls. Exploratory; development data only.",
+  "prompts": [
+    {
+      "prompt_id": "sv-01-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-01-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-02-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-02-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-03-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-03-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-04-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-04-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-05-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-05-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-06-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-06-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-07-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-07-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-08-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-08-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-09-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-09-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-10-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-10-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-11-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-11-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    },
+    {
+      "prompt_id": "sv-12-singular",
+      "target_token_id": 374,
+      "alternative_token_id": 525
+    },
+    {
+      "prompt_id": "sv-12-plural",
+      "target_token_id": 525,
+      "alternative_token_id": 374
+    }
+  ],
+  "steps": [
+    {
+      "name": "zero_l14_mlp",
+      "operation": {
+        "kind": "zero_ablate",
+        "target": {
+          "layer": 14,
+          "component": "mlp_output",
+          "head": null
+        },
+        "positions": [
+          "last"
+        ]
+      },
+      "retain_logits": true
+    },
+    {
+      "name": "random_l14_mlp_seed1",
+      "operation": {
+        "kind": "random_norm_matched",
+        "target": {
+          "layer": 14,
+          "component": "mlp_output",
+          "head": null
+        },
+        "positions": [
+          "last"
+        ],
+        "seed": 1
+      },
+      "retain_logits": true
+    },
+    {
+      "name": "random_l14_mlp_seed2",
+      "operation": {
+        "kind": "random_norm_matched",
+        "target": {
+          "layer": 14,
+          "component": "mlp_output",
+          "head": null
+        },
+        "positions": [
+          "last"
+        ],
+        "seed": 2
+      },
+      "retain_logits": true
+    },
+    {
+      "name": "random_l14_mlp_seed3",
+      "operation": {
+        "kind": "random_norm_matched",
+        "target": {
+          "layer": 14,
+          "component": "mlp_output",
+          "head": null
+        },
+        "positions": [
+          "last"
+        ],
+        "seed": 3
+      },
+      "retain_logits": true
+    }
+  ],
+  "metrics": [
+    {
+      "kind": "logit_diff",
+      "name": "agreement"
+    },
+    {
+      "kind": "log_prob",
+      "name": "target_log_prob"
+    },
+    {
+      "kind": "kl_to_baseline",
+      "name": "kl"
+    },
+    {
+      "kind": "top_k_tokens",
+      "name": "top5",
+      "k": 5
+    }
+  ],
+  "primary_metric": "agreement",
+  "primary_step": "zero_l14_mlp",
+  "control_steps": [
+    "random_l14_mlp_seed1",
+    "random_l14_mlp_seed2",
+    "random_l14_mlp_seed3"
+  ],
+  "seed": 20260922
+}

@@ -271,7 +271,7 @@ def fake_run(config, dataset, monkeypatch, tmp_path):
     tmp_path.chmod(0o700)
     monkeypatch.setattr(calibration, "process_boundary", lambda: None)
     monkeypatch.setattr(calibration, "immutable_file", lambda *_: dataset.model_dump_json().encode())
-    monkeypatch.setattr(calibration, "validate_assets", lambda _: dataset)
+    monkeypatch.setattr(calibration, "validate_assets", lambda *_: dataset)
     calls = []
 
     def execute(self, request, output):

@@ -386,8 +386,13 @@ class WorkerEngine:
             captured = captured[..., head_slice[0] : head_slice[1]]
         return captured.detach().clone()
 
-    def forward(self, inputs, lengths, operation=None, *, backend=None, limits=None):
-        """Return last-real-token logits and optional selected activations."""
+    def forward(self, inputs, lengths, operation=None, *, backend=None, limits=None, prepared=None):
+        """Return last-real-token logits and optional selected activations.
+
+        ``prepared`` supplies ``(selected, head_slice, replacement)`` computed by
+        a trusted caller, such as the recipe runner, instead of loading them from
+        tensor artifacts.
+        """
         import torch
 
         backend = backend or self.config.backend
@@ -396,7 +401,11 @@ class WorkerEngine:
         editing = operation is not None and operation.kind in {"patch", "ablate", "steer"}
         if editing:
             target = self._target(operation.target)
-            edit_parameters = self._intervention(operation, lengths, inputs["input_ids"].shape[1], limits)
+            edit_parameters = (
+                prepared
+                if prepared is not None
+                else self._intervention(operation, lengths, inputs["input_ids"].shape[1], limits)
+            )
         refs = []
         if operation is not None and operation.kind == "capture":
             rank = {"attention_head": 0, "attention_output": 1, "mlp_output": 2, "residual": 3}
@@ -566,6 +575,10 @@ class WorkerEngine:
             from .backend_parity import run_parity
 
             tensors, summary, generated_tokens = run_parity(self, request)
+        elif operation.kind == "recipe":
+            from .recipe_runner import run_recipe
+
+            tensors, summary = run_recipe(self, request)
         else:
             model = self._load_model(request.spec)
             # Loading an uncached model can consume random state. Execution
@@ -686,7 +699,17 @@ class WorkerEngine:
             "live_price_usd_per_hour": self.config.live_price_usd_per_hour,
         }
         names = []
-        if operation.kind == "capture":
+        positions = list(getattr(operation, "positions", ("last",)))
+        if operation.kind == "recipe":
+            recipe = operation.recipe
+            names = [
+                self._target(module)[0]
+                for step in recipe.steps
+                for module in (getattr(step.operation, "modules", None) or (step.operation.target,))
+            ]
+            primary = next(step for step in recipe.steps if step.name == recipe.primary_step)
+            positions = list(primary.operation.positions)
+        elif operation.kind == "capture":
             names = [self._target(item)[0] for item in operation.modules]
         elif operation.kind in {"patch", "ablate", "steer"}:
             names = [self._target(operation.target)[0]]
@@ -703,6 +726,7 @@ class WorkerEngine:
             "tensor_slice": "tensor_slice",
             "module_manifest": "module_manifest",
             "backend_parity": "backend_parity",
+            "recipe": "recipe",
         }
         science = request.science
         manifest = RunManifest.model_validate(
@@ -737,7 +761,7 @@ class WorkerEngine:
                 "experiment": {
                     "tool": tools[operation.kind],
                     "modules": list(dict.fromkeys(names)),
-                    "positions": list(getattr(operation, "positions", ("last",))),
+                    "positions": positions,
                     "intervention_hash": Ledger.operation_hash(request.spec),
                     "predicted_direction": science.predicted_direction,
                     "primary_metric": science.primary_metric,

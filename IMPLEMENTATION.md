@@ -55,7 +55,8 @@ do not prove Phase 5 complete.
   An unavailable/stale price, GPU price at or above $1.50/hour, or total idle
   estimate at or above $2/day blocks approval consumption.
 - Initial creation, replacement, and restart all require an authenticated human
-  action. A reserved logical worker identity binds the exact deployment digest,
+  action, or for a disposable exploratory research Pod, an open human-issued
+  budget envelope (see [controller services](docs/controller-services.md#budget-envelopes)). A reserved logical worker identity binds the exact deployment digest,
   provider request key, batch, and duration before a physical Pod exists.
 - Durable grants and absolute deadlines precede paid actions. Uncertain provider
   responses enter reconciliation; they never cause a blind second creation/start.
@@ -70,6 +71,9 @@ do not prove Phase 5 complete.
 
 ## Phase 4 requirements
 
+- A `recipe` operation composes these into a frozen multi-step experiment in one
+  loaded model, with worker-side metrics and an automatic exact no-op check
+  before any intervention result (see [worker and dispatcher](docs/worker-dispatcher.md#recipes-and-metrics)).
 - The fixed operation vocabulary includes capture, patch, ablation, steering,
   fitting a probe, bounded generation, and read-only parameter inspection.
 - NNsight is checked against raw HF/PyTorch. Test coverage must include no-op
@@ -103,7 +107,7 @@ facade and dispatcher must use the same private `input_artifact_root`.
 
 Research tools can submit/read/cancel jobs, register/freeze hypotheses, inspect
 accessible manifests, request GPU start, request stop, and run bounded CPU Python.
-They cannot approve starts, acknowledge process/Pod shutdown, accept manifests,
+They cannot approve starts outside an open human-issued budget envelope, issue or extend an envelope, acknowledge process/Pod shutdown, accept manifests,
 promote scientific validation, adjudicate novelty, or administer hidden evaluation.
 
 CPU Python runs in rootless Podman with no network, no GPU devices, no host sockets,
