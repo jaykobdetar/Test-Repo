@@ -26,8 +26,10 @@ must be explicit and separate from Base formatting.
 Add one fixed recipe and matching collector alongside the calibration command.
 Reuse the existing model-loading and intervention methods, immutable images,
 clean unprivileged environment, bounded runtime, copied artifact verification
-and Pod deletion. The current standalone command intentionally accepts only
-`backend_parity_v1`; do not silently reinterpret calibration output as research.
+and Pod deletion. The standalone command runs only suites registered in
+`probe_core/resources/recipes/index.json` (see
+[supervised public calibration](supervised-public-calibration.md)); do not
+silently reinterpret calibration output as research.
 
 For each prompt retain three conditions: unmodified forward, a no-op hook, and
 zero ablation. Require the no-op logits to match the reference before interpreting

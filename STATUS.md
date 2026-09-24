@@ -8,7 +8,7 @@ links to retained evidence or to the tests that check it. A claim changes here i
 the same commit as the code or evidence that changes it (see
 [CONTRIBUTING.md](CONTRIBUTING.md)).
 
-Last updated: September 22, 2026, on branch `redirect/milestone-1`.
+Last updated: September 24, 2026, on branch `redirect/milestone-1`.
 
 **Summary.** The **supervised** GPU profile has passed exact numerical
 calibration on both Qwen3-1.7B checkpoints. The **managed** worker profile has
@@ -39,9 +39,9 @@ Code and tests exist, but no live or installed run has passed.
 | Ledger-connected supervised public job over SSH (`supervised_runner`, `ssh_job_client`, `deploy/gpu/public-job.py`, additive sidecar installer) | Any live GPU run through the installed ledger; deadline, output, CUDA allocator, cancellation and deletion evidence on RunPod | [tests/test_supervised_runner.py](tests/test_supervised_runner.py), [tests/test_ssh_job_client.py](tests/test_ssh_job_client.py), [tests/test_public_job.py](tests/test_public_job.py), [tests/test_install_supervised.py](tests/test_install_supervised.py) |
 | Worker seccomp correction allowing CUDA's AF_UNIX socket creation while keeping network denials | A published image and a live RunPod run under the managed worker; local driver and BF16 kernel checks only | [tests/test_worker_network_policy.py](tests/test_worker_network_policy.py) |
 | RunPod provider adapter with price ceiling and deletion readback | Exercised by the supervised passes above; unattended use and `stopAfter` host-loss behaviour are unverified | [tests/test_runpod_provider.py](tests/test_runpod_provider.py) |
-| Budget envelopes: human-issued GPU spending limit, automatic approval of disposable exploratory Pods within it, append-only worst-case reservation and settlement, refusal when the remainder cannot cover a Pod, spend in `lab_status` | No live use yet. The standalone supervised command does not yet charge the envelope (Milestone 1d). Tested only on CPU with the simulator provider. | [tests/test_budget.py](tests/test_budget.py) |
+| Budget envelopes: human-issued GPU spending limit, automatic approval of disposable exploratory Pods within it, append-only worst-case reservation and settlement, refusal when the remainder cannot cover a Pod, spend in `lab_status` | No live use yet. The standalone supervised command charges recipe runs to an envelope in an operator-owned ledger (next row). Tested only on CPU with the simulator provider. | [tests/test_budget.py](tests/test_budget.py) |
 | Recipes and metrics: frozen multi-step experiments in one loaded model, later steps consuming earlier captures, automatic exact no-op check, `logit_diff`/`log_prob`/`kl_to_baseline`/`top_k_tokens` per prompt, norm-matched random control | No GPU run yet. Tested on the tiny random Qwen3 on CPU, including exact raw-hook/NNsight parity. | [tests/test_recipes.py](tests/test_recipes.py) |
-| Registry of approved suites for the standalone GPU command (`backend_parity_v1` first), with recipe runs charged to an envelope in an operator-owned ledger | No live run. The worker images do not yet contain the recipe code, so running a recipe needs rebuilt images. | [tests/test_recipe_registry.py](tests/test_recipe_registry.py), [tests/test_public_calibration.py](tests/test_public_calibration.py) |
+| Registry of approved suites for the standalone GPU command (`backend_parity_v1` first), with recipe runs charged to an envelope in an operator-owned ledger | No live run. Worker and derived supervised images for both models, containing the recipe code and the registered experiment datasets, were built from `efa0b58` ([digests](docs/first-public-experiment.md#frozen-recipes-approved-2026-09-22)); none has been accepted on a GPU. `deploy/gpu/prepare-public-run.py` prepares a run directory for a registered suite. | [tests/test_recipe_registry.py](tests/test_recipe_registry.py), [tests/test_public_calibration.py](tests/test_public_calibration.py) |
 | Real CPU sandbox in ordinary CI | CI skips the real Podman checks; only the installed gate above counts | [tests/test_sandbox.py](tests/test_sandbox.py), [tests/test_sandbox_service.py](tests/test_sandbox_service.py) |
 
 ## Deferred
@@ -70,8 +70,10 @@ Milestone 0 is complete ([PR #2](https://github.com/jaykobdetar/Test-Repo/pull/2
 - 1b recipes and 1c metrics: implemented and tested on CPU (see the table
   above). The standalone command now runs any registered suite.
 - 1d the [first public experiment](docs/first-public-experiment.md): recipes
-  approved and registered on 2026-09-22 (about $0.25 estimated). Not run yet:
-  worker images containing the recipe code must be rebuilt first.
+  approved and registered on 2026-09-22 (about $0.25 estimated). Images for
+  both models were built from `efa0b58` but not yet accepted on a GPU. Not run
+  yet: each recipe needs an operator-supervised run from the host that holds the
+  provider key, followed by an exploratory report per model in `docs/results/`.
 
 GPU budget: the operator's cumulative authorization is $20, of which about $3
 was spent before envelopes existed (operator report, 2026-09-22).
