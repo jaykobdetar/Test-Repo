@@ -1,0 +1,47 @@
+{
+  "date": "2026-09-30",
+  "scope": "Local consolidation; offline CPU fixtures and mocked providers. No service deployment or paid resources.",
+  "runtime_source_commit": "c8d5bd7aab154224524bdde5505b4f843804e317",
+  "runtime_tree": "ebb1475c8e7509200a886761d14345a774436595",
+  "tests_tree": "e6c9f31335294a8efa89ccfeb6986a8ab4fa3fe1",
+  "python": "3.13.5",
+  "dependency_setup": "uv sync --locked --all-extras --offline; 120 resolved packages",
+  "pytest": {
+    "command": "uv run --locked python -m pytest -q --basetemp=<private-short-tmp>/pytest",
+    "passed": 2327,
+    "skipped": 10,
+    "failed": 0,
+    "errors": 0,
+    "duration_seconds": 153.16,
+    "skip_reason": "Real rootless Podman acceptance not configured; PROBE_SANDBOX_REQUIRED and PROBE_SANDBOX_IMAGE unset.",
+    "environment": "Clean environment without credentials; HF_HUB_OFFLINE=1, HF_HUB_DISABLE_TELEMETRY=1, UV_OFFLINE=1; local socket support. Numerical fixtures select CPU.",
+    "log_sha256": "b3c09a449615ebf46f7795f5fda701bec0d32625cd978bf3267ef41ffaf1d2d1"
+  },
+  "format": {
+    "command": "uv run --locked ruff format --check .",
+    "passed": true,
+    "files_already_formatted": 129,
+    "log_sha256": "f4d457398bc028782f539b5ebf8cdff3be54a8797b443d5c17d259f8ffa88d8c"
+  },
+  "advisory_lint": {
+    "command": "ruff check --output-format=json .",
+    "existing_findings": 687,
+    "new_python_changes": false,
+    "required_ci_gate": false
+  },
+  "initial_environment_attempt": {
+    "passed": 1953,
+    "failed": 166,
+    "errors": 208,
+    "skipped": 10,
+    "duration_seconds": 147.24,
+    "cause": "Restricted socket syscalls, long temporary socket paths, unsuitable temporary parent permissions, and empty CUDA selector in a mocked launcher fixture. Fixed the validation environment, without changing tests.",
+    "log_sha256": "996fdeaf91930519ffd047096927c7b6d2ce9eeab0992c342c6d80a3dc539d47"
+  },
+  "not_run": [
+    "live GPU experiments",
+    "real rootless Podman acceptance",
+    "installed-service acceptance",
+    "container builds or image publication"
+  ]
+}

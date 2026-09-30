@@ -2,13 +2,23 @@
 
 [Project overview](README.md) · [Redirect plan](REDIRECT-PLAN.md) · [Contributing](CONTRIBUTING.md) · [History](docs/history/README.md)
 
-This is the only place that records what the lab can do today. Guides describe
-how things work; they link here instead of restating status. Every claim below
-links to retained evidence or to the tests that check it. A claim changes here in
-the same commit as the code or evidence that changes it (see
-[CONTRIBUTING.md](CONTRIBUTING.md)).
+This is the single status record for the repository's implemented capabilities
+and retained evidence. Guides describe how things work; they link here instead
+of restating status. Evidence from an earlier installation does not verify a
+current deployment. A claim changes here in the same commit as the code or
+evidence that changes it (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
-Last updated: September 24, 2026, on branch `redirect/milestone-1`.
+Last updated: September 30, 2026, on local, unpublished branch
+`consolidate/project-2026-09-30` in
+[jaykobdetar/Test-Repo](https://github.com/jaykobdetar/Test-Repo).
+
+**Current work: local source consolidation.** The [consolidation record](docs/branch-consolidation.md)
+records branch ancestry, included and excluded work, and validation for this branch.
+Probe-MCP services were retired. No installed service state is verified by this
+consolidation, and no deployment, service restart, GPU run or new spending is
+part of it. Earlier host receipts and budget approvals below are historical
+evidence, not current authorization. The [previous status snapshot](docs/history/2026-09-30-pre-consolidation-status.md)
+preserves the earlier wording.
 
 **Summary.** The **supervised** GPU profile has passed exact numerical
 calibration on both Qwen3-1.7B checkpoints. The **managed** worker profile has
@@ -17,18 +27,22 @@ interpretability results and no validated scientific findings.
 
 ## Works and evidenced
 
+The dated live and installed checks below describe completed historical runs.
+Local consolidation checks are recorded separately in the
+[consolidation record](docs/branch-consolidation.md).
+
 | Capability | Scope of the claim | Evidence |
 | --- | --- | --- |
 | Supervised GPU numerical calibration, Qwen3-1.7B-Base | `backend_parity_v1`, 2026-09-20, RTX 4090 EU-RO-1: 29/29 checks, 25/25 exact comparisons with zero maximum error, 9 retained tensors, verified collection, confirmed Pod deletion. Engineering check on two synthetic prompts, not a scientific result. | [Check results](docs/evidence/2026-09-20-base-summary.json), [manifest](docs/evidence/2026-09-20-base-manifest.json), [calibration results](docs/calibration-results.md) |
 | Supervised GPU numerical calibration, Qwen3-1.7B (posttrained) | Same suite and scope, thinking mode disabled with a pinned chat template. | [Check results](docs/evidence/2026-09-20-posttrained-summary.json), [manifest](docs/evidence/2026-09-20-posttrained-manifest.json), [calibration results](docs/calibration-results.md) |
 | Independent backup of both calibration bundles | Google Drive upload, download, hash verification and local restore. | [Backup receipt](docs/evidence/2026-09-20-backup-verification.json) |
-| Installed Ubuntu controller | Source `4b19ac6`, wheel `a43e336773fe21155a890aa4a545a26ab70d71a6a7d01bf5e0b0619ac86434c3`; 34 application files matched the package. Includes the stop-cause audit (`6f94e76`) and bounded status retry (`4fe9d97`). | Operator-retained receipts named in [validation status (2026-09-20)](docs/history/2026-09-20-validation-status.md); checked by [tests/test_controller_stop_cause.py](tests/test_controller_stop_cause.py), [tests/test_runpod_status_retry.py](tests/test_runpod_status_retry.py) |
-| Installed CPU sandbox and account boundaries | 16/16 containment and cleanup checks and 26/26 identity checks under the installed service accounts. The earlier intermittent timeout-classification failure is retained, not claimed fixed. | Operator-retained receipts named in [validation status (2026-09-20)](docs/history/2026-09-20-validation-status.md); acceptance code in [tests/test_sandbox_acceptance.py](tests/test_sandbox_acceptance.py), [tests/test_installed_identities.py](tests/test_installed_identities.py) |
-| Controller state backup and restore | Drive upload, full readback and offline restore of controller and provider history. | Same retained receipts; [tests/test_backup.py](tests/test_backup.py), [tests/test_backup_transport.py](tests/test_backup_transport.py) |
+| Historical Ubuntu controller installation | Source `4b19ac6`, wheel `a43e336773fe21155a890aa4a545a26ab70d71a6a7d01bf5e0b0619ac86434c3`; 34 application files matched the package. Includes the stop-cause audit (`6f94e76`) and bounded status retry (`4fe9d97`). | Operator-retained receipts named in [validation status (2026-09-20)](docs/history/2026-09-20-validation-status.md); checked by [tests/test_controller_stop_cause.py](tests/test_controller_stop_cause.py), [tests/test_runpod_status_retry.py](tests/test_runpod_status_retry.py) |
+| Historical CPU sandbox and account-boundary checks | 16/16 containment and cleanup checks and 26/26 identity checks under the installed service accounts. The earlier intermittent timeout-classification failure is retained, not claimed fixed. | Operator-retained receipts named in [validation status (2026-09-20)](docs/history/2026-09-20-validation-status.md); acceptance code in [tests/test_sandbox_acceptance.py](tests/test_sandbox_acceptance.py), [tests/test_installed_identities.py](tests/test_installed_identities.py) |
+| Historical controller state backup and restore | Drive upload, full readback and offline restore of controller and provider history. | Same retained receipts; [tests/test_backup.py](tests/test_backup.py), [tests/test_backup_transport.py](tests/test_backup_transport.py) |
 | Local control plane on CPU | Ledger, append-only audit chain, approvals, leases, simulator provider with price/idle gates, independent watchdog. | [tests/test_ledger.py](tests/test_ledger.py), [tests/test_audit.py](tests/test_audit.py), [tests/test_controller.py](tests/test_controller.py), [tests/test_startup_watchdog.py](tests/test_startup_watchdog.py) |
 | Fixed operations on a tiny random Qwen3 (CPU) | Capture, patch, ablate, steer, fit probe, bounded generation, weight inspection; HF/raw-hook/NNsight parity. | [tests/test_worker.py](tests/test_worker.py), [tests/test_backend_parity.py](tests/test_backend_parity.py) |
 | MCP research interface (CPU) | Real stdio MCP subprocess, peer-identity checks, restricted methods, private-job denial. | [tests/test_mcp.py](tests/test_mcp.py), [tests/test_research_api.py](tests/test_research_api.py) |
-| Test suite | The full suite passes under CI at runtime source `d41cb4c` (2,157 passed, 10 environment-specific skips). Skips are not containment evidence. | [CI run](https://github.com/jaykobdetar/auto-interpretability-lab/actions/runs/35544276039) |
+| Historical test suite | The earlier status records a full CI pass at runtime source `d41cb4c` (2,157 passed, 10 environment-specific skips). This is not the validation result for the consolidation branch. Skips are not containment evidence. | [Preserved status and original CI reference](docs/history/2026-09-30-pre-consolidation-status.md) |
 
 ## Implemented but unevidenced
 
@@ -42,7 +56,7 @@ Code and tests exist, but no live or installed run has passed.
 | Budget envelopes: human-issued GPU spending limit, automatic approval of disposable exploratory Pods within it, append-only worst-case reservation and settlement, refusal when the remainder cannot cover a Pod, spend in `lab_status` | No live use yet. The standalone supervised command charges recipe runs to an envelope in an operator-owned ledger (next row). Tested only on CPU with the simulator provider. | [tests/test_budget.py](tests/test_budget.py) |
 | Recipes and metrics: frozen multi-step experiments in one loaded model, later steps consuming earlier captures, automatic exact no-op check, `logit_diff`/`log_prob`/`kl_to_baseline`/`top_k_tokens` per prompt, norm-matched random control | No GPU run yet. Tested on the tiny random Qwen3 on CPU, including exact raw-hook/NNsight parity. | [tests/test_recipes.py](tests/test_recipes.py) |
 | Registry of approved suites for the standalone GPU command (`backend_parity_v1` first), with recipe runs charged to an envelope in an operator-owned ledger | No live run. Worker and derived supervised images for both models, containing the recipe code and the registered experiment datasets, were built from `efa0b58` ([digests](docs/first-public-experiment.md#frozen-recipes-approved-2026-09-22)); none has been accepted on a GPU. `deploy/gpu/prepare-public-run.py` prepares a run directory for a registered suite. | [tests/test_recipe_registry.py](tests/test_recipe_registry.py), [tests/test_public_calibration.py](tests/test_public_calibration.py) |
-| Real CPU sandbox in ordinary CI | CI skips the real Podman checks; only the installed gate above counts | [tests/test_sandbox.py](tests/test_sandbox.py), [tests/test_sandbox_service.py](tests/test_sandbox_service.py) |
+| Real CPU sandbox in ordinary CI | CI skips the real Podman checks; the historical installed gate above establishes only its dated scope | [tests/test_sandbox.py](tests/test_sandbox.py), [tests/test_sandbox_service.py](tests/test_sandbox_service.py) |
 
 ## Deferred
 
@@ -58,25 +72,32 @@ in [REDIRECT-PLAN.md](REDIRECT-PLAN.md) requires it.
 
 ## Current milestone
 
-**Milestone 1: recipes, metrics and budget envelopes**
-([plan](REDIRECT-PLAN.md#milestone-1--recipes-metrics-and-budget-envelopes-run-the-first-experiment)).
-Milestone 0 is complete ([PR #2](https://github.com/jaykobdetar/Test-Repo/pull/2)).
+The current task is local branch consolidation. The last recorded research
+milestone remains **Milestone 1: recipes, metrics and budget envelopes**
+([plan](REDIRECT-PLAN.md#milestone-1--recipes-metrics-and-budget-envelopes-run-the-first-experiment));
+this task does not resume its live work. Milestone 0 was recorded complete
+([PR #2](https://github.com/jaykobdetar/Test-Repo/pull/2)).
 
-- 1a, budget envelopes: implemented and tested on the simulator. The operator
-  approved the design on 2026-09-22, including automatic approval within an
-  envelope and a first envelope of $3 GPU, 24 hours, $0.80/hour, 900 s per Pod,
-  exploratory stage and both pinned Qwen3-1.7B checkpoints. It has not been
-  issued on the installed controller.
+- 1a, budget envelopes: implemented and tested on the simulator. The historical
+  2026-09-22 record says the operator approved the design, including automatic
+  approval within an envelope and a first envelope of $3 GPU, 24 hours,
+  $0.80/hour, 900 s per Pod, exploratory stage and both pinned Qwen3-1.7B
+  checkpoints. That record says it had not been issued on the installed
+  controller. No active envelope is verified or authorized by this consolidation.
 - 1b recipes and 1c metrics: implemented and tested on CPU (see the table
   above). The standalone command now runs any registered suite.
 - 1d the [first public experiment](docs/first-public-experiment.md): recipes
   approved and registered on 2026-09-22 (about $0.25 estimated). Images for
-  both models were built from `efa0b58` but not yet accepted on a GPU. Not run
-  yet: each recipe needs an operator-supervised run from the host that holds the
-  provider key, followed by an exploratory report per model in `docs/results/`.
+  both models were built from `efa0b58` but not accepted on a GPU. No experiment
+  report is retained. The documented future acceptance requires an
+  operator-supervised run and an exploratory report per model in `docs/results/`;
+  those runs are outside this consolidation.
 
-GPU budget: the operator's cumulative authorization is $20, of which about $3
-was spent before envelopes existed (operator report, 2026-09-22).
+Historical GPU budget record: the operator reported $20 cumulative authorization
+and about $3 spent before envelopes existed on 2026-09-22. This is neither a
+current balance nor an authorization to spend or recreate retired services.
+See the [preserved status](docs/history/2026-09-30-pre-consolidation-status.md)
+for the original record.
 
 Not yet started: SAE features (M2), an automated explanation loop (M3), a
 private held-out evaluator, Explorer/Skeptic/Replicator roles and blind

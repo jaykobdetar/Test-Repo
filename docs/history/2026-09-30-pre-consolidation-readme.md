@@ -1,3 +1,10 @@
+> Historical snapshot of `README.md` from `redirect/milestone-1` at
+> `c8d5bd7aab154224524bdde5505b4f843804e317`, preserved before local
+> consolidation on 2026-09-30. Only relative link paths and this provenance
+> note differ from the source. Installation claims and authorizations below
+> describe that earlier record, not current service state or permission. See
+> [current status](../../STATUS.md) and [consolidation record](../branch-consolidation.md).
+
 # Auto Interpretability Lab
 
 Auto Interpretability Lab is experimental infrastructure for agent-assisted
@@ -7,14 +14,12 @@ paid compute behind a separate approval process.
 
 The intended research subjects are **Qwen3-1.7B-Base** and **Qwen3-1.7B**.
 The project is not yet an automated interpretability lab; the
-[redirect plan](REDIRECT-PLAN.md) sets out how it becomes one.
+[redirect plan](../../REDIRECT-PLAN.md) sets out how it becomes one.
 
-> Source repository: [jaykobdetar/Test-Repo](https://github.com/jaykobdetar/Test-Repo).
-> This worktree consolidates the project on local branch
-> `consolidate/project-2026-09-30`, which has not been published. See the
-> [branch consolidation record](docs/branch-consolidation.md) for included history
-> and validation. Probe-MCP services were retired; this source consolidation does
-> not resume deployment or authorize paid compute.
+> This page describes the deployment work in
+> [the current draft pull request](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1).
+> The `main` branch contains the earlier local foundation. Deployment acceptance
+> is still in progress; use the documentation from the same branch as your code.
 
 ## What the software does
 
@@ -35,13 +40,13 @@ The project is not yet an automated interpretability lab; the
   credentials; the research agent and model worker do not receive those credentials.
 
 These are implemented engineering capabilities. Their validation scope is described
-below and in the [validation guide](docs/validation.md).
+below and in the [validation guide](../../docs/validation.md).
 
 ## Current status
 
 - The supervised GPU profile has passed exact numerical calibration on both models; the managed-worker profile has not passed and is deferred.
 - No interpretability results or validated scientific findings exist yet.
-- [STATUS.md](STATUS.md) is the single source of truth for what works, with evidence; the current milestone is listed there.
+- [STATUS.md](../../STATUS.md) is the single source of truth for what works, with evidence; the current milestone is listed there.
 
 ## How the pieces fit
 
@@ -81,24 +86,14 @@ ledger on local controller storage and retain independent backups.
 
 Use Linux, Git, [uv](https://docs.astral.sh/uv/) and Python 3.13. The worker
 extras include PyTorch and require several gigabytes of disk. See the
-[core guide](docs/core-guide.md) for SQLite requirements and the
-[worker guide](docs/worker-dispatcher.md#runtime-enforcement-and-acceptance-gate)
+[core guide](../../docs/core-guide.md) for SQLite requirements and the
+[worker guide](../../docs/worker-dispatcher.md#runtime-enforcement-and-acceptance-gate)
 for process and cgroup requirements.
 
-The source repository can be cloned with:
-
 ```sh
-git clone https://github.com/jaykobdetar/Test-Repo.git
-cd Test-Repo
-```
-
-A fresh clone selects the remote default branch. The consolidation branch is
-currently available only in the local integration worktree; do not expect
-`origin/consolidate/project-2026-09-30` until it is published. In that existing
-worktree, select it before installing and testing:
-
-```sh
-git switch consolidate/project-2026-09-30
+git clone https://github.com/jaykobdetar/auto-interpretability-lab.git
+cd auto-interpretability-lab
+git switch --track origin/feat/live-deployment
 uv python install 3.13
 uv sync --locked --all-extras
 uv run --locked python -m pytest -q
@@ -109,7 +104,7 @@ a small, locally generated model; they need no cloud credentials or downloaded
 canonical checkpoint. Some tests bind local sockets. Real sandbox tests skip
 without their required environment, so a default test run does not establish
 containment or live GPU readiness. Historical test totals and their exact scope
-are recorded in the [validation guide](docs/validation.md).
+are recorded in the [validation guide](../../docs/validation.md).
 
 To require the real sandbox checks after building its pinned image:
 
@@ -120,39 +115,37 @@ uv run --locked python -m pytest tests/test_sandbox.py tests/test_sandbox_servic
 ```
 
 Replace the image placeholder before running. The
-[sandbox guide](deploy/sandbox/README.md) covers image preparation, user mappings,
+[sandbox guide](../../deploy/sandbox/README.md) covers image preparation, user mappings,
 cgroups and service requirements. Required checks fail instead of skipping when
 `PROBE_SANDBOX_REQUIRED=1`.
 
-The repository name is `Test-Repo`; the product name is Auto Interpretability Lab.
-Existing executable, package, service and image identifiers retain their original
-names for compatibility:
+The repository name is `auto-interpretability-lab`. Existing executable, package,
+service and deployed image identifiers retain their original names for compatibility:
 `probe-mcp`, `probe-core`, `probe_core` and `probe-*`. The branding change does not
 rename runtime components.
 
 ## Deployment and documentation
 
 Installing the package does not configure a lab or approve paid compute. Start
-with [STATUS.md](STATUS.md), then follow the relevant component guide:
+with [STATUS.md](../../STATUS.md), then follow the relevant component guide:
 
 | Need | Guide |
 | --- | --- |
-| Learn what is evidenced and the current work scope | [Status](STATUS.md) |
-| Review branch ancestry, consolidation decisions and local checks | [Branch consolidation](docs/branch-consolidation.md) |
-| Understand the roadmap and its invariants | [Redirect plan](REDIRECT-PLAN.md) |
-| Inspect the two passing numerical calibrations | [Calibration results](docs/calibration-results.md) |
-| Run the smaller fixed public GPU calibration | [Supervised public calibration](docs/supervised-public-calibration.md) |
-| Prepare the next exploratory milestone | [First public experiment](docs/first-public-experiment.md) |
-| Understand the managed-service deployment requirements (deferred) | [Managed-service requirements](docs/live-deployment-plan.md) |
-| Understand the implemented scope and boundaries | [Implementation overview](IMPLEMENTATION.md) |
-| Set up the Ubuntu accounts and services | [Host installation](docs/host-installation.md) |
-| Understand compute requests, approvals and shutdown | [Controller services](docs/controller-services.md) |
-| Prepare and check GPU workers | [GPU deployment](docs/gpu-deployment.md) and [RunPod provider](docs/runpod-provider.md) |
-| Understand dispatch, execution and returned artifacts | [Worker and dispatcher](docs/worker-dispatcher.md) |
-| Configure independent recoverable backups | [Backup and restore](docs/backup-restore.md) |
-| Use the queue, manifests and audit APIs | [Core guide](docs/core-guide.md) |
-| Interpret test and deployment evidence | [Validation](docs/validation.md) |
-| Read superseded plans and attempt logs | [History](docs/history/README.md) |
+| Learn what works today and the current milestone | [Status](../../STATUS.md) |
+| Understand the roadmap and its invariants | [Redirect plan](../../REDIRECT-PLAN.md) |
+| Inspect the two passing numerical calibrations | [Calibration results](../../docs/calibration-results.md) |
+| Run the smaller fixed public GPU calibration | [Supervised public calibration](../../docs/supervised-public-calibration.md) |
+| Prepare the next exploratory milestone | [First public experiment](../../docs/first-public-experiment.md) |
+| Understand the managed-service deployment requirements (deferred) | [Managed-service requirements](../../docs/live-deployment-plan.md) |
+| Understand the implemented scope and boundaries | [Implementation overview](../../IMPLEMENTATION.md) |
+| Set up the Ubuntu accounts and services | [Host installation](../../docs/host-installation.md) |
+| Understand compute requests, approvals and shutdown | [Controller services](../../docs/controller-services.md) |
+| Prepare and check GPU workers | [GPU deployment](../../docs/gpu-deployment.md) and [RunPod provider](../../docs/runpod-provider.md) |
+| Understand dispatch, execution and returned artifacts | [Worker and dispatcher](../../docs/worker-dispatcher.md) |
+| Configure independent recoverable backups | [Backup and restore](../../docs/backup-restore.md) |
+| Use the queue, manifests and audit APIs | [Core guide](../../docs/core-guide.md) |
+| Interpret test and deployment evidence | [Validation](../../docs/validation.md) |
+| Read superseded plans and attempt logs | [History](../../docs/history/README.md) |
 
 The controller uses the `controller` and `mcp` extras; it does not need the GPU
 worker's PyTorch installation. The host installer expects a reviewed release
@@ -168,16 +161,16 @@ contain no hidden evaluation dataset.
 
 ## Roadmap and contributing
 
-Work follows the [redirect plan](REDIRECT-PLAN.md): each milestone must end with
+Work follows the [redirect plan](../../REDIRECT-PLAN.md): each milestone must end with
 a result an interpretability researcher would recognise, and builds only the
 infrastructure that result needs. Its invariants on credentials, budgets,
 held-out data and the audit trail are never weakened.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing code. Changes to
-`probe_core/` or `deploy/` update [STATUS.md](STATUS.md) and every affected
+Read [CONTRIBUTING.md](../../CONTRIBUTING.md) before changing code. Changes to
+`probe_core/` or `deploy/` update [STATUS.md](../../STATUS.md) and every affected
 guide in the same commit, and superseded text moves to
-[docs/history/](docs/history/README.md).
+[docs/history/](../../docs/history/README.md).
 
 ## License
 
-[MIT](LICENSE). Model weights and third-party dependencies retain their own licenses.
+[MIT](../../LICENSE). Model weights and third-party dependencies retain their own licenses.
