@@ -1,7 +1,8 @@
 """Bounded, peer-authenticated Unix RPC between local OS identities.
 
-This is a private service transport, not MCP. MCP runs under the untrusted
-research identity and can reach only the explicitly permitted research socket.
+This is a private service transport, not MCP. A separate agent identity can
+reach only the explicitly permitted service socket. Same-user development is
+an explicit mode; it does not provide isolation between agents sharing a UID.
 """
 
 from __future__ import annotations
@@ -237,8 +238,15 @@ class UnixRPCClient:
                 raise RPCError("service connection failed") from None
             if len(raw) > MAX_RESPONSE or not raw.endswith(b"\n"):
                 raise RPCError("invalid service response")
-            result = decode(raw)
-            if type(result) is not dict or type(result.get("ok")) is not bool:
+            try:
+                result = decode(raw)
+            except (ValueError, UnicodeError):
+                raise RPCError("invalid service response") from None
+            if (
+                type(result) is not dict
+                or type(result.get("ok")) is not bool
+                or (result["ok"] and set(result) != {"ok", "result"})
+            ):
                 raise RPCError("invalid service response")
             if not result["ok"]:
                 # Do not propagate arbitrary peer error strings into model context.

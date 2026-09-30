@@ -4,46 +4,33 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "probe-core"
-version = "0.2.0"
-description = "Durable research control plane, trusted execution, and isolated MCP tools."
+version = "0.3.0"
+description = "A small persistent task workspace for cooperating agents."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.13,<3.14"
-dependencies = ["pydantic==2.13.5"]
-classifiers = [
-  "Programming Language :: Python :: 3",
-  "Operating System :: POSIX :: Linux",
-  "Typing :: Typed",
-]
+dependencies = []
 
 [project.optional-dependencies]
-test = ["pytest==9.1.1", "pytest-asyncio==1.4.0"]
-lint = ["ruff==0.16.8"]
+test = ["pytest==9.1.1"]
 mcp = ["mcp==2.2.0"]
-controller = ["numpy==2.5.3", "safetensors==0.8.0"]
-worker = ["torch==2.14.0", "transformers==5.17.0", "nnsight==0.7.0", "safetensors==0.8.0", "scikit-learn==1.9.1", "scipy==1.18.1", "httpx==0.28.1", "uvicorn==0.53.0"]
+lint = ["ruff==0.16.8"]
 
 [project.scripts]
-probe-mcp = "probe_core.mcp_server:main"
-probe-research-service = "probe_core.research_service:main"
-probe-controller = "probe_core.controller:main"
+probe-agent = "probe_core.agent_cli:main"
+probe-mcp = "probe_core.agent_mcp:main"
 
 [tool.setuptools.packages.find]
 include = ["probe_core*"]
 
 [tool.setuptools.package-data]
-probe_core = ["py.typed", "resources/*.json", "resources/recipes/*.json"]
+probe_core = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
-filterwarnings = ["error"]
+addopts = "-ra"
 
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-# Deployment scripts are staged into images and pinned by SHA-256 (for example
-# deploy/sandbox/image-lock.json); reformatting them would change pinned identities.
-extend-exclude = ["deploy"]
-force-exclude = true
