@@ -1,6 +1,6 @@
 # Project status
 
-Updated September 30, 2026, on local, unpublished branch
+Updated October 1, 2026, on published branch
 `consolidate/project-2026-09-30` in
 [jaykobdetar/Test-Repo](https://github.com/jaykobdetar/Test-Repo).
 
@@ -23,4 +23,9 @@ scope, removed surface and checks run for this branch. Historical test totals,
 GPU results, host installations and budget approvals do not validate or authorize
 this new project. Earlier source and evidence remain in [Git history](docs/history/README.md).
 
-No deployment or remote publication is part of this local change.
+Two optional repository examples add resumable local command receipts and a
+research study template. They use the existing claims and results without
+changing the core package or adding CI jobs or dependencies. The runner retains
+completed jobs and partial attempts; unknown exits require manual recovery.
+The reduced suite now has 18 tests, including three offline execution/recovery
+tests. No deployment or model experiment is part of this change.
