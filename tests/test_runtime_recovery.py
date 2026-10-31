@@ -25,11 +25,18 @@ def failed_install(installed):
     verifier.apply_unit_patches(units, filesystem_root=fs, owner=os.getuid())
     sandbox = fs / "var/lib/probe-sandbox"
     (sandbox / "acceptance").mkdir(mode=0o700)
-    report = {"schema_version": 1, "status": "failed", "image": "sha256:" + "a" * 64,
-              "service_uid": os.getuid(), "stage": "cpu_and_isolation",
-              "checks": {"immutable_image_present": True}, "error_type": "AcceptanceError",
-              "seccomp_sha256": "sha256:" + hashlib.sha256((root / "seccomp.json").read_bytes()).hexdigest(),
-              "started_at": "2026-09-19T18:06:52.835057+00:00", "finished_at": "2026-09-19T18:07:01.762376+00:00"}
+    report = {
+        "schema_version": 1,
+        "status": "failed",
+        "image": "sha256:" + "a" * 64,
+        "service_uid": os.getuid(),
+        "stage": "cpu_and_isolation",
+        "checks": {"immutable_image_present": True},
+        "error_type": "AcceptanceError",
+        "seccomp_sha256": "sha256:" + hashlib.sha256((root / "seccomp.json").read_bytes()).hexdigest(),
+        "started_at": "2026-09-19T18:06:52.835057+00:00",
+        "finished_at": "2026-09-19T18:07:01.762376+00:00",
+    }
     write(sandbox / "acceptance-report.json", json.dumps(report))
     return installed
 
@@ -38,7 +45,9 @@ def failed_acceptance(command, **kwargs):
     result = inactive(command)
     if command[1] == "show":
         if command[2] == "probe-sandbox-acceptance.service":
-            result.stdout = result.stdout.replace(b"ActiveState=inactive\nSubState=dead", b"ActiveState=failed\nSubState=failed")
+            result.stdout = result.stdout.replace(
+                b"ActiveState=inactive\nSubState=dead", b"ActiveState=failed\nSubState=failed"
+            )
             result.stdout += b"ExecMainStatus=1\nResult=exit-code\n"
         else:
             result.stdout += b"ExecMainStatus=0\nResult=success\n"
@@ -48,9 +57,18 @@ def failed_acceptance(command, **kwargs):
 def validate(fixture):
     root, fs, digest, users, groups, units = fixture
     verifier.verify_runtime(root, digest, owner=os.getuid())
-    verifier.verify_units(root, units, filesystem_root=fs, owner=os.getuid(), run=failed_acceptance,
-                          repaired_groups=True, failed_acceptance=True)
-    verifier.verify_state(root, users, groups, "human", filesystem_root=fs, owner=os.getuid(), allow_failed_acceptance=True)
+    verifier.verify_units(
+        root,
+        units,
+        filesystem_root=fs,
+        owner=os.getuid(),
+        run=failed_acceptance,
+        repaired_groups=True,
+        failed_acceptance=True,
+    )
+    verifier.verify_state(
+        root, users, groups, "human", filesystem_root=fs, owner=os.getuid(), allow_failed_acceptance=True
+    )
 
 
 def test_only_known_failed_state_is_allowed_by_explicit_opt_in(failed_install):
@@ -64,15 +82,36 @@ def test_only_known_failed_state_is_allowed_by_explicit_opt_in(failed_install):
     assert before == {p: p.read_bytes() for p in fs.rglob("*") if p.is_file()}
 
 
-@pytest.mark.parametrize("change", ["passed", "later_stage", "runs", "other_image", "other_uid", "other_profile", "checks", "time", "workspace", "job", "unit"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "passed",
+        "later_stage",
+        "runs",
+        "other_image",
+        "other_uid",
+        "other_profile",
+        "checks",
+        "time",
+        "workspace",
+        "job",
+        "unit",
+    ],
+)
 def test_recovery_refuses_any_other_failure_or_started_work(failed_install, change):
     root, fs, *_ = failed_install
     path = fs / "var/lib/probe-sandbox/acceptance-report.json"
     report = json.loads(path.read_bytes())
-    changes = {"passed": ("status", "passed"), "later_stage": ("stage", "memory"), "runs": ("runs", {}),
-               "other_image": ("image", "sha256:" + "b" * 64), "other_uid": ("service_uid", os.getuid() + 1),
-               "other_profile": ("seccomp_sha256", "sha256:" + "b" * 64), "checks": ("checks", {}),
-               "time": ("finished_at", "2026-09-18T00:00:00+00:00")}
+    changes = {
+        "passed": ("status", "passed"),
+        "later_stage": ("stage", "memory"),
+        "runs": ("runs", {}),
+        "other_image": ("image", "sha256:" + "b" * 64),
+        "other_uid": ("service_uid", os.getuid() + 1),
+        "other_profile": ("seccomp_sha256", "sha256:" + "b" * 64),
+        "checks": ("checks", {}),
+        "time": ("finished_at", "2026-09-18T00:00:00+00:00"),
+    }
     if change in changes:
         key, value = changes[change]
         report[key] = value
@@ -81,6 +120,7 @@ def test_recovery_refuses_any_other_failure_or_started_work(failed_install, chan
         write(path.parent / "acceptance/uncollected-output", "must preserve")
     elif change == "job":
         import sqlite3
+
         with closing(sqlite3.connect(fs / "var/lib/probe-core/research.sqlite")) as connection:
             connection.execute("INSERT INTO jobs VALUES ('must preserve')")
             connection.commit()
@@ -101,9 +141,11 @@ def test_failed_service_state_is_exact(failed_install, change):
         result = failed_acceptance(command)
         if command[1] == "show":
             if command[2] == "probe-sandbox-acceptance.service":
-                replacements = {"inactive_gate": (b"ActiveState=failed\nSubState=failed", b"ActiveState=inactive\nSubState=dead"),
-                                "different_exit": (b"ExecMainStatus=1", b"ExecMainStatus=2"),
-                                "different_result": (b"Result=exit-code", b"Result=signal")}
+                replacements = {
+                    "inactive_gate": (b"ActiveState=failed\nSubState=failed", b"ActiveState=inactive\nSubState=dead"),
+                    "different_exit": (b"ExecMainStatus=1", b"ExecMainStatus=2"),
+                    "different_result": (b"Result=exit-code", b"Result=signal"),
+                }
                 if change in replacements:
                     result.stdout = result.stdout.replace(*replacements[change])
             elif change == "active_other":
@@ -113,8 +155,9 @@ def test_failed_service_state_is_exact(failed_install, change):
         return result
 
     with pytest.raises(verifier.RecoveryError):
-        verifier.verify_units(root, units, filesystem_root=fs, owner=os.getuid(), run=reply,
-                              repaired_groups=True, failed_acceptance=True)
+        verifier.verify_units(
+            root, units, filesystem_root=fs, owner=os.getuid(), run=reply, repaired_groups=True, failed_acceptance=True
+        )
 
 
 def test_pinned_verifier_executes_checked_bytes_and_refuses_bad_hash_or_link(tmp_path):
@@ -174,7 +217,9 @@ def test_runtime_configuration_location_fails_closed(tmp_path, unsafe):
         recovery.verify_config_location(home, os.getuid(), owner=os.getuid())
 
 
-@pytest.mark.parametrize("path,code,passes", [(b"/usr/bin/crun\n", 0, True), (b"/usr/bin/runc\n", 0, False), (b"/usr/bin/crun\n", 1, False)])
+@pytest.mark.parametrize(
+    "path,code,passes", [(b"/usr/bin/crun\n", 0, True), (b"/usr/bin/runc\n", 0, False), (b"/usr/bin/crun\n", 1, False)]
+)
 def test_actual_runtime_selection_uses_trusted_identity_store_and_bus(path, code, passes):
     def run(command, **kwargs):
         assert command[:7] == ["/usr/sbin/runuser", "-u", "probe-trusted", "-g", "probe-trusted", "--", "env"]
@@ -184,6 +229,7 @@ def test_actual_runtime_selection_uses_trusted_identity_store_and_bus(path, code
         assert kwargs["env"] == recovery.ENV and kwargs["timeout"] == 30
         assert kwargs["cwd"] == recovery.ROOT and kwargs["stdin"] == subprocess.DEVNULL
         return subprocess.CompletedProcess(command, code, path, b"")
+
     if passes:
         recovery.verify_selected_runtime(994, run=run)
     else:
@@ -203,8 +249,7 @@ def test_preflights_start_outside_an_inaccessible_inherited_directory(tmp_path, 
     monkeypatch.setattr(recovery, "ROOT", safe)
     image = "sha256:" + "a" * 64
     expected = image if operation == "image" else "/usr/bin/crun"
-    child = ["/usr/bin/python3", "-I", "-c",
-             "import os; os.chdir(os.getcwd()); print(" + repr(expected) + ")"]
+    child = ["/usr/bin/python3", "-I", "-c", "import os; os.chdir(os.getcwd()); print(" + repr(expected) + ")"]
     previous = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.chdir(inherited)
@@ -234,8 +279,15 @@ def test_preflight_failure_retains_bounded_real_process_diagnostics(tmp_path, mo
     monkeypatch.setattr(recovery, "ROOT", tmp_path)
 
     def run(command, **kwargs):
-        return subprocess.run(["/usr/bin/python3", "-I", "-c",
-            "import os; os.write(2, b'x' * 8000 + b' permission denied in private cwd'); raise SystemExit(125)"], **kwargs)
+        return subprocess.run(
+            [
+                "/usr/bin/python3",
+                "-I",
+                "-c",
+                "import os; os.write(2, b'x' * 8000 + b' permission denied in private cwd'); raise SystemExit(125)",
+            ],
+            **kwargs,
+        )
 
     with pytest.raises(RuntimeError) as failure:
         if operation == "image":
@@ -248,11 +300,13 @@ def test_preflight_failure_retains_bounded_real_process_diagnostics(tmp_path, mo
     assert len(str(failure.value)) < 4600
 
 
-@pytest.mark.parametrize("actual,accepted", [("a" * 64, True), ("sha256:" + "a" * 64, True),
-                                           ("sha256:" + "b" * 64, False)])
+@pytest.mark.parametrize(
+    "actual,accepted", [("a" * 64, True), ("sha256:" + "a" * 64, True), ("sha256:" + "b" * 64, False)]
+)
 def test_image_identity_comparison_is_separate_from_command_failure(actual, accepted):
     def run(command, **kwargs):
         return subprocess.CompletedProcess(command, 0, (actual + "\n").encode(), b"")
+
     if accepted:
         recovery.verify_image(994, "sha256:" + "a" * 64, run=run)
     else:
@@ -265,7 +319,11 @@ def test_continuation_preserves_gate_order_and_never_reimports(installed, tmp_pa
     root, *_ = installed
     script = recovery.continuation((root / "deploy/install-controller.sh").read_bytes(), 994)
     assert "podman --remote=false load" not in script and "apt-get" not in script and "usermod" not in script
-    assert script.index("systemctl start probe-sandbox-acceptance.service") < script.index("data['sandbox_image']") < script.index("systemctl enable --now")
+    assert (
+        script.index("systemctl start probe-sandbox-acceptance.service")
+        < script.index("data['sandbox_image']")
+        < script.index("systemctl enable --now")
+    )
     assert "PROBE_RECOVERY_SINCE=$(/usr/bin/date +%s)" in script
     assert '--since "@$PROBE_RECOVERY_SINCE" "_UID=$PROBE_TRUSTED_UID" _COMM=conmon' in script
     file = tmp_path / "continue.sh"
@@ -275,11 +333,30 @@ def test_continuation_preserves_gate_order_and_never_reimports(installed, tmp_pa
     # stand-ins. Failed acceptance must prevent configuration and services.
     log = tmp_path / "events"
     python = tmp_path / "python"
-    write(python, "#!/bin/bash\nif [ \"$2\" = -c ]; then printf 'sha256:" + "a" * 64 + "\\n'; else cat >/dev/null; echo configure >> " + shlex.quote(str(log)) + "; fi\n", 0o755)
-    functions = ("systemctl() { echo \"$*\" >> " + shlex.quote(str(log)) + "; "
-                 + ("return 0;" if gate_succeeds else '[ "$*" != "start probe-sandbox-acceptance.service" ];') + " }\n"
-                 + "runuser() { printf 'sha256:" + "a" * 64 + "\\n'; }\n")
-    harmless = script.replace("/opt/probe-core/venv/bin/python", str(python)).replace("/usr/bin/systemctl", "systemctl").replace("/usr/bin/journalctl", "/bin/true")
+    write(
+        python,
+        '#!/bin/bash\nif [ "$2" = -c ]; then printf \'sha256:'
+        + "a" * 64
+        + "\\n'; else cat >/dev/null; echo configure >> "
+        + shlex.quote(str(log))
+        + "; fi\n",
+        0o755,
+    )
+    functions = (
+        'systemctl() { echo "$*" >> '
+        + shlex.quote(str(log))
+        + "; "
+        + ("return 0;" if gate_succeeds else '[ "$*" != "start probe-sandbox-acceptance.service" ];')
+        + " }\n"
+        + "runuser() { printf 'sha256:"
+        + "a" * 64
+        + "\\n'; }\n"
+    )
+    harmless = (
+        script.replace("/opt/probe-core/venv/bin/python", str(python))
+        .replace("/usr/bin/systemctl", "systemctl")
+        .replace("/usr/bin/journalctl", "/bin/true")
+    )
     harmless = harmless.replace("PROBE_RECOVERY_SINCE=", functions + "PROBE_RECOVERY_SINCE=", 1)
     file.write_text(harmless)
     result = subprocess.run(["/bin/bash", str(file)], capture_output=True, text=True)

@@ -26,9 +26,7 @@ from pydantic import (
 
 
 class FrozenModel(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid", frozen=True, allow_inf_nan=False, validate_default=True
-    )
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False, validate_default=True)
 
 
 Identifier = Annotated[
@@ -70,7 +68,9 @@ def _safe_relative_path(value: str) -> str:
 RelativePath = Annotated[str, StringConstraints(strict=True, min_length=1), AfterValidator(_safe_relative_path)]
 ModuleName = Annotated[
     str,
-    StringConstraints(strict=True, min_length=1, max_length=200, pattern=r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*$"),
+    StringConstraints(
+        strict=True, min_length=1, max_length=200, pattern=r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*$"
+    ),
 ]
 
 
@@ -147,7 +147,9 @@ class RunDetails(FrozenModel):
         return self
 
 
-Version = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=80, pattern=r"^[0-9][A-Za-z0-9_.+!-]*$")]
+Version = Annotated[
+    str, StringConstraints(strict=True, min_length=1, max_length=80, pattern=r"^[0-9][A-Za-z0-9_.+!-]*$")
+]
 
 
 class SoftwareIdentity(FrozenModel):
@@ -192,7 +194,18 @@ class HardwareIdentity(FrozenModel):
 
 
 class ExperimentMetadata(FrozenModel):
-    tool: Literal["capture_activation", "activation_patch", "ablate_component", "steer_direction", "fit_probe", "generate_batch", "weight_stats", "tensor_slice", "module_manifest", "backend_parity"]
+    tool: Literal[
+        "capture_activation",
+        "activation_patch",
+        "ablate_component",
+        "steer_direction",
+        "fit_probe",
+        "generate_batch",
+        "weight_stats",
+        "tensor_slice",
+        "module_manifest",
+        "backend_parity",
+    ]
     modules: Annotated[tuple[ModuleName, ...], Field(min_length=1, max_length=112)]
     positions: Annotated[tuple[TokenPosition, ...], Field(min_length=1, max_length=1024)]
     intervention_hash: SHA256
@@ -266,7 +279,12 @@ class RunManifest(FrozenModel):
 
     @model_validator(mode="after")
     def confirmatory_constraints(self) -> Self:
-        if self.experiment.tool == "backend_parity" and (self.run.experiment_stage != ExperimentStage.CALIBRATION or self.run.hypothesis_id is not None or self.results.heldout or self.results.replication_status != "not_applicable"):
+        if self.experiment.tool == "backend_parity" and (
+            self.run.experiment_stage != ExperimentStage.CALIBRATION
+            or self.run.hypothesis_id is not None
+            or self.results.heldout
+            or self.results.replication_status != "not_applicable"
+        ):
             raise ValueError("backend parity is calibration and never held-out or replication evidence")
         if self.model.repo == "probe/testing-tiny-qwen3" and self.run.experiment_stage != ExperimentStage.CALIBRATION:
             raise ValueError("test fixture models are restricted to calibration")
@@ -372,6 +390,7 @@ class TensorSlice(FrozenModel):
     @model_validator(mode="after")
     def bounded_slice(self) -> Self:
         import math
+
         if len(self.starts) != len(self.sizes) or math.prod(self.sizes) > 1048576:
             raise ValueError("slice rank must match and contain at most 1048576 elements")
         return self
@@ -383,11 +402,15 @@ class ModuleManifest(FrozenModel):
 
 class BackendParity(FrozenModel):
     """Fixed trusted calibration suite; no caller-selected code or tolerances."""
+
     kind: Literal["backend_parity"]
     suite_version: Literal[1] = 1
 
 
-Operation = Annotated[Capture | Patch | Ablate | Steer | FitProbe | Generate | WeightStats | TensorSlice | ModuleManifest | BackendParity, Field(discriminator="kind")]
+Operation = Annotated[
+    Capture | Patch | Ablate | Steer | FitProbe | Generate | WeightStats | TensorSlice | ModuleManifest | BackendParity,
+    Field(discriminator="kind"),
+]
 
 
 class JobLimits(FrozenModel):
@@ -416,10 +439,16 @@ class JobSpec(FrozenModel):
         if self.operation.kind == "backend_parity":
             if self.experiment_stage != ExperimentStage.CALIBRATION or self.hypothesis_id is not None:
                 raise ValueError("backend parity is calibration only and cannot supply hypothesis evidence")
-            if not 2 <= len(self.inputs.prompt_ids) <= 4 or self.inputs.generation.max_new_tokens > 8 or self.inputs.generation.temperature != 0.0:
+            if (
+                not 2 <= len(self.inputs.prompt_ids) <= 4
+                or self.inputs.generation.max_new_tokens > 8
+                or self.inputs.generation.temperature != 0.0
+            ):
                 raise ValueError("backend parity requires two to four prompts and at most eight greedy tokens")
             requested *= 2  # Native HF and NNsight both generate actual tokens.
-            if self.model.repo != "probe/testing-tiny-qwen3" and (self.model.dtype != "bfloat16" or self.model.quantized):
+            if self.model.repo != "probe/testing-tiny-qwen3" and (
+                self.model.dtype != "bfloat16" or self.model.quantized
+            ):
                 raise ValueError("canonical backend parity requires unquantized BF16")
         if requested > self.limits.max_generated_tokens:
             raise ValueError("prompt count times max_new_tokens exceeds the declared generation limit")
@@ -478,8 +507,15 @@ class HypothesisRecord(FrozenModel):
         if self.status == HypothesisState.DRAFT:
             if self.frozen_at is not None or self.preregistration_hash is not None:
                 raise ValueError("draft hypotheses must not contain preregistration metadata")
-        elif self.frozen_at is None or self.preregistration_hash is None or not self.predictions or self.preregistration_plan is None:
-            raise ValueError("non-draft hypotheses require frozen_at, preregistration_hash, predictions and a preregistration_plan")
+        elif (
+            self.frozen_at is None
+            or self.preregistration_hash is None
+            or not self.predictions
+            or self.preregistration_plan is None
+        ):
+            raise ValueError(
+                "non-draft hypotheses require frozen_at, preregistration_hash, predictions and a preregistration_plan"
+            )
         if self.status == HypothesisState.VALIDATED and not self.replication_ids:
             raise ValueError("validated hypotheses require replication evidence")
         return self

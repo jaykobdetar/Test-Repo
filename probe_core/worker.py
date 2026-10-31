@@ -8,6 +8,7 @@ never selected. ``residual`` is decoder-layer output after both residual adds;
 [B, selected_positions, feature_width]. Mean/variance reduce the batch axis only.
 Generation is a separate primitive with no hidden intervention and a hard token cap.
 """
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -42,8 +43,13 @@ from .audit import canonical_json
 from .ledger import Ledger
 from .schemas import RunManifest
 from .worker_contracts import (
-    ExecutionReceipt, ExecutionRequest, PromptDataset, WorkerBusyError, WorkerConfig,
-    WorkerRequestError, WorkerState,
+    ExecutionReceipt,
+    ExecutionRequest,
+    PromptDataset,
+    WorkerBusyError,
+    WorkerConfig,
+    WorkerRequestError,
+    WorkerState,
 )
 
 UTC = timezone.utc
@@ -59,10 +65,13 @@ def _nnsight_module():
     """
     global _NNSIGHT_CLEANUP_REGISTERED
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=r"ast\.(Num|Str|Bytes|NameConstant|Ellipsis).*deprecated.*", category=DeprecationWarning)
+        warnings.filterwarnings(
+            "ignore", message=r"ast\.(Num|Str|Bytes|NameConstant|Ellipsis).*deprecated.*", category=DeprecationWarning
+        )
         import nnsight
     if not _NNSIGHT_CLEANUP_REGISTERED:
         from nnsight.intervention.tracing import util
+
         stream = getattr(util, "_devnull", None)
         if stream is not None:
             atexit.register(stream.close)
@@ -116,6 +125,7 @@ class WorkerEngine:
     This in-process entry point is also used by numerical parity tests. It does
     not claim process isolation; the Supervisor establishes that boundary.
     """
+
     def __init__(self, config: WorkerConfig):
         self.config = WorkerConfig.model_validate_json(config.model_dump_json())
         self.model = None
@@ -128,7 +138,9 @@ class WorkerEngine:
         if "config.json" not in specified:
             raise WorkerRequestError("the model configuration must be pinned by content hash")
         weights = sorted(root.glob("*.safetensors"))
-        if not weights or sorted(sha256_file(path) for path in weights) != sorted(self.config.model.local_weight_hashes):
+        if not weights or sorted(sha256_file(path) for path in weights) != sorted(
+            self.config.model.local_weight_hashes
+        ):
             raise WorkerRequestError("model safetensors hashes do not match the approved identity")
         for entry in self.config.assets:
             path = _path(root, entry.path)
@@ -144,7 +156,11 @@ class WorkerEngine:
         if self.config.model.quantized or metadata.get("quantization_config"):
             raise WorkerRequestError("quantized model execution has no validated backend")
         if self.config.model.repo != "probe/testing-tiny-qwen3":
-            if metadata.get("num_hidden_layers") != 28 or metadata.get("num_attention_heads") != 16 or metadata.get("num_key_value_heads") != 8:
+            if (
+                metadata.get("num_hidden_layers") != 28
+                or metadata.get("num_attention_heads") != 16
+                or metadata.get("num_key_value_heads") != 8
+            ):
                 raise WorkerRequestError("canonical Qwen3-1.7B architecture mismatch")
         self.model_config = metadata
 
@@ -153,6 +169,7 @@ class WorkerEngine:
             return self.model
         import torch
         from transformers import AutoModelForCausalLM
+
         if self.config.device.startswith("cuda"):
             if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
                 raise WorkerRequestError("worker requires exactly one visible CUDA device")
@@ -161,11 +178,18 @@ class WorkerEngine:
                 raise WorkerRequestError("declared VRAM limit exceeds available device capacity")
             torch.cuda.set_per_process_memory_fraction(spec.limits.max_vram_bytes / total, 0)
             torch.cuda.reset_peak_memory_stats(0)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_directory, local_files_only=True, trust_remote_code=False,
-            use_safetensors=True, dtype=getattr(torch, self.config.model.dtype),
-            attn_implementation="eager",
-        ).to(self.config.device).eval()
+        self.model = (
+            AutoModelForCausalLM.from_pretrained(
+                self.config.model_directory,
+                local_files_only=True,
+                trust_remote_code=False,
+                use_safetensors=True,
+                dtype=getattr(torch, self.config.model.dtype),
+                attn_implementation="eager",
+            )
+            .to(self.config.device)
+            .eval()
+        )
         if any(parameter.requires_grad for parameter in self.model.parameters()):
             self.model.requires_grad_(False)
         return self.model
@@ -187,6 +211,7 @@ class WorkerEngine:
 
     def _inputs(self, request: ExecutionRequest):
         import torch
+
         records = self._dataset(request)
         if any(prompt.text is not None for prompt in records):
             specified = {asset.path for asset in self.config.assets}
@@ -194,39 +219,72 @@ class WorkerEngine:
                 raise WorkerRequestError("text prompts require a pinned tokenizer inventory")
             if self.tokenizer is None:
                 from transformers import AutoTokenizer
-                self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_directory, local_files_only=True, trust_remote_code=False)
+
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    self.config.model_directory, local_files_only=True, trust_remote_code=False
+                )
         uses_chat = self.config.model.chat_template_hash is not None or self.config.model.thinking_mode is not None
         if uses_chat:
             if any(prompt.token_ids is not None for prompt in records):
                 raise WorkerRequestError("chat/thinking provenance cannot be verified for caller-supplied token IDs")
             template = self.tokenizer.chat_template
-            if not isinstance(template, str) or "sha256:" + hashlib.sha256(template.encode()).hexdigest() != self.config.model.chat_template_hash:
+            if (
+                not isinstance(template, str)
+                or "sha256:" + hashlib.sha256(template.encode()).hexdigest() != self.config.model.chat_template_hash
+            ):
                 raise WorkerRequestError("active tokenizer chat template does not match its pinned hash")
-            tokens = [self.tokenizer.apply_chat_template([{"role": "user", "content": prompt.text}], tokenize=True, return_dict=False, add_generation_prompt=True, enable_thinking=self.config.model.thinking_mode) for prompt in records]
+            tokens = [
+                self.tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt.text}],
+                    tokenize=True,
+                    return_dict=False,
+                    add_generation_prompt=True,
+                    enable_thinking=self.config.model.thinking_mode,
+                )
+                for prompt in records
+            ]
         else:
-            tokens = [list(prompt.token_ids) if prompt.token_ids is not None else self.tokenizer.encode(prompt.text, add_special_tokens=False) for prompt in records]
+            tokens = [
+                list(prompt.token_ids)
+                if prompt.token_ids is not None
+                else self.tokenizer.encode(prompt.text, add_special_tokens=False)
+                for prompt in records
+            ]
         model = self._load_model(request.spec)
         cap = min(32768, model.config.max_position_embeddings)
-        generated = request.spec.inputs.generation.max_new_tokens if request.spec.operation.kind in {"generate", "backend_parity"} else 0
+        generated = (
+            request.spec.inputs.generation.max_new_tokens
+            if request.spec.operation.kind in {"generate", "backend_parity"}
+            else 0
+        )
         if any(not row or len(row) + generated > cap for row in tokens):
             raise WorkerRequestError("prompt plus generation exceeds the model context limit")
         if any(token < 0 or token >= model.config.vocab_size for row in tokens for token in row):
             raise WorkerRequestError("input token outside the loaded model vocabulary")
         width = max(map(len, tokens))
         # Reject prefill allocations that cannot plausibly fit (eager attention is quadratic).
-        estimated = len(tokens) * width * width * model.config.num_attention_heads * 4 + len(tokens) * width * model.config.vocab_size * 4
-        limit = request.spec.limits.max_vram_bytes if self.config.device.startswith("cuda") else request.spec.limits.max_ram_bytes
+        estimated = (
+            len(tokens) * width * width * model.config.num_attention_heads * 4
+            + len(tokens) * width * model.config.vocab_size * 4
+        )
+        limit = (
+            request.spec.limits.max_vram_bytes
+            if self.config.device.startswith("cuda")
+            else request.spec.limits.max_ram_bytes
+        )
         if estimated > limit // 2:
             raise WorkerRequestError("prefill attention/logit estimate exceeds the reserved memory budget")
         pad = model.config.pad_token_id or 0
         input_ids = torch.full((len(tokens), width), pad, dtype=torch.long, device=self.config.device)
         mask = torch.zeros_like(input_ids)
         for index, row in enumerate(tokens):
-            input_ids[index, -len(row):] = torch.tensor(row, dtype=torch.long, device=self.config.device)
-            mask[index, -len(row):] = 1
+            input_ids[index, -len(row) :] = torch.tensor(row, dtype=torch.long, device=self.config.device)
+            mask[index, -len(row) :] = 1
         positions = mask.cumsum(-1) - 1
         positions.masked_fill_(mask == 0, 0)
-        return {"input_ids": input_ids, "attention_mask": mask, "position_ids": positions, "use_cache": False}, tuple(map(len, tokens))
+        return {"input_ids": input_ids, "attention_mask": mask, "position_ids": positions, "use_cache": False}, tuple(
+            map(len, tokens)
+        )
 
     def _target(self, reference):
         model = self.model
@@ -248,6 +306,7 @@ class WorkerEngine:
     @staticmethod
     def _indices(lengths, positions, width, device):
         import torch
+
         selected = []
         for length in lengths:
             logical = [length - 1 if value == "last" else value for value in positions]
@@ -259,6 +318,7 @@ class WorkerEngine:
     def _tensor_asset(self, reference, limit: int):
         import torch
         from safetensors import safe_open
+
         path = _path(Path(self.config.tensor_directory), reference.path)
         if path.suffix != ".safetensors" or path.stat().st_size > limit or sha256_file(path) != reference.sha256:
             raise WorkerRequestError("tensor artifact format, size or checksum rejected")
@@ -274,6 +334,7 @@ class WorkerEngine:
 
     def _intervention(self, operation, lengths, input_width, limits):
         import torch
+
         target = operation.target
         _, _, head_slice = self._target(target)
         width = self.model.config.head_dim if head_slice else self.model.config.hidden_size
@@ -301,6 +362,7 @@ class WorkerEngine:
     @staticmethod
     def _edit(value, operation, selected, head_slice, replacement):
         import torch
+
         tensor = value[0] if isinstance(value, tuple) else value
         changed = tensor.clone()
         batch = torch.arange(tensor.shape[0], device=tensor.device)[:, None]
@@ -316,16 +378,18 @@ class WorkerEngine:
     @staticmethod
     def _capture(value, selected, head_slice):
         import torch
+
         tensor = value[0] if isinstance(value, tuple) else value
         rows = torch.arange(tensor.shape[0], device=tensor.device)[:, None]
         captured = tensor[rows, selected]
         if head_slice:
-            captured = captured[..., head_slice[0]:head_slice[1]]
+            captured = captured[..., head_slice[0] : head_slice[1]]
         return captured.detach().clone()
 
     def forward(self, inputs, lengths, operation=None, *, backend=None, limits=None):
         """Return last-real-token logits and optional selected activations."""
         import torch
+
         backend = backend or self.config.backend
         captures = {}
         target = None
@@ -345,17 +409,46 @@ class WorkerEngine:
                         name, direction, _ = target
                         module = self.model.get_submodule(name)
                         if direction == "input":
-                            handles.append(module.register_forward_pre_hook(lambda module, args: (self._edit(args[0], operation, *edit_parameters), *args[1:])))
+                            handles.append(
+                                module.register_forward_pre_hook(
+                                    lambda module, args: (self._edit(args[0], operation, *edit_parameters), *args[1:])
+                                )
+                            )
                         else:
-                            handles.append(module.register_forward_hook(lambda module, args, output: self._edit(output, operation, *edit_parameters)))
+                            handles.append(
+                                module.register_forward_hook(
+                                    lambda module, args, output: self._edit(output, operation, *edit_parameters)
+                                )
+                            )
                     for reference in refs:
                         name, direction, head_slice = self._target(reference)
-                        selected = self._indices(lengths, operation.positions, inputs["input_ids"].shape[1], self.config.device)
-                        key = f"layer_{reference.layer}_{reference.component}" + (f"_{reference.head}" if reference.head is not None else "")
-                        def capture_hook(module, args, output=None, *, key=key, selected=selected, head_slice=head_slice, direction=direction):
-                            captures[key] = self._capture(args[0] if direction == "input" else output, selected, head_slice)
+                        selected = self._indices(
+                            lengths, operation.positions, inputs["input_ids"].shape[1], self.config.device
+                        )
+                        key = f"layer_{reference.layer}_{reference.component}" + (
+                            f"_{reference.head}" if reference.head is not None else ""
+                        )
+
+                        def capture_hook(
+                            module,
+                            args,
+                            output=None,
+                            *,
+                            key=key,
+                            selected=selected,
+                            head_slice=head_slice,
+                            direction=direction,
+                        ):
+                            captures[key] = self._capture(
+                                args[0] if direction == "input" else output, selected, head_slice
+                            )
+
                         module = self.model.get_submodule(name)
-                        handles.append(module.register_forward_pre_hook(capture_hook) if direction == "input" else module.register_forward_hook(capture_hook))
+                        handles.append(
+                            module.register_forward_pre_hook(capture_hook)
+                            if direction == "input"
+                            else module.register_forward_hook(capture_hook)
+                        )
                     logits = self.model(**inputs).logits[:, -1, :].detach().clone()
                 finally:
                     for handle in handles:
@@ -379,15 +472,22 @@ class WorkerEngine:
                         envoy = wrapped
                         for component in name.split("."):
                             envoy = envoy[int(component)] if component.isdigit() else getattr(envoy, component)
-                        selected = self._indices(lengths, operation.positions, inputs["input_ids"].shape[1], self.config.device)
-                        key = f"layer_{reference.layer}_{reference.component}" + (f"_{reference.head}" if reference.head is not None else "")
-                        captures[key] = self._capture(envoy.input if direction == "input" else envoy.output, selected, head_slice)
+                        selected = self._indices(
+                            lengths, operation.positions, inputs["input_ids"].shape[1], self.config.device
+                        )
+                        key = f"layer_{reference.layer}_{reference.component}" + (
+                            f"_{reference.head}" if reference.head is not None else ""
+                        )
+                        captures[key] = self._capture(
+                            envoy.input if direction == "input" else envoy.output, selected, head_slice
+                        )
                     logits = wrapped.output.logits[:, -1, :].save()
                     captures = nnsight.save(captures)
         return logits, captures
 
     def _fit_probe(self, request):
         import torch
+
         operation = request.spec.operation
         features = self._tensor_asset(operation.activations, request.spec.limits.max_ram_bytes).float()
         labels = self._tensor_asset(operation.labels, request.spec.limits.max_ram_bytes)
@@ -418,21 +518,32 @@ class WorkerEngine:
                 raise WorkerRequestError("training split requires both binary classes")
             weights = torch.zeros(x.shape[1], requires_grad=True)
             optimizer = torch.optim.LBFGS([weights], max_iter=operation.max_iterations, line_search_fn="strong_wolfe")
+
             def closure():
                 optimizer.zero_grad()
                 logits = x[train] @ weights
-                loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels[train].float()) + operation.l2_penalty * weights[:-1].square().mean()
+                loss = (
+                    torch.nn.functional.binary_cross_entropy_with_logits(logits, labels[train].float())
+                    + operation.l2_penalty * weights[:-1].square().mean()
+                )
                 loss.backward()
                 return loss
+
             optimizer.step(closure)
             weights = weights.detach()
             score = ((x[test] @ weights >= 0).long() == labels[test]).float().mean().item()
             name = "test_accuracy"
-        return {"probe_weights": weights.contiguous(), "train_rows": train, "test_rows": test}, {name: score, "split_seed": request.spec.inputs.random_seed, "split_unit": "rows", "confirmatory_evidence": False}
+        return {"probe_weights": weights.contiguous(), "train_rows": train, "test_rows": test}, {
+            name: score,
+            "split_seed": request.spec.inputs.random_seed,
+            "split_unit": "rows",
+            "confirmatory_evidence": False,
+        }
 
     def execute(self, request: ExecutionRequest, output: Path) -> ExecutionReceipt:
         import torch
         from safetensors.torch import save_file
+
         started = datetime.now(UTC)
         monotonic_start = time.monotonic()
         if request.deadline <= started:
@@ -453,6 +564,7 @@ class WorkerEngine:
             tensors, summary = self._fit_probe(request)
         elif operation.kind == "backend_parity":
             from .backend_parity import run_parity
+
             tensors, summary, generated_tokens = run_parity(self, request)
         else:
             model = self._load_model(request.spec)
@@ -460,13 +572,25 @@ class WorkerEngine:
             # randomness must be identical for cold and already loaded engines.
             torch.manual_seed(request.spec.inputs.random_seed)
             if operation.kind == "module_manifest":
-                summary["modules"] = [{"name": name, "class": type(module).__name__} for name, module in model.named_modules()][:4096]
+                summary["modules"] = [
+                    {"name": name, "class": type(module).__name__} for name, module in model.named_modules()
+                ][:4096]
             elif operation.kind == "weight_stats":
                 summary["weights"] = []
                 for name, parameter in model.named_parameters():
                     if any(name == prefix or name.startswith(prefix + ".") for prefix in operation.modules):
                         values = parameter.detach().float()
-                        summary["weights"].append({"name": name, "shape": list(values.shape), "count": values.numel(), "mean": values.mean().item(), "std": values.std(unbiased=False).item(), "min": values.min().item(), "max": values.max().item()})
+                        summary["weights"].append(
+                            {
+                                "name": name,
+                                "shape": list(values.shape),
+                                "count": values.numel(),
+                                "mean": values.mean().item(),
+                                "std": values.std(unbiased=False).item(),
+                                "min": values.min().item(),
+                                "max": values.max().item(),
+                            }
+                        )
                 if not summary["weights"]:
                     raise WorkerRequestError("weight selectors did not match any parameter")
             elif operation.kind == "tensor_slice":
@@ -474,9 +598,17 @@ class WorkerEngine:
                 if operation.parameter not in parameters:
                     raise WorkerRequestError("unknown model parameter")
                 tensor = parameters[operation.parameter]
-                if len(operation.starts) != tensor.ndim or any(start + size > extent for start, size, extent in zip(operation.starts, operation.sizes, tensor.shape)):
+                if len(operation.starts) != tensor.ndim or any(
+                    start + size > extent
+                    for start, size, extent in zip(operation.starts, operation.sizes, tensor.shape)
+                ):
                     raise WorkerRequestError("tensor slice exceeds parameter dimensions")
-                tensors["weight_slice"] = tensor[tuple(slice(start, start + size) for start, size in zip(operation.starts, operation.sizes))].detach().cpu().contiguous()
+                tensors["weight_slice"] = (
+                    tensor[tuple(slice(start, start + size) for start, size in zip(operation.starts, operation.sizes))]
+                    .detach()
+                    .cpu()
+                    .contiguous()
+                )
             else:
                 inputs, lengths = self._inputs(request)
                 if operation.kind == "generate":
@@ -484,15 +616,27 @@ class WorkerEngine:
                     # Independent sequences eliminate right/left padding ambiguity
                     # after EOS and make the seed/budget behavior explicit.
                     for row, length in enumerate(lengths):
-                        tokens = inputs["input_ids"][row:row+1, -length:].clone()
+                        tokens = inputs["input_ids"][row : row + 1, -length:].clone()
                         produced = []
                         for _ in range(request.spec.inputs.generation.max_new_tokens):
                             if datetime.now(UTC) >= request.deadline:
                                 raise TimeoutError("execution deadline reached")
                             mask = torch.ones_like(tokens)
-                            logits, _ = self.forward({"input_ids": tokens, "attention_mask": mask, "position_ids": mask.cumsum(-1)-1, "use_cache": False}, (tokens.shape[1],))
+                            logits, _ = self.forward(
+                                {
+                                    "input_ids": tokens,
+                                    "attention_mask": mask,
+                                    "position_ids": mask.cumsum(-1) - 1,
+                                    "use_cache": False,
+                                },
+                                (tokens.shape[1],),
+                            )
                             temperature = request.spec.inputs.generation.temperature
-                            next_token = logits.argmax(-1) if temperature == 0 else torch.multinomial(torch.softmax(logits / temperature, dim=-1), 1).flatten()
+                            next_token = (
+                                logits.argmax(-1)
+                                if temperature == 0
+                                else torch.multinomial(torch.softmax(logits / temperature, dim=-1), 1).flatten()
+                            )
                             value = int(next_token.item())
                             produced.append(value)
                             generated_tokens += 1
@@ -518,8 +662,13 @@ class WorkerEngine:
         if any(value.is_floating_point() and not torch.isfinite(value).all() for value in tensors.values()):
             raise WorkerRequestError("execution produced non-finite output tensors")
         if tensors:
-            save_file({name: value.detach().cpu().contiguous() for name, value in tensors.items()}, str(output / "tensors.safetensors"))
-        summary.update(backend=self.config.backend, semantics="prefill_unpadded_positions_v1", generated_tokens=generated_tokens)
+            save_file(
+                {name: value.detach().cpu().contiguous() for name, value in tensors.items()},
+                str(output / "tensors.safetensors"),
+            )
+        summary.update(
+            backend=self.config.backend, semantics="prefill_unpadded_positions_v1", generated_tokens=generated_tokens
+        )
         _json_write(output / "summary.json", summary)
         files = sorted(path for path in output.iterdir() if path.is_file())
         total_bytes = sum(path.stat().st_size for path in files)
@@ -529,7 +678,13 @@ class WorkerEngine:
         if datetime.now(UTC) >= request.deadline:
             raise TimeoutError("execution deadline reached")
         cuda = self.config.device.startswith("cuda")
-        hardware = {"provider_backend": self.config.provider_backend, "gpu_model": torch.cuda.get_device_name(0) if cuda else "CPU", "gpu_count": 1 if cuda else 0, "region": self.config.region, "live_price_usd_per_hour": self.config.live_price_usd_per_hour}
+        hardware = {
+            "provider_backend": self.config.provider_backend,
+            "gpu_model": torch.cuda.get_device_name(0) if cuda else "CPU",
+            "gpu_count": 1 if cuda else 0,
+            "region": self.config.region,
+            "live_price_usd_per_hour": self.config.live_price_usd_per_hour,
+        }
         names = []
         if operation.kind == "capture":
             names = [self._target(item)[0] for item in operation.modules]
@@ -537,23 +692,93 @@ class WorkerEngine:
             names = [self._target(operation.target)[0]]
         else:
             names = ["model"]
-        tools = {"capture": "capture_activation", "patch": "activation_patch", "ablate": "ablate_component", "steer": "steer_direction", "fit_probe": "fit_probe", "generate": "generate_batch", "weight_stats": "weight_stats", "tensor_slice": "tensor_slice", "module_manifest": "module_manifest", "backend_parity": "backend_parity"}
+        tools = {
+            "capture": "capture_activation",
+            "patch": "activation_patch",
+            "ablate": "ablate_component",
+            "steer": "steer_direction",
+            "fit_probe": "fit_probe",
+            "generate": "generate_batch",
+            "weight_stats": "weight_stats",
+            "tensor_slice": "tensor_slice",
+            "module_manifest": "module_manifest",
+            "backend_parity": "backend_parity",
+        }
         science = request.science
-        manifest = RunManifest.model_validate({
-            "schema_version": 1,
-            "run": {"run_id": request.job_id, "parent_run_id": None, "started_at": started, "experiment_stage": request.spec.experiment_stage, "hypothesis_id": request.spec.hypothesis_id, "preregistration_hash": science.preregistration_hash, "approval_id": request.approval_id, "explorer_session_id": science.session_id, "replicator_blinded": science.replicator_blinded},
-            "model": self.config.model.model_dump(mode="json"),
-            "software": {"probe_mcp_git_commit": self.config.code_git_commit, "container_image_digest": self.config.container_image_digest, "environment_lock_hash": sha256_file(Path(self.config.environment_lock_path)) if self.config.environment_lock_path else None, "python_version": platform.python_version(), "torch_version": torch.__version__, "transformers_version": importlib.metadata.version("transformers"), "nnsight_version": importlib.metadata.version("nnsight"), "cuda_version": torch.version.cuda or "0+cpu"},
-            "hardware": hardware,
-            "inputs": request.spec.inputs.model_dump(mode="json"),
-            "experiment": {"tool": tools[operation.kind], "modules": list(dict.fromkeys(names)), "positions": list(getattr(operation, "positions", ("last",))), "intervention_hash": Ledger.operation_hash(request.spec), "predicted_direction": science.predicted_direction, "primary_metric": science.primary_metric, "falsifier": science.falsifier, "alternative_explanations": list(science.alternative_explanations)},
-            "controls": science.controls.model_dump(mode="json"),
-            "results": {"effect_size": None, "confidence_interval": None, "heldout": False, "replication_status": "not_applicable"},
-            "cost": {"gpu_seconds": math.ceil(elapsed) if cuda else 0, "estimated_compute_usd": elapsed * self.config.live_price_usd_per_hour / 3600, "bytes_persisted": total_bytes},
-            "artifacts": [{"path": path.name, "sha256": sha256_file(path).removeprefix("sha256:"), "retention_class": "derived"} for path in files],
-            "security": {"outbound_network_attempts": 0, "policy_denials": 0, "secret_access_attempts": 0},
-        })
-        return ExecutionReceipt(job_id=request.job_id, attempt_id=request.attempt_id, state=WorkerState.SUCCEEDED, started_at=started, finished_at=datetime.now(UTC), manifest=manifest, wall_seconds=elapsed, generated_tokens=generated_tokens, peak_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024, peak_vram_bytes=torch.cuda.max_memory_allocated(0) if cuda else 0)
+        manifest = RunManifest.model_validate(
+            {
+                "schema_version": 1,
+                "run": {
+                    "run_id": request.job_id,
+                    "parent_run_id": None,
+                    "started_at": started,
+                    "experiment_stage": request.spec.experiment_stage,
+                    "hypothesis_id": request.spec.hypothesis_id,
+                    "preregistration_hash": science.preregistration_hash,
+                    "approval_id": request.approval_id,
+                    "explorer_session_id": science.session_id,
+                    "replicator_blinded": science.replicator_blinded,
+                },
+                "model": self.config.model.model_dump(mode="json"),
+                "software": {
+                    "probe_mcp_git_commit": self.config.code_git_commit,
+                    "container_image_digest": self.config.container_image_digest,
+                    "environment_lock_hash": sha256_file(Path(self.config.environment_lock_path))
+                    if self.config.environment_lock_path
+                    else None,
+                    "python_version": platform.python_version(),
+                    "torch_version": torch.__version__,
+                    "transformers_version": importlib.metadata.version("transformers"),
+                    "nnsight_version": importlib.metadata.version("nnsight"),
+                    "cuda_version": torch.version.cuda or "0+cpu",
+                },
+                "hardware": hardware,
+                "inputs": request.spec.inputs.model_dump(mode="json"),
+                "experiment": {
+                    "tool": tools[operation.kind],
+                    "modules": list(dict.fromkeys(names)),
+                    "positions": list(getattr(operation, "positions", ("last",))),
+                    "intervention_hash": Ledger.operation_hash(request.spec),
+                    "predicted_direction": science.predicted_direction,
+                    "primary_metric": science.primary_metric,
+                    "falsifier": science.falsifier,
+                    "alternative_explanations": list(science.alternative_explanations),
+                },
+                "controls": science.controls.model_dump(mode="json"),
+                "results": {
+                    "effect_size": None,
+                    "confidence_interval": None,
+                    "heldout": False,
+                    "replication_status": "not_applicable",
+                },
+                "cost": {
+                    "gpu_seconds": math.ceil(elapsed) if cuda else 0,
+                    "estimated_compute_usd": elapsed * self.config.live_price_usd_per_hour / 3600,
+                    "bytes_persisted": total_bytes,
+                },
+                "artifacts": [
+                    {
+                        "path": path.name,
+                        "sha256": sha256_file(path).removeprefix("sha256:"),
+                        "retention_class": "derived",
+                    }
+                    for path in files
+                ],
+                "security": {"outbound_network_attempts": 0, "policy_denials": 0, "secret_access_attempts": 0},
+            }
+        )
+        return ExecutionReceipt(
+            job_id=request.job_id,
+            attempt_id=request.attempt_id,
+            state=WorkerState.SUCCEEDED,
+            started_at=started,
+            finished_at=datetime.now(UTC),
+            manifest=manifest,
+            wall_seconds=elapsed,
+            generated_tokens=generated_tokens,
+            peak_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+            peak_vram_bytes=torch.cuda.max_memory_allocated(0) if cuda else 0,
+        )
 
 
 def _block_network() -> None:
@@ -562,16 +787,25 @@ def _block_network() -> None:
 
     class ScmpArgCompare(ctypes.Structure):
         # libseccomp's struct scmp_arg_cmp: uint, enum, uint64, uint64.
-        _fields_ = [("arg", ctypes.c_uint), ("op", ctypes.c_int),
-                    ("datum_a", ctypes.c_uint64), ("datum_b", ctypes.c_uint64)]
+        _fields_ = [
+            ("arg", ctypes.c_uint),
+            ("op", ctypes.c_int),
+            ("datum_a", ctypes.c_uint64),
+            ("datum_b", ctypes.c_uint64),
+        ]
 
     library = ctypes.CDLL("libseccomp.so.2", use_errno=True)
     library.seccomp_init.argtypes = [ctypes.c_uint32]
     library.seccomp_init.restype = ctypes.c_void_p
     library.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
     library.seccomp_syscall_resolve_name.restype = ctypes.c_int
-    library.seccomp_rule_add_array.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int,
-                                              ctypes.c_uint, ctypes.POINTER(ScmpArgCompare)]
+    library.seccomp_rule_add_array.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.POINTER(ScmpArgCompare),
+    ]
     library.seccomp_rule_add_array.restype = ctypes.c_int
     library.seccomp_load.argtypes = [ctypes.c_void_p]
     library.seccomp_load.restype = ctypes.c_int
@@ -587,8 +821,10 @@ def _block_network() -> None:
         for name in (b"socket", b"connect", b"sendto", b"sendmsg"):
             syscall = library.seccomp_syscall_resolve_name(name)
             count, comparisons = (1, non_unix) if name == b"socket" else (0, None)
-            if syscall < 0 or library.seccomp_rule_add_array(
-                    context, 0x00050000 | errno.EPERM, syscall, count, comparisons) != 0:
+            if (
+                syscall < 0
+                or library.seccomp_rule_add_array(context, 0x00050000 | errno.EPERM, syscall, count, comparisons) != 0
+            ):
                 raise WorkerRequestError("cannot install network-denial syscall rule")
         if library.seccomp_load(context) != 0:
             raise WorkerRequestError("cannot activate network-denial seccomp policy")
@@ -632,7 +868,9 @@ def _signal_pidfd(descriptor: int, signum: int, *, process_group: bool = False) 
             raise OSError(ctypes.get_errno(), "pidfd_send_signal failed")
     except OSError as exc:
         if process_group and exc.errno in {errno.EINVAL, errno.ENOSYS}:
-            raise WorkerRequestError("live CPU cancellation requires Linux 6.9+ PID descriptor group signaling") from None
+            raise WorkerRequestError(
+                "live CPU cancellation requires Linux 6.9+ PID descriptor group signaling"
+            ) from None
         raise
 
 
@@ -697,14 +935,25 @@ def _child_entry(config_json: str, request_json: str, directory: str, ready, rel
     result = None
     try:
         # Do not inherit management credentials or arbitrary caller environment.
-        keep = {key: value for key, value in os.environ.items() if key in {"PATH", "HOME", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES"}}
+        keep = {
+            key: value
+            for key, value in os.environ.items()
+            if key in {"PATH", "HOME", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES"}
+        }
         os.environ.clear()
         os.environ.update(keep)
-        os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", TOKENIZERS_PARALLELISM="false", WANDB_MODE="disabled", CUBLAS_WORKSPACE_CONFIG=":4096:8")
+        os.environ.update(
+            HF_HUB_OFFLINE="1",
+            TRANSFORMERS_OFFLINE="1",
+            HF_HUB_DISABLE_TELEMETRY="1",
+            TOKENIZERS_PARALLELISM="false",
+            WANDB_MODE="disabled",
+            CUBLAS_WORKSPACE_CONFIG=":4096:8",
+        )
         os.environ["OMP_NUM_THREADS"] = str(request.spec.limits.max_cpu_cores)
         os.environ["MKL_NUM_THREADS"] = str(request.spec.limits.max_cpu_cores)
         available = sorted(os.sched_getaffinity(0))
-        os.sched_setaffinity(0, available[:request.spec.limits.max_cpu_cores])
+        os.sched_setaffinity(0, available[: request.spec.limits.max_cpu_cores])
         # RLIMIT_CPU is aggregate CPU time, whereas the independently monitored
         # execution deadline is wall time. A soft limit gives a truthful SIGXCPU
         # outcome; equal soft/hard limits can otherwise produce ambiguous SIGKILL.
@@ -720,19 +969,45 @@ def _child_entry(config_json: str, request_json: str, directory: str, ready, rel
         identity = _process_identity(pid)
         if identity is None:
             raise WorkerRequestError("execution start requires a live process identity")
-        _json_write(Path(directory) / "execution-started.json", {
-            "schema_version": 1, "job_id": request.job_id, "attempt_id": request.attempt_id,
-            "worker_id": request.worker_id, "approval_id": request.approval_id,
-            "pid": pid, "identity": identity, "boot_id": _boot_id(),
-            "request_sha256": "sha256:" + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
-            "config_sha256": "sha256:" + hashlib.sha256(canonical_json(config.model_dump(mode="json")).encode()).hexdigest(),
-            "started_at": datetime.now(UTC).isoformat(),
-        })
+        _json_write(
+            Path(directory) / "execution-started.json",
+            {
+                "schema_version": 1,
+                "job_id": request.job_id,
+                "attempt_id": request.attempt_id,
+                "worker_id": request.worker_id,
+                "approval_id": request.approval_id,
+                "pid": pid,
+                "identity": identity,
+                "boot_id": _boot_id(),
+                "request_sha256": "sha256:"
+                + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
+                "config_sha256": "sha256:"
+                + hashlib.sha256(canonical_json(config.model_dump(mode="json")).encode()).hexdigest(),
+                "started_at": datetime.now(UTC).isoformat(),
+            },
+        )
         engine = WorkerEngine(config)
         result = engine.execute(request, Path(directory) / "artifacts")
     except BaseException as exc:
-        kind = "timeout" if isinstance(exc, TimeoutError) else "oom" if isinstance(exc, MemoryError) or "OutOfMemory" in type(exc).__name__ else "policy" if isinstance(exc, WorkerRequestError) else "scientific"
-        result = ExecutionReceipt(job_id=request.job_id, attempt_id=request.attempt_id, state=WorkerState.FAILED, started_at=start, finished_at=datetime.now(UTC), failure_kind=kind, error_code=type(exc).__name__)
+        kind = (
+            "timeout"
+            if isinstance(exc, TimeoutError)
+            else "oom"
+            if isinstance(exc, MemoryError) or "OutOfMemory" in type(exc).__name__
+            else "policy"
+            if isinstance(exc, WorkerRequestError)
+            else "scientific"
+        )
+        result = ExecutionReceipt(
+            job_id=request.job_id,
+            attempt_id=request.attempt_id,
+            state=WorkerState.FAILED,
+            started_at=start,
+            finished_at=datetime.now(UTC),
+            failure_kind=kind,
+            error_code=type(exc).__name__,
+        )
     _json_write(Path(directory) / "result.json", result.model_dump(mode="json"))
 
 
@@ -742,6 +1017,7 @@ class Supervisor:
     Restart adopts only a matching Linux PID/starttime identity. Unknown/missing
     processes become failed infrastructure attempts rather than being rerun.
     """
+
     def __init__(self, config: WorkerConfig, *, monitor_interval: float = 0.05):
         self.config = config
         self.root = Path(config.output_directory).absolute()
@@ -781,7 +1057,11 @@ class Supervisor:
         return ExecutionReceipt.model_validate_json((self._directory(attempt_id) / "receipt.json").read_text())
 
     def _remember_cpu_group(self, attempt_id, metadata):
-        if self.config.cgroup_directory is not None or attempt_id in self._group_descriptors or not _same_process(metadata):
+        if (
+            self.config.cgroup_directory is not None
+            or attempt_id in self._group_descriptors
+            or not _same_process(metadata)
+        ):
             return
         from .sandbox_lifecycle import LifecycleError, _pidfd_open
 
@@ -818,7 +1098,9 @@ class Supervisor:
                 cached = self._group_descriptors.get(attempt_id)
                 fence = (metadata["pid"], metadata["identity"], metadata["boot_id"])
                 if cached is None or cached[0] != fence or metadata["boot_id"] != _boot_id():
-                    raise WorkerRequestError("CPU descendants remain without a retained process-group identity; termination is unresolved")
+                    raise WorkerRequestError(
+                        "CPU descendants remain without a retained process-group identity; termination is unresolved"
+                    )
                 try:
                     _signal_pidfd(cached[1], signal.SIGKILL, process_group=True)
                 except ProcessLookupError:
@@ -840,7 +1122,13 @@ class Supervisor:
         path = root / ("probe-" + request.attempt_id)
         path.mkdir(mode=0o700)
         try:
-            for name, value in (("memory.max", request.spec.limits.max_ram_bytes), ("memory.swap.max", 0), ("pids.max", 128), ("cpu.max", f"{request.spec.limits.max_cpu_cores * 100000} 100000"), ("cgroup.procs", pid)):
+            for name, value in (
+                ("memory.max", request.spec.limits.max_ram_bytes),
+                ("memory.swap.max", 0),
+                ("pids.max", 128),
+                ("cpu.max", f"{request.spec.limits.max_cpu_cores * 100000} 100000"),
+                ("cgroup.procs", pid),
+            ):
                 (path / name).write_text(str(value))
         except BaseException:
             try:
@@ -866,11 +1154,17 @@ class Supervisor:
             directory.mkdir(mode=0o700)
             self._requests[request.attempt_id] = request
             _json_write(directory / "request.json", request.model_dump(mode="json"))
-            receipt = ExecutionReceipt(job_id=request.job_id, attempt_id=request.attempt_id, state=WorkerState.ACCEPTED, started_at=now)
+            receipt = ExecutionReceipt(
+                job_id=request.job_id, attempt_id=request.attempt_id, state=WorkerState.ACCEPTED, started_at=now
+            )
             _json_write(directory / "receipt.json", receipt.model_dump(mode="json"))
             context = multiprocessing.get_context("spawn")
             ready, release = context.Event(), context.Event()
-            process = context.Process(target=_child_entry, args=(self.config.model_dump_json(), request.model_dump_json(), str(directory), ready, release), daemon=False)
+            process = context.Process(
+                target=_child_entry,
+                args=(self.config.model_dump_json(), request.model_dump_json(), str(directory), ready, release),
+                daemon=False,
+            )
             try:
                 process.start()
                 self._processes[request.attempt_id] = process
@@ -881,7 +1175,14 @@ class Supervisor:
                 if identity is None:
                     raise WorkerRequestError("execution process exited during initialization")
                 deadline = min(request.deadline.timestamp(), now.timestamp() + request.spec.limits.max_runtime_seconds)
-                metadata = {"pid": process.pid, "identity": identity, "boot_id": _boot_id(), "deadline": deadline, "monotonic_deadline": time.monotonic() + max(0, deadline - time.time()), "cgroup": cgroup}
+                metadata = {
+                    "pid": process.pid,
+                    "identity": identity,
+                    "boot_id": _boot_id(),
+                    "deadline": deadline,
+                    "monotonic_deadline": time.monotonic() + max(0, deadline - time.time()),
+                    "cgroup": cgroup,
+                }
                 _json_write(directory / "process.json", metadata)
                 self._remember_cpu_group(request.attempt_id, metadata)
                 receipt = receipt.model_copy(update={"state": WorkerState.RUNNING})
@@ -902,7 +1203,15 @@ class Supervisor:
                     process.join(timeout=5)
                     if process.is_alive():
                         raise WorkerRequestError("initializing process termination could not be confirmed") from None
-                stopped = receipt.model_copy(update={"state": WorkerState.FAILED, "failure_kind": "infrastructure", "error_code": "ProcessInitializationFailed", "finished_at": datetime.now(UTC), "process_stopped": True})
+                stopped = receipt.model_copy(
+                    update={
+                        "state": WorkerState.FAILED,
+                        "failure_kind": "infrastructure",
+                        "error_code": "ProcessInitializationFailed",
+                        "finished_at": datetime.now(UTC),
+                        "process_stopped": True,
+                    }
+                )
                 _json_write(directory / "receipt.json", stopped.model_dump(mode="json"))
                 raise
 
@@ -932,7 +1241,15 @@ class Supervisor:
             if _same_process(metadata):
                 raise WorkerRequestError("process termination could not be confirmed")
         self._stop_orphan_scope(attempt_id, metadata)
-        receipt = receipt.model_copy(update={"state": WorkerState.CANCELLED if failure_kind == "cancelled" else WorkerState.FAILED, "failure_kind": failure_kind, "error_code": error_code, "finished_at": datetime.now(UTC), "process_stopped": True})
+        receipt = receipt.model_copy(
+            update={
+                "state": WorkerState.CANCELLED if failure_kind == "cancelled" else WorkerState.FAILED,
+                "failure_kind": failure_kind,
+                "error_code": error_code,
+                "finished_at": datetime.now(UTC),
+                "process_stopped": True,
+            }
+        )
         _json_write(directory / "receipt.json", receipt.model_dump(mode="json"))
         self._forget_cpu_group(attempt_id)
         return receipt
@@ -961,7 +1278,9 @@ class Supervisor:
                     members = os.read(procs_fd, 65537)
                 finally:
                     os.close(procs_fd)
-                if len(members) > 65536 or (str(metadata["pid"]).encode() not in members.splitlines() and _same_process(metadata)):
+                if len(members) > 65536 or (
+                    str(metadata["pid"]).encode() not in members.splitlines() and _same_process(metadata)
+                ):
                     raise WorkerRequestError("execution child is not in its registered cgroup")
 
             def stopped():
@@ -1013,10 +1332,19 @@ class Supervisor:
         else:
             cpu_expired = process is not None and process.exitcode == -signal.SIGXCPU
             deadline_expired = time.time() >= metadata["deadline"] or time.monotonic() >= metadata["monotonic_deadline"]
-            result = receipt.model_copy(update={"state": WorkerState.FAILED,
-                "failure_kind": "timeout" if cpu_expired or deadline_expired else "infrastructure",
-                "error_code": "CPUTimeLimitExceeded" if cpu_expired else "ExecutionDeadlineExceeded" if deadline_expired else "ProcessExitedWithoutResult",
-                "finished_at": datetime.now(UTC), "process_stopped": True})
+            result = receipt.model_copy(
+                update={
+                    "state": WorkerState.FAILED,
+                    "failure_kind": "timeout" if cpu_expired or deadline_expired else "infrastructure",
+                    "error_code": "CPUTimeLimitExceeded"
+                    if cpu_expired
+                    else "ExecutionDeadlineExceeded"
+                    if deadline_expired
+                    else "ProcessExitedWithoutResult",
+                    "finished_at": datetime.now(UTC),
+                    "process_stopped": True,
+                }
+            )
         _json_write(directory / "receipt.json", result.model_dump(mode="json"))
         self._forget_cpu_group(attempt_id)
         if metadata.get("cgroup"):
@@ -1103,28 +1431,51 @@ class Supervisor:
                     # A result atomically published during the GET/POST/signal
                     # race wins over cancellation. The killed scope can no
                     # longer publish a new result after this check.
-                    if ((directory / "result.json").exists()
-                            or signalled_at.timestamp() >= metadata["deadline"]
-                            or signalled_monotonic >= metadata["monotonic_deadline"]):
+                    if (
+                        (directory / "result.json").exists()
+                        or signalled_at.timestamp() >= metadata["deadline"]
+                        or signalled_monotonic >= metadata["monotonic_deadline"]
+                    ):
                         return self._refresh(attempt_id)
                     stopped_at = datetime.now(UTC)
-                    cancelled = receipt.model_copy(update={"state": WorkerState.CANCELLED,
-                        "failure_kind": "cancelled", "error_code": "OperatorCancelled",
-                        "finished_at": stopped_at, "process_stopped": True})
+                    cancelled = receipt.model_copy(
+                        update={
+                            "state": WorkerState.CANCELLED,
+                            "failure_kind": "cancelled",
+                            "error_code": "OperatorCancelled",
+                            "finished_at": stopped_at,
+                            "process_stopped": True,
+                        }
+                    )
                     _json_write(directory / "receipt.json", cancelled.model_dump(mode="json"))
                     self._forget_cpu_group(attempt_id)
-                    _json_write(directory / "cancellation.json", {
-                        "schema_version": 1, "job_id": request.job_id, "attempt_id": request.attempt_id,
-                        "worker_id": request.worker_id, "approval_id": request.approval_id,
-                        "request_sha256": "sha256:" + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
-                        "config_sha256": "sha256:" + hashlib.sha256(canonical_json(self.config.model_dump(mode="json")).encode()).hexdigest(),
-                        "pid": metadata["pid"], "identity": metadata["identity"], "boot_id": metadata["boot_id"],
-                        "deadline": metadata["deadline"], "monotonic_deadline": metadata["monotonic_deadline"],
-                        "cgroup": metadata["cgroup"], "signal": "SIGKILL",
-                        "signal_scope": "process_group" if group_signal else "process_and_cgroup",
-                        "signal_sent_at": signalled_at.isoformat(), "stopped_at": stopped_at.isoformat(),
-                        "process_stopped": True, "job_scope_stopped": True, "result_present": False,
-                    })
+                    _json_write(
+                        directory / "cancellation.json",
+                        {
+                            "schema_version": 1,
+                            "job_id": request.job_id,
+                            "attempt_id": request.attempt_id,
+                            "worker_id": request.worker_id,
+                            "approval_id": request.approval_id,
+                            "request_sha256": "sha256:"
+                            + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
+                            "config_sha256": "sha256:"
+                            + hashlib.sha256(canonical_json(self.config.model_dump(mode="json")).encode()).hexdigest(),
+                            "pid": metadata["pid"],
+                            "identity": metadata["identity"],
+                            "boot_id": metadata["boot_id"],
+                            "deadline": metadata["deadline"],
+                            "monotonic_deadline": metadata["monotonic_deadline"],
+                            "cgroup": metadata["cgroup"],
+                            "signal": "SIGKILL",
+                            "signal_scope": "process_group" if group_signal else "process_and_cgroup",
+                            "signal_sent_at": signalled_at.isoformat(),
+                            "stopped_at": stopped_at.isoformat(),
+                            "process_stopped": True,
+                            "job_scope_stopped": True,
+                            "result_present": False,
+                        },
+                    )
                     return cancelled
             finally:
                 os.close(descriptor)
@@ -1132,6 +1483,7 @@ class Supervisor:
     def upload_tensor(self, digest: str, stream, length: int) -> dict:
         """Stage immutable safetensors by content hash; no caller-selected host path."""
         from safetensors import safe_open, SafetensorError
+
         if not re.fullmatch(r"[0-9a-f]{64}", digest) or not 8 <= length <= self.config.max_tensor_bytes:
             raise WorkerRequestError("invalid content hash or tensor upload size")
         root = Path(self.config.tensor_directory).absolute()
@@ -1225,6 +1577,7 @@ class Supervisor:
 
 class WorkerHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+
     def __init__(self, supervisor: Supervisor, bearer_secret: str, *, host="127.0.0.1", port=0):
         if host != "127.0.0.1" or not 32 <= len(bearer_secret) <= 512:
             raise WorkerRequestError("worker HTTP requires loopback binding and a strong shared secret")
@@ -1235,6 +1588,7 @@ class WorkerHTTPServer(ThreadingHTTPServer):
 
 class _WorkerHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
+
     def log_message(self, *args):
         pass  # Never log authorization headers or request bodies.
 
@@ -1282,7 +1636,11 @@ class _WorkerHandler(BaseHTTPRequestHandler):
             return
         try:
             match = re.fullmatch(r"/v1/tensors/([0-9a-f]{64})", self.path)
-            if not match or self.headers.get("Transfer-Encoding") or not self.headers.get("Content-Length", "").isdigit():
+            if (
+                not match
+                or self.headers.get("Transfer-Encoding")
+                or not self.headers.get("Content-Length", "").isdigit()
+            ):
                 return self._response(400, {"error": "invalid_tensor_upload"})
             length = int(self.headers["Content-Length"])
             if length > self.server.supervisor.config.max_tensor_bytes:
@@ -1318,6 +1676,7 @@ class _WorkerHandler(BaseHTTPRequestHandler):
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="Run the trusted loopback-only Probe worker")
     parser.add_argument("--config", required=True)
     parser.add_argument("--token-file", required=True)

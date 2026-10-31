@@ -1,20 +1,17 @@
 # Auto Interpretability Lab: Implementation and acceptance boundaries
 
-[Project overview](README.md) · [Validation status](docs/validation.md) · [Deployment checklist](docs/live-deployment-plan.md)
+[Project overview](README.md) · [Status](STATUS.md) · [Validation](docs/validation.md)
 
-This guide describes the deployment branch through source `7e01602`, including
+This guide describes the deployment branch, including
 the guarded RunPod adapter, installed service boundaries, pinned worker images
 and backup tooling. The public main branch began with the smaller local foundation;
-its earlier milestones are recorded in [the historical core report](VALIDATION.md).
+its earlier milestones are recorded in [the historical core report](docs/history/2026-09-19-phase-2-verification.md).
 Package names, Python imports, service accounts and paths retain their `probe-*`
 identifiers despite the Auto Interpretability Lab display name.
 
-As of September 20, 2026, controller source `8a5486b` is installed and has passed
-16 CPU containment checks, 26 identity checks and verified Drive backup/restore.
-Seven full-worker GPU attempts ended before inference; no canonical GPU case has
-passed. Provider deletion is confirmed for those attempts, but shutdown during
-controller host loss is unverified. See the deployment checklist for the current
-blocker and the distinction between prepared code and live evidence.
+This guide describes design boundaries and requirements, not current standing.
+What has passed, what is unevidenced and what is deferred is recorded only in
+[STATUS.md](STATUS.md).
 
 ## Boundaries
 
@@ -120,20 +117,14 @@ safetensors include exact `TensorArtifact` references usable in later jobs.
 so a captured activation or CPU-generated direction survives worker replacement.
 The dispatcher verifies and transfers those retained tensor inputs before execution.
 
-## Remaining deployment work
+## Remaining work
 
-The RunPod adapter, protected host services, verified backups and pinned public
-assets are implemented. The selected GPU storage design uses disposable Pod disks
-and immutable image assets; it supersedes the original network-volume proposal.
-The next acceptance target is one successful Base parity job with retained,
-verified artifacts and confirmed Pod deletion. Posttrained parity, the other
-runtime cases and replacement evidence follow that result. Eighteen case plans
-are prepared across the two model identities; none has passed live.
+The ordering of remaining work is set by [REDIRECT-PLAN.md](REDIRECT-PLAN.md)
+and its progress by [STATUS.md](STATUS.md). The selected GPU storage design uses
+disposable Pod disks and immutable image assets; it supersedes the original
+network-volume proposal. Local simulator and CPU tests do not supply either
+scientific or live GPU evidence.
 
-The private evaluator and scientific promotion rules remain future work. Broader
-agent orchestration is deferred while the first Base path is made reliable.
-Local simulator and CPU tests do not supply either scientific or live GPU evidence.
-
-The agreed v1 CPU sandbox plus fixed GPU primitives deliberately does not execute
-arbitrary agent-written Python on the GPU. That original report capability needs
-its own later design and containment acceptance.
+The v1 CPU sandbox plus fixed GPU primitives deliberately does not execute
+arbitrary agent-written Python on the GPU. Changing that requires a reviewed
+threat model and its own containment acceptance (redirect plan, Milestone 5).

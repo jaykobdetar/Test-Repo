@@ -1,4 +1,4 @@
-include README.md LICENSE IMPLEMENTATION.md VALIDATION.md uv.lock
+include README.md LICENSE IMPLEMENTATION.md STATUS.md REDIRECT-PLAN.md CONTRIBUTING.md uv.lock
 recursive-include deploy *.json *.md *.py *.sh *.service *.timer *.conf Containerfile
 recursive-include deploy *.example *.lock
 recursive-include docs *.md

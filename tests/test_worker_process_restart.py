@@ -3,6 +3,7 @@
 The production spawn, limits, process identities, persisted requests, monitoring,
 and termination code run unchanged. This does not claim numerical or GPU parity.
 """
+
 from datetime import datetime, timezone
 import ctypes
 import hashlib
@@ -29,7 +30,7 @@ from test_worker import tiny_bundle, make_request
 # multiprocessing spawn re-imports this temporary script in the numerical child,
 # so only WorkerEngine is substituted there. Supervisor and _child_entry remain
 # production code, including network denial and process/deadline enforcement.
-HARNESS = r'''
+HARNESS = r"""
 import json
 import os
 from pathlib import Path
@@ -90,7 +91,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-'''
+"""
 
 
 class SupervisorProcess:
@@ -98,7 +99,9 @@ class SupervisorProcess:
         self.log = (directory / (mode + "-supervisor.log")).open("wb")
         self.process = subprocess.Popen(
             [sys.executable, "-I", "-u", str(harness), str(config_path), mode],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.log,
             start_new_session=True,
         )
         self.buffer = bytearray()
@@ -124,9 +127,14 @@ class SupervisorProcess:
         return self.read(timeout)
 
     def submit(self, request):
-        return ExecutionReceipt.model_validate(self.command({
-            "action": "submit", "request": request.model_dump(mode="json"),
-        }))
+        return ExecutionReceipt.model_validate(
+            self.command(
+                {
+                    "action": "submit",
+                    "request": request.model_dump(mode="json"),
+                }
+            )
+        )
 
     def snapshot(self, attempt_id):
         return self.command({"action": "snapshot", "attempt_id": attempt_id})
@@ -236,16 +244,25 @@ def test_sigkill_supervisor_adopts_same_child_and_original_deadline(tiny_bundle,
             while not ready.exists() and time.monotonic() < ready_deadline:
                 time.sleep(0.02)
             assert json.loads(ready.read_text()) == {
-                "pid": metadata["pid"], "attempt_id": job.attempt_id, "approval_id": grant.approval_id,
+                "pid": metadata["pid"],
+                "attempt_id": job.attempt_id,
+                "approval_id": grant.approval_id,
             }
             execution_start_bytes = (directory / "execution-started.json").read_bytes()
             execution_start = json.loads(execution_start_bytes)
             assert execution_start == {
-                "schema_version": 1, "job_id": job.job_id, "attempt_id": job.attempt_id,
-                "worker_id": job.worker_id, "approval_id": grant.approval_id,
-                "pid": metadata["pid"], "identity": metadata["identity"], "boot_id": metadata["boot_id"],
-                "request_sha256": "sha256:" + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
-                "config_sha256": "sha256:" + hashlib.sha256(canonical_json(config.model_dump(mode="json")).encode()).hexdigest(),
+                "schema_version": 1,
+                "job_id": job.job_id,
+                "attempt_id": job.attempt_id,
+                "worker_id": job.worker_id,
+                "approval_id": grant.approval_id,
+                "pid": metadata["pid"],
+                "identity": metadata["identity"],
+                "boot_id": metadata["boot_id"],
+                "request_sha256": "sha256:"
+                + hashlib.sha256(canonical_json(request.model_dump(mode="json")).encode()).hexdigest(),
+                "config_sha256": "sha256:"
+                + hashlib.sha256(canonical_json(config.model_dump(mode="json")).encode()).hexdigest(),
                 "started_at": execution_start["started_at"],
             }
             assert datetime.fromisoformat(execution_start["started_at"]).utcoffset().total_seconds() == 0
@@ -286,8 +303,9 @@ def test_sigkill_supervisor_adopts_same_child_and_original_deadline(tiny_bundle,
             # status while waiting: that would itself refresh/terminate it and
             # could conceal a broken autonomous monitor.
             observation_deadline = metadata["monotonic_deadline"] + 3
-            assert select.select([child_fd], [], [], max(0, observation_deadline - time.monotonic()))[0], \
+            assert select.select([child_fd], [], [], max(0, observation_deadline - time.monotonic()))[0], (
                 "background monitor did not terminate the original child by its deadline"
+            )
             observed = replacement.snapshot(job.attempt_id)
             receipt = ExecutionReceipt.model_validate(observed["receipt"])
             assert receipt.process_stopped and receipt.state.value == "FAILED"

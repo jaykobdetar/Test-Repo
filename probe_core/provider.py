@@ -30,8 +30,7 @@ class DeploymentSpec(BaseModel):
     region: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
     volume_gb: int = Field(ge=0, le=1000)
     gpu_count: int = Field(default=1, ge=1, le=1)
-    image_repository: str | None = Field(default=None, max_length=200,
-                                         pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+    image_repository: str | None = Field(default=None, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
     launch_config_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     storage_mode: Literal["ephemeral_preflight", "disposable_research"] | None = None
 
@@ -96,14 +95,29 @@ class ComputeBackend(StopBackend, Protocol):
     provider shutdown proves that every executor on that worker has terminated.
     A simulator that only updates metadata cannot supply that evidence.
     """
+
     stop_confirms_execution: bool
+
     def quote(self, *, worker_id: str | None = None, deployment: DeploymentSpec | None = None) -> PriceQuote: ...
-    def create(self, worker_id: str, deployment: DeploymentSpec, *, request_key: str,
-               price_ceiling_usd_per_hour: float, storage_ceiling_usd_per_day: float,
-               absolute_deadline: datetime | None = None) -> WorkerStatus: ...
-    def start(self, worker_id: str, *, request_key: str,
-              price_ceiling_usd_per_hour: float, storage_ceiling_usd_per_day: float,
-              absolute_deadline: datetime | None = None) -> WorkerStatus: ...
+    def create(
+        self,
+        worker_id: str,
+        deployment: DeploymentSpec,
+        *,
+        request_key: str,
+        price_ceiling_usd_per_hour: float,
+        storage_ceiling_usd_per_day: float,
+        absolute_deadline: datetime | None = None,
+    ) -> WorkerStatus: ...
+    def start(
+        self,
+        worker_id: str,
+        *,
+        request_key: str,
+        price_ceiling_usd_per_hour: float,
+        storage_ceiling_usd_per_day: float,
+        absolute_deadline: datetime | None = None,
+    ) -> WorkerStatus: ...
 
 
 class ProviderLaunchRefused(RuntimeError):
@@ -177,20 +191,26 @@ class SimulatedProvider:
     def _status(worker_id: str, row) -> WorkerStatus:
         if row is None:
             return WorkerStatus(worker_id, WorkerState.ABSENT)
-        return WorkerStatus(worker_id, WorkerState(row["state"]), row["provider_id"],
-                            row["request_key"], row["configuration_hash"])
+        return WorkerStatus(
+            worker_id, WorkerState(row["state"]), row["provider_id"], row["request_key"], row["configuration_hash"]
+        )
 
     def status(self, worker_id: str) -> WorkerStatus:
         with self._connect() as connection:
-            return self._status(worker_id, connection.execute(
-                "SELECT * FROM simulator_workers WHERE worker_id=?", (worker_id,)).fetchone())
+            return self._status(
+                worker_id,
+                connection.execute("SELECT * FROM simulator_workers WHERE worker_id=?", (worker_id,)).fetchone(),
+            )
 
     def quote(self, *, worker_id=None, deployment=None) -> PriceQuote:
         if (worker_id is None) == (deployment is None):
             raise ValueError("quote exactly one existing worker or deployment")
         with self._connect() as connection:
-            if worker_id is not None and connection.execute(
-                    "SELECT 1 FROM simulator_workers WHERE worker_id=?", (worker_id,)).fetchone() is None:
+            if (
+                worker_id is not None
+                and connection.execute("SELECT 1 FROM simulator_workers WHERE worker_id=?", (worker_id,)).fetchone()
+                is None
+            ):
                 raise ValueError("worker does not exist")
             volumes = {}
             for row in connection.execute("SELECT configuration FROM simulator_workers"):
@@ -211,7 +231,7 @@ class SimulatedProvider:
     @staticmethod
     def _check_budget(connection, deployment, price_ceiling, storage_ceiling):
         price = connection.execute("SELECT price FROM simulator_settings WHERE id=1").fetchone()[0]
-        if (not math.isfinite(price) or not 0 < price <= price_ceiling or price >= 1.50):
+        if not math.isfinite(price) or not 0 < price <= price_ceiling or price >= 1.50:
             raise ProviderBudgetRefused("provider price no longer satisfies approval")
         volumes = {}
         for row in connection.execute("SELECT configuration FROM simulator_workers"):
@@ -222,26 +242,44 @@ class SimulatedProvider:
         if sum(volumes.values()) * 0.07 / 30.44 >= storage_ceiling:
             raise ProviderBudgetRefused("provider storage no longer satisfies idle budget")
 
-    def create(self, worker_id: str, deployment: DeploymentSpec, *, request_key: str,
-               price_ceiling_usd_per_hour: float = 1.49, storage_ceiling_usd_per_day: float = 2.0,
-               absolute_deadline: datetime | None = None) -> WorkerStatus:
+    def create(
+        self,
+        worker_id: str,
+        deployment: DeploymentSpec,
+        *,
+        request_key: str,
+        price_ceiling_usd_per_hour: float = 1.49,
+        storage_ceiling_usd_per_day: float = 2.0,
+        absolute_deadline: datetime | None = None,
+    ) -> WorkerStatus:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 self._check_budget(connection, deployment, price_ceiling_usd_per_hour, storage_ceiling_usd_per_day)
-                old = connection.execute("SELECT * FROM simulator_workers WHERE worker_id=? OR request_key=?",
-                                         (worker_id, request_key)).fetchone()
+                old = connection.execute(
+                    "SELECT * FROM simulator_workers WHERE worker_id=? OR request_key=?", (worker_id, request_key)
+                ).fetchone()
                 if old is not None:
                     if old["worker_id"] != worker_id or old["configuration_hash"] != deployment.digest:
                         raise ValueError("provider creation identity conflict")
                     connection.execute("COMMIT")
                     return self._status(worker_id, old)
                 provider_id = "sim-" + uuid.uuid4().hex
-                connection.execute("INSERT INTO simulator_workers VALUES(?,?,?,?,?,?)",
-                                   (worker_id, provider_id, request_key, canonical_json(deployment.model_dump()),
-                                    deployment.digest, WorkerState.RUNNING.value))
-                connection.execute("INSERT INTO simulator_calls(operation,worker_id,request_key) VALUES('create',?,?)",
-                                   (worker_id, request_key))
+                connection.execute(
+                    "INSERT INTO simulator_workers VALUES(?,?,?,?,?,?)",
+                    (
+                        worker_id,
+                        provider_id,
+                        request_key,
+                        canonical_json(deployment.model_dump()),
+                        deployment.digest,
+                        WorkerState.RUNNING.value,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO simulator_calls(operation,worker_id,request_key) VALUES('create',?,?)",
+                    (worker_id, request_key),
+                )
                 connection.execute("COMMIT")
             except BaseException:
                 if connection.in_transaction:
@@ -249,19 +287,29 @@ class SimulatedProvider:
                 raise
         return self.status(worker_id)
 
-    def start(self, worker_id: str, *, request_key: str,
-              price_ceiling_usd_per_hour: float = 1.49, storage_ceiling_usd_per_day: float = 2.0,
-              absolute_deadline: datetime | None = None) -> WorkerStatus:
+    def start(
+        self,
+        worker_id: str,
+        *,
+        request_key: str,
+        price_ceiling_usd_per_hour: float = 1.49,
+        storage_ceiling_usd_per_day: float = 2.0,
+        absolute_deadline: datetime | None = None,
+    ) -> WorkerStatus:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 self._check_budget(connection, None, price_ceiling_usd_per_hour, storage_ceiling_usd_per_day)
-                row = connection.execute("SELECT state FROM simulator_workers WHERE worker_id=?", (worker_id,)).fetchone()
+                row = connection.execute(
+                    "SELECT state FROM simulator_workers WHERE worker_id=?", (worker_id,)
+                ).fetchone()
                 if row is None or row[0] != WorkerState.STOPPED.value:
                     raise ValueError("only an existing stopped worker may start")
                 connection.execute("UPDATE simulator_workers SET state='RUNNING' WHERE worker_id=?", (worker_id,))
-                connection.execute("INSERT INTO simulator_calls(operation,worker_id,request_key) VALUES('start',?,?)",
-                                   (worker_id, request_key))
+                connection.execute(
+                    "INSERT INTO simulator_calls(operation,worker_id,request_key) VALUES('start',?,?)",
+                    (worker_id, request_key),
+                )
                 connection.execute("COMMIT")
             except BaseException:
                 if connection.in_transaction:

@@ -4,6 +4,7 @@ No host socket, credentials, GPU device, or writable host directory is mounted.
 The pinned image's entrypoint attests the actual cgroup/security settings before
 the host releases the experiment. All subsequent output is untrusted data.
 """
+
 from __future__ import annotations
 
 import base64
@@ -54,15 +55,23 @@ class SandboxLimits:
 
     def __post_init__(self):
         bounds = {
-            "wall_seconds": (1, 3600), "memory_bytes": (64 * 1024**2, 8 * 1024**3),
-            "pids": (8, 128), "max_output_bytes": (4096, 64 * 1024**2),
-            "max_log_bytes": (1024, 4 * 1024**2), "max_broker_requests": (0, 64),
+            "wall_seconds": (1, 3600),
+            "memory_bytes": (64 * 1024**2, 8 * 1024**3),
+            "pids": (8, 128),
+            "max_output_bytes": (4096, 64 * 1024**2),
+            "max_log_bytes": (1024, 4 * 1024**2),
+            "max_broker_requests": (0, 64),
         }
         for name, (low, high) in bounds.items():
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer in [{low}, {high}]")
-        if isinstance(self.cpu_cores, bool) or not isinstance(self.cpu_cores, (float, int)) or not math.isfinite(self.cpu_cores) or not 0.1 <= self.cpu_cores <= 4:
+        if (
+            isinstance(self.cpu_cores, bool)
+            or not isinstance(self.cpu_cores, (float, int))
+            or not math.isfinite(self.cpu_cores)
+            or not 0.1 <= self.cpu_cores <= 4
+        ):
             raise ValueError("cpu_cores must be finite and between 0.1 and 4")
         if self.max_output_bytes >= self.memory_bytes // 2:
             raise ValueError("output tmpfs must leave at least half of the memory budget available")
@@ -81,6 +90,7 @@ class GPURequestBroker:
     submit must perform the controller's usual authorization/budget checks and
     return a non-secret job ID. This broker grants no cloud-start capability.
     """
+
     def __init__(self, approved_jobs: Mapping[str, JobSpec], submit: Callable[[JobSpec], str]):
         self._jobs = {key: JobSpec.model_validate(value.model_dump()) for key, value in approved_jobs.items()}
         self._submit = submit
@@ -134,6 +144,7 @@ def _relative_path(value: object) -> str:
 
 class _ArtifactReceiver:
     """Accept a bounded, non-executable file stream into a private empty directory."""
+
     def __init__(self, root: Path, limit: int):
         self.root, self.limit = root, limit
         self.total = 0
@@ -203,7 +214,9 @@ class PodmanSandbox:
             raise ValueError("workspace must be a private directory owned by the controller")
         os.chmod(self.workspace, 0o700)
         self.podman = str(podman)
-        self.seccomp_profile = Path(seccomp_profile or str(files("probe_core").joinpath("resources/seccomp.json"))).absolute()
+        self.seccomp_profile = Path(
+            seccomp_profile or str(files("probe_core").joinpath("resources/seccomp.json"))
+        ).absolute()
         if not self.seccomp_profile.is_file() or self.seccomp_profile.is_symlink():
             raise ValueError("a regular trusted seccomp profile is required")
 
@@ -220,7 +233,13 @@ class PodmanSandbox:
         if os.geteuid() == 0:
             raise SandboxUnavailable("sandbox must be launched by a non-root controller identity")
         try:
-            result = subprocess.run(self._command("info", "--format=json"), capture_output=True, env=self._environment(), timeout=15, check=False)
+            result = subprocess.run(
+                self._command("info", "--format=json"),
+                capture_output=True,
+                env=self._environment(),
+                timeout=15,
+                check=False,
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SandboxUnavailable("rootless Podman runtime is unavailable") from exc
         if result.returncode:
@@ -229,38 +248,75 @@ class PodmanSandbox:
         try:
             info = json.loads(result.stdout)
             host = info["host"]
-            if not host["security"]["rootless"] or not host["security"]["seccompEnabled"] or host["cgroupVersion"] != "v2":
+            if (
+                not host["security"]["rootless"]
+                or not host["security"]["seccompEnabled"]
+                or host["cgroupVersion"] != "v2"
+            ):
                 raise ValueError("missing rootless/seccomp/cgroup-v2 capability")
             if not {"cpu", "memory", "pids"} <= set(host.get("cgroupControllers", [])):
                 raise ValueError("CPU, memory and PID cgroup controllers must be delegated")
         except (ValueError, KeyError, TypeError) as exc:
-            raise SandboxUnavailable("rootless Podman requires seccomp and delegated cgroup-v2 CPU, memory and PID controllers") from exc
+            raise SandboxUnavailable(
+                "rootless Podman requires seccomp and delegated cgroup-v2 CPU, memory and PID controllers"
+            ) from exc
         return info
 
     def _run_command(self, name: str, inputs: Path, limits: SandboxLimits) -> list[str]:
         return self._command(
-            "run", "--name", name, "--pull=never", "--interactive", "--log-driver=none",
+            "run",
+            "--name",
+            name,
+            "--pull=never",
+            "--interactive",
+            "--log-driver=none",
             # Conmon enforces this deadline even if the facade and attached
             # Podman client die. Keep the host timer for startup-inclusive limits.
-            "--timeout=" + str(limits.wall_seconds), "--rm",
-            "--network=none", "--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private",
-            "--userns=keep-id:uid=1000,gid=1000", "--user=1000:1000", "--cap-drop=ALL",
-            "--security-opt=no-new-privileges", "--security-opt=seccomp=" + str(self.seccomp_profile),
-            "--read-only", "--read-only-tmpfs=false", "--unsetenv-all", "--http-proxy=false",
-            "--env=PATH=/usr/local/bin:/usr/bin:/bin", "--env=PYTHONDONTWRITEBYTECODE=1",
-            "--env=PYTHONUNBUFFERED=1", "--env=HOME=/output", "--env=TMPDIR=/output",
-            "--env=OPENBLAS_NUM_THREADS=1", "--env=OMP_NUM_THREADS=1", "--env=MKL_NUM_THREADS=1",
-            "--env=NUMEXPR_NUM_THREADS=1", "--env=TOKENIZERS_PARALLELISM=false",
-            "--env=HF_HUB_OFFLINE=1", "--env=TRANSFORMERS_OFFLINE=1", "--env=HF_HUB_DISABLE_TELEMETRY=1",
+            "--timeout=" + str(limits.wall_seconds),
+            "--rm",
+            "--network=none",
+            "--pid=private",
+            "--ipc=private",
+            "--uts=private",
+            "--cgroupns=private",
+            "--userns=keep-id:uid=1000,gid=1000",
+            "--user=1000:1000",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--security-opt=seccomp=" + str(self.seccomp_profile),
+            "--read-only",
+            "--read-only-tmpfs=false",
+            "--unsetenv-all",
+            "--http-proxy=false",
+            "--env=PATH=/usr/local/bin:/usr/bin:/bin",
+            "--env=PYTHONDONTWRITEBYTECODE=1",
+            "--env=PYTHONUNBUFFERED=1",
+            "--env=HOME=/output",
+            "--env=TMPDIR=/output",
+            "--env=OPENBLAS_NUM_THREADS=1",
+            "--env=OMP_NUM_THREADS=1",
+            "--env=MKL_NUM_THREADS=1",
+            "--env=NUMEXPR_NUM_THREADS=1",
+            "--env=TOKENIZERS_PARALLELISM=false",
+            "--env=HF_HUB_OFFLINE=1",
+            "--env=TRANSFORMERS_OFFLINE=1",
+            "--env=HF_HUB_DISABLE_TELEMETRY=1",
             "--env=PROBE_OUTPUT_LIMIT=" + str(limits.max_output_bytes),
-            "--cpus=" + str(limits.cpu_cores), "--memory=" + str(limits.memory_bytes),
-            "--memory-swap=" + str(limits.memory_bytes), "--pids-limit=" + str(limits.pids),
-            "--ulimit=core=0:0", "--ulimit=nofile=128:128",
+            "--cpus=" + str(limits.cpu_cores),
+            "--memory=" + str(limits.memory_bytes),
+            "--memory-swap=" + str(limits.memory_bytes),
+            "--pids-limit=" + str(limits.pids),
+            "--ulimit=core=0:0",
+            "--ulimit=nofile=128:128",
             "--ulimit=fsize=" + str(limits.max_output_bytes) + ":" + str(limits.max_output_bytes),
             "--mount=type=bind,src=" + str(inputs) + ",dst=/input,ro=true,nodev,nosuid,noexec",
             "--tmpfs=/output:rw,noexec,nosuid,nodev,size=" + str(limits.max_output_bytes) + ",mode=1777",
-            "--workdir=/output", "--entrypoint=/usr/local/bin/python", self.image,
-            "-I", "-B", "/opt/probe/sandbox_entry.py",
+            "--workdir=/output",
+            "--entrypoint=/usr/local/bin/python",
+            self.image,
+            "-I",
+            "-B",
+            "/opt/probe/sandbox_entry.py",
         )
 
     @staticmethod
@@ -268,9 +324,13 @@ class PodmanSandbox:
         try:
             quota, period = report["cpu_max"].split()
             secure = (
-                report["uid"] == 1000 and report["cap_eff"] == "0000000000000000"
-                and report["seccomp"] == "2" and report["no_new_privs"] == "1"
-                and report["socket_denied"] and report["input_readonly"] and report["root_readonly"]
+                report["uid"] == 1000
+                and report["cap_eff"] == "0000000000000000"
+                and report["seccomp"] == "2"
+                and report["no_new_privs"] == "1"
+                and report["socket_denied"]
+                and report["input_readonly"]
+                and report["root_readonly"]
                 and 0 < int(report["memory_max"]) <= limits.memory_bytes
                 and 0 < int(report["pids_max"]) <= limits.pids
                 and 0 < int(quota) / int(period) <= limits.cpu_cores + 0.0001
@@ -281,7 +341,15 @@ class PodmanSandbox:
         if not secure:
             raise SandboxUnavailable("container did not attest enforced isolation and resource limits")
 
-    def run(self, code: str, *, inputs: Mapping[str, bytes] | None = None, limits: SandboxLimits | None = None, broker: GPURequestBroker | None = None, cancel_event: threading.Event | None = None) -> SandboxResult:
+    def run(
+        self,
+        code: str,
+        *,
+        inputs: Mapping[str, bytes] | None = None,
+        limits: SandboxLimits | None = None,
+        broker: GPURequestBroker | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> SandboxResult:
         limits = limits or SandboxLimits()
         if not isinstance(code, str) or "\x00" in code or len(code.encode()) > 1024**2:
             raise ValueError("code must be UTF-8 text of at most 1 MiB")
@@ -291,7 +359,10 @@ class PodmanSandbox:
         input_dir.mkdir(mode=0o700)
         output_dir.mkdir(mode=0o700)
         supplied = dict(inputs or {})
-        if len(supplied) > 256 or sum(len(value) for value in supplied.values() if isinstance(value, bytes)) > 16 * 1024**2:
+        if (
+            len(supplied) > 256
+            or sum(len(value) for value in supplied.values() if isinstance(value, bytes)) > 16 * 1024**2
+        ):
             raise ValueError("input bundle exceeds its count or size limit")
         for key, value in supplied.items():
             path = _relative_path(key)
@@ -305,7 +376,15 @@ class PodmanSandbox:
         (input_dir / "code.py").chmod(0o400)
         name = "probe-cpu-" + run_dir.name.removeprefix("run-")
         command = self._run_command(name, input_dir, limits)
-        proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self._environment(), start_new_session=True, close_fds=True)
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self._environment(),
+            start_new_session=True,
+            close_fds=True,
+        )
         receiver = _ArtifactReceiver(output_dir, limits.max_output_bytes)
         logs = {"stdout": bytearray(), "stderr": bytearray()}
         selector = selectors.DefaultSelector()
@@ -321,7 +400,12 @@ class PodmanSandbox:
         def terminate():
             with stop_lock:
                 try:
-                    subprocess.run(self._command("kill", "--signal=KILL", name), capture_output=True, env=self._environment(), timeout=5)
+                    subprocess.run(
+                        self._command("kill", "--signal=KILL", name),
+                        capture_output=True,
+                        env=self._environment(),
+                        timeout=5,
+                    )
                 except (OSError, subprocess.TimeoutExpired):
                     pass
                 if proc.poll() is None:
@@ -372,7 +456,11 @@ class PodmanSandbox:
                             request_count += 1
                             if request_count > limits.max_broker_requests:
                                 raise SandboxProtocolError("broker request limit exceeded")
-                            response = broker.handle(bytes(line[13:])) if broker else {"status": "denied", "reason": "broker_disabled"}
+                            response = (
+                                broker.handle(bytes(line[13:]))
+                                if broker
+                                else {"status": "denied", "reason": "broker_disabled"}
+                            )
                             proc.stdin.write(json.dumps(response, separators=(",", ":")).encode() + b"\n")
                             proc.stdin.flush()
                         elif channel == "stdout" and line.startswith(b"PROBE_ARTIFACT:"):
@@ -385,7 +473,10 @@ class PodmanSandbox:
                             raise SandboxProtocolError("log output limit exceeded")
                     if len(buffers[channel]) > 128 * 1024:
                         raise SandboxProtocolError("output frame exceeds 128 KiB")
-                    if sum(map(len, logs.values())) + sum(map(len, buffers.values())) > limits.max_log_bytes + 128 * 1024:
+                    if (
+                        sum(map(len, logs.values())) + sum(map(len, buffers.values()))
+                        > limits.max_log_bytes + 128 * 1024
+                    ):
                         raise SandboxProtocolError("log output limit exceeded")
             proc.wait(timeout=5)
             # A kill can close both streams during select(), ending the loop
@@ -407,7 +498,12 @@ class PodmanSandbox:
             receiver.close()
             terminate()
             try:
-                removed = subprocess.run(self._command("rm", "--force", "--ignore", name), capture_output=True, env=self._environment(), timeout=10)
+                removed = subprocess.run(
+                    self._command("rm", "--force", "--ignore", name),
+                    capture_output=True,
+                    env=self._environment(),
+                    timeout=10,
+                )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise SandboxUnavailable("container termination could not be confirmed") from exc
             if removed.returncode:
@@ -421,4 +517,10 @@ class PodmanSandbox:
             artifacts = ()
         else:
             artifacts = tuple(receiver.finished)
-        return SandboxResult(proc.returncode, logs["stdout"].decode(errors="replace"), logs["stderr"].decode(errors="replace"), artifacts, reason)
+        return SandboxResult(
+            proc.returncode,
+            logs["stdout"].decode(errors="replace"),
+            logs["stderr"].decode(errors="replace"),
+            artifacts,
+            reason,
+        )

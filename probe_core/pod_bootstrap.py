@@ -5,6 +5,7 @@ mounts a filesystem, changes provider resource limits, signals processes, or
 reuses an existing subtree. A partial failure requires a fresh Pod; it does not
 roll processes back or grant permission to begin numerical execution.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -74,20 +75,29 @@ def _validate_mount(text, root):
         _require(not mountpoint.startswith(root + "/"), "nested mounts obscure the cgroup scope")
     _require(len(cgroup_mounts) == 1, "exactly one private unified cgroup mount is required")
     fields, separator = cgroup_mounts[0]
-    _require(fields[separator + 1] == "cgroup2" and _unescape_mount(fields[3]) == "/"
-             and _unescape_mount(fields[4]) == root, "the selected path is not the private cgroup2 mount root")
-    _require("rw" in fields[5].split(",") and "ro" not in fields[5].split(",")
-             and {"rw", "nsdelegate"} <= set(fields[separator + 3].split(",")),
-             "a writable namespace-delegated cgroup2 mount is required")
+    _require(
+        fields[separator + 1] == "cgroup2" and _unescape_mount(fields[3]) == "/" and _unescape_mount(fields[4]) == root,
+        "the selected path is not the private cgroup2 mount root",
+    )
+    _require(
+        "rw" in fields[5].split(",")
+        and "ro" not in fields[5].split(",")
+        and {"rw", "nsdelegate"} <= set(fields[separator + 3].split(",")),
+        "a writable namespace-delegated cgroup2 mount is required",
+    )
 
 
 def _mapped_identity(text, worker_id):
     rows = [line.split() for line in text.splitlines() if line.strip()]
-    _require(len(rows) == 1 and len(rows[0]) == 3 and all(part.isdecimal() for part in rows[0]),
-             "a single explicit remapped Pod identity range is required")
+    _require(
+        len(rows) == 1 and len(rows[0]) == 3 and all(part.isdecimal() for part in rows[0]),
+        "a single explicit remapped Pod identity range is required",
+    )
     inside, outside, length = map(int, rows[0])
-    _require(inside == 0 and outside > 0 and worker_id < length <= 2**32 - outside,
-             "host-global or insufficient identity mapping refused")
+    _require(
+        inside == 0 and outside > 0 and worker_id < length <= 2**32 - outside,
+        "host-global or insufficient identity mapping refused",
+    )
 
 
 def _namespaces(pid):
@@ -98,23 +108,29 @@ def _process(pid, namespaces, membership):
     """Observe through one proc-directory descriptor; do not claim atomic migration."""
     fd = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
+
         def read(name):
             child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
             try:
                 return _read_fd(child)
             finally:
                 os.close(child)
+
         first = read("stat")
-        _require(tuple((name, os.readlink("ns/" + name, dir_fd=fd)) for name in _NAMESPACES) == namespaces,
-                 "foreign-namespace cgroup member refused")
+        _require(
+            tuple((name, os.readlink("ns/" + name, dir_fd=fd)) for name in _NAMESPACES) == namespaces,
+            "foreign-namespace cgroup member refused",
+        )
         _require(read("cgroup") == "0::" + membership + "\n", "cgroup member moved during bootstrap")
         last = read("stat")
+
         def identity(value):
             prefix, suffix = value.rsplit(")", 1)
             _require(prefix.split(" (", 1)[0] == str(pid), "process identity mismatch")
             fields = suffix.split()
             _require(len(fields) > 19 and fields[19].isdecimal(), "invalid process start identity")
             return int(fields[19])
+
         _require(identity(first) == identity(last), "process identity changed during observation")
         return identity(last)
     finally:
@@ -123,10 +139,13 @@ def _process(pid, namespaces, membership):
 
 class _Scope:
     """All writes stay beneath the verified mount descriptor and fixed names."""
+
     def __init__(self, root):
         path = Path(root)
-        _require(path.is_absolute() and str(path) == str(root) and ".." not in path.parts,
-                 "cgroup root must be a canonical absolute path")
+        _require(
+            path.is_absolute() and str(path) == str(root) and ".." not in path.parts,
+            "cgroup root must be a canonical absolute path",
+        )
         fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
             for part in path.parts[1:]:
@@ -172,9 +191,16 @@ class _Scope:
             return _read_fd(fd)
 
     def write(self, relative, value):
-        _require(relative in {_BOOTSTRAP + "/cgroup.procs", "cgroup.subtree_control",
-                              _JOBS + "/cgroup.subtree_control", _SUPERVISOR + "/cgroup.procs"},
-                 "control write is outside the fixed bootstrap allowlist")
+        _require(
+            relative
+            in {
+                _BOOTSTRAP + "/cgroup.procs",
+                "cgroup.subtree_control",
+                _JOBS + "/cgroup.subtree_control",
+                _SUPERVISOR + "/cgroup.procs",
+            },
+            "control write is outside the fixed bootstrap allowlist",
+        )
         data = (value + "\n").encode("ascii")
         with self.file(relative, os.O_WRONLY) as fd:
             _require(os.write(fd, data) == len(data), "cgroup control write was incomplete")
@@ -196,29 +222,38 @@ class _Scope:
             return (info.st_dev, info.st_ino)
 
     def children(self):
-        return [name for name in os.listdir(self.fd)
-                if stat.S_ISDIR(os.stat(name, dir_fd=self.fd, follow_symlinks=False).st_mode)]
+        return [
+            name
+            for name in os.listdir(self.fd)
+            if stat.S_ISDIR(os.stat(name, dir_fd=self.fd, follow_symlinks=False).st_mode)
+        ]
 
     def delegate(self, relative, uid, gid):
         with self.directory(relative) as fd:
             os.fchown(fd, uid, gid)
             os.fchmod(fd, 0o755)
             info = os.fstat(fd)
-            _require((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (uid, gid, 0o755),
-                     "delegated directory permission readback failed")
+            _require(
+                (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (uid, gid, 0o755),
+                "delegated directory permission readback failed",
+            )
         for name in _DELEGATE_FILES:
             with self.file(relative + "/" + name) as fd:
                 os.fchown(fd, uid, gid)
                 os.fchmod(fd, 0o644)
                 info = os.fstat(fd)
-                _require((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (uid, gid, 0o644),
-                         "delegation interface permission readback failed")
+                _require(
+                    (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (uid, gid, 0o644),
+                    "delegation interface permission readback failed",
+                )
 
 
 def _members(scope):
     words = scope.read("cgroup.procs").split()
-    _require(len(words) <= _MAX_MEMBERS and all(word.isdecimal() and int(word) > 0 for word in words),
-             "unresolved or excessive cgroup members refused")
+    _require(
+        len(words) <= _MAX_MEMBERS and all(word.isdecimal() and int(word) > 0 for word in words),
+        "unresolved or excessive cgroup members refused",
+    )
     return set(map(int, words))
 
 
@@ -228,8 +263,10 @@ def _validate_scope(scope, uid, gid):
     _validate_mount(_proc_read("/proc/self/mountinfo"), scope.root)
     library = ctypes.CDLL(None, use_errno=True)
     buffer = ctypes.create_string_buffer(256)
-    _require(library.fstatfs(scope.fd, ctypes.byref(buffer)) == 0
-             and ctypes.c_long.from_buffer(buffer).value == 0x63677270, "actual cgroup2 filesystem required")
+    _require(
+        library.fstatfs(scope.fd, ctypes.byref(buffer)) == 0 and ctypes.c_long.from_buffer(buffer).value == 0x63677270,
+        "actual cgroup2 filesystem required",
+    )
     namespaces = _namespaces("self")
     _require(namespaces == _namespaces(1), "Pod PID1 must share the current private namespaces")
     for filename, worker_id in (("uid_map", uid), ("gid_map", gid)):
@@ -248,12 +285,17 @@ def _validate_scope(scope, uid, gid):
             pass  # Test delegation access without writing any control bytes.
     _require(scope.read("cgroup.type").strip() == "domain", "domain cgroup required")
     _require(_CONTROLLERS <= set(scope.read("cgroup.controllers").split()), "required resource controllers unavailable")
-    _require(not scope.read("cgroup.subtree_control").strip() and not scope.children(),
-             "bootstrap requires a fresh unconfigured Pod subtree")
+    _require(
+        not scope.read("cgroup.subtree_control").strip() and not scope.children(),
+        "bootstrap requires a fresh unconfigured Pod subtree",
+    )
     limits = {}
     for name in _LIMIT_FILES:
         info = scope.info(name)
-        _require(info.st_uid not in {0, uid} and not info.st_mode & 0o022, "provider outer limits must remain externally owned")
+        _require(
+            info.st_uid not in {0, uid} and not info.st_mode & 0o022,
+            "provider outer limits must remain externally owned",
+        )
         limits[name] = scope.read(name)
         try:
             with scope.file(name, os.O_WRONLY):
@@ -303,31 +345,58 @@ def prepare(root="/sys/fs/cgroup", *, worker_uid=WORKER_UID, worker_gid=WORKER_U
             for pid in ordered:
                 _require(_process(pid, namespaces, "/") == identities[pid], "member identity changed before migration")
                 scope.write(_BOOTSTRAP + "/cgroup.procs", "0" if pid == os.getpid() else str(pid))
-                _require(_process(pid, namespaces, "/" + _BOOTSTRAP) == identities[pid], "member identity changed after migration")
+                _require(
+                    _process(pid, namespaces, "/" + _BOOTSTRAP) == identities[pid],
+                    "member identity changed after migration",
+                )
                 moved.append(pid)
         _require(not _members(scope), "root membership did not settle within the bounded migration rounds")
         scope.write("cgroup.subtree_control", "+cpu +memory +pids")
         _require(set(scope.read("cgroup.subtree_control").split()) == _CONTROLLERS, "root controller readback failed")
         scope.mkdir(_JOBS)
         _require(not scope.read(_JOBS + "/cgroup.procs").strip(), "jobs ancestor must remain empty")
-        _require(_CONTROLLERS <= set(scope.read(_JOBS + "/cgroup.controllers").split()),
-                 "jobs controllers were not inherited")
+        _require(
+            _CONTROLLERS <= set(scope.read(_JOBS + "/cgroup.controllers").split()),
+            "jobs controllers were not inherited",
+        )
         scope.write(_JOBS + "/cgroup.subtree_control", "+cpu +memory +pids")
-        _require(set(scope.read(_JOBS + "/cgroup.subtree_control").split()) == _CONTROLLERS, "jobs controller readback failed")
+        _require(
+            set(scope.read(_JOBS + "/cgroup.subtree_control").split()) == _CONTROLLERS,
+            "jobs controller readback failed",
+        )
         scope.mkdir(_SUPERVISOR)
-        _require(scope.read(_SUPERVISOR + "/cgroup.type").strip() == "domain"
-                 and not scope.read(_SUPERVISOR + "/cgroup.subtree_control").strip()
-                 and not scope.read(_SUPERVISOR + "/cgroup.procs").strip(), "supervisor must be a fresh empty leaf")
+        _require(
+            scope.read(_SUPERVISOR + "/cgroup.type").strip() == "domain"
+            and not scope.read(_SUPERVISOR + "/cgroup.subtree_control").strip()
+            and not scope.read(_SUPERVISOR + "/cgroup.procs").strip(),
+            "supervisor must be a fresh empty leaf",
+        )
         scope.delegate(_SUPERVISOR, worker_uid, worker_gid)
         scope.delegate(_JOBS, worker_uid, worker_gid)
-        _require(not _members(scope) and not scope.read(_JOBS + "/cgroup.procs").strip(),
-                 "an internal process appeared during controller delegation")
-        _require(all(scope.info(_JOBS + "/" + name).st_uid == 0 for name in _LIMIT_FILES),
-                 "job ancestor resource limits must remain root-owned")
-        _require(all(scope.read(name) == value for name, value in limits.items()), "provider outer limits changed during bootstrap")
-        return PreparedScope(scope.root, scope.root + "/" + _BOOTSTRAP, scope.root + "/" + _JOBS,
-                             scope.root + "/" + _SUPERVISOR, worker_uid, worker_gid, namespaces,
-                             scope.directory_identity(), scope.directory_identity(_SUPERVISOR), tuple(moved))
+        _require(
+            not _members(scope) and not scope.read(_JOBS + "/cgroup.procs").strip(),
+            "an internal process appeared during controller delegation",
+        )
+        _require(
+            all(scope.info(_JOBS + "/" + name).st_uid == 0 for name in _LIMIT_FILES),
+            "job ancestor resource limits must remain root-owned",
+        )
+        _require(
+            all(scope.read(name) == value for name, value in limits.items()),
+            "provider outer limits changed during bootstrap",
+        )
+        return PreparedScope(
+            scope.root,
+            scope.root + "/" + _BOOTSTRAP,
+            scope.root + "/" + _JOBS,
+            scope.root + "/" + _SUPERVISOR,
+            worker_uid,
+            worker_gid,
+            namespaces,
+            scope.directory_identity(),
+            scope.directory_identity(_SUPERVISOR),
+            tuple(moved),
+        )
     finally:
         scope.close()
 
@@ -339,14 +408,21 @@ def enter_supervisor_and_drop(prepared):
     worker inputs. This helper does not copy secrets, extend deadlines or replay
     requests. It never moves its parent or any PID supplied by a caller.
     """
-    _require(isinstance(prepared, PreparedScope) and prepared.worker_uid == WORKER_UID
-             and prepared.worker_gid == WORKER_UID and os.getresuid() == (0, 0, 0), "trusted prepared worker scope required")
+    _require(
+        isinstance(prepared, PreparedScope)
+        and prepared.worker_uid == WORKER_UID
+        and prepared.worker_gid == WORKER_UID
+        and os.getresuid() == (0, 0, 0),
+        "trusted prepared worker scope required",
+    )
     _require(_namespaces("self") == prepared.namespaces, "prepared Pod namespace changed")
     scope = _Scope(prepared.root)
     try:
-        _require(scope.directory_identity() == prepared.root_identity
-                 and scope.directory_identity(_SUPERVISOR) == prepared.supervisor_identity,
-                 "prepared cgroup identity changed")
+        _require(
+            scope.directory_identity() == prepared.root_identity
+            and scope.directory_identity(_SUPERVISOR) == prepared.supervisor_identity,
+            "prepared cgroup identity changed",
+        )
         scope.write(_SUPERVISOR + "/cgroup.procs", "0")
         _process(os.getpid(), prepared.namespaces, "/" + _SUPERVISOR)
     finally:
@@ -356,12 +432,16 @@ def enter_supervisor_and_drop(prepared):
     os.setresuid(prepared.worker_uid, prepared.worker_uid, prepared.worker_uid)
     library = ctypes.CDLL(None, use_errno=True)
     _require(library.prctl(38, 1, 0, 0, 0) == 0, "no_new_privs could not be set")
-    _require(os.getresuid() == (WORKER_UID,) * 3 and os.getresgid() == (WORKER_UID,) * 3 and not os.getgroups(),
-             "worker privilege drop failed")
+    _require(
+        os.getresuid() == (WORKER_UID,) * 3 and os.getresgid() == (WORKER_UID,) * 3 and not os.getgroups(),
+        "worker privilege drop failed",
+    )
     status = dict(line.split(":", 1) for line in _proc_read("/proc/self/status").splitlines() if ":" in line)
-    _require(status.get("NoNewPrivs", "").strip() == "1"
-             and all(int(status.get(name, "-1").strip(), 16) == 0 for name in ("CapInh", "CapPrm", "CapEff", "CapAmb")),
-             "worker retained capabilities after privilege drop")
+    _require(
+        status.get("NoNewPrivs", "").strip() == "1"
+        and all(int(status.get(name, "-1").strip(), 16) == 0 for name in ("CapInh", "CapPrm", "CapEff", "CapAmb")),
+        "worker retained capabilities after privilege drop",
+    )
 
 
 def main():
@@ -370,13 +450,21 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     prepared = prepare(args.root)
-    print(json.dumps({"schema_version": 1, "kind": "pod_cgroup_bootstrap", "prepared": asdict(prepared)}, sort_keys=True), flush=True)
+    print(
+        json.dumps({"schema_version": 1, "kind": "pod_cgroup_bootstrap", "prepared": asdict(prepared)}, sort_keys=True),
+        flush=True,
+    )
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if command:
         _require(os.path.isabs(command[0]), "an absolute trusted command is required")
         enter_supervisor_and_drop(prepared)
-        environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/home/probe-worker",
-                       "USER": "probe-worker", "LOGNAME": "probe-worker", "LANG": "C.UTF-8"}
+        environment = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "HOME": "/home/probe-worker",
+            "USER": "probe-worker",
+            "LOGNAME": "probe-worker",
+            "LANG": "C.UTF-8",
+        }
         os.execve(command[0], command, environment)
 
 

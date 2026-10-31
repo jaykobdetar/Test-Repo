@@ -5,9 +5,9 @@ research into language models. It lets a research agent request model inspection
 and controlled interventions, records what ran and what it produced, and keeps
 paid compute behind a separate approval process.
 
-Both **Qwen3-1.7B-Base** and **Qwen3-1.7B** have passed supervised GPU numerical
-calibration. The project is not yet an autonomous research lab, and it has
-produced no validated scientific findings.
+The intended research subjects are **Qwen3-1.7B-Base** and **Qwen3-1.7B**.
+The project is not yet an automated interpretability lab; the
+[redirect plan](REDIRECT-PLAN.md) sets out how it becomes one.
 
 > This page describes the deployment work in
 > [the current draft pull request](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1).
@@ -35,34 +35,9 @@ below and in the [validation guide](docs/validation.md).
 
 ## Current status
 
-As of September 20, 2026:
-
-| Area | Evidence and remaining work |
-| --- | --- |
-| Ubuntu controller | Installed. Its latest upgrade passed 16 CPU containment/crash checks and 26 account-boundary checks. |
-| Independent backups | Controller backups and both standalone calibration bundles passed Google Drive upload, download, hash verification and local restore. |
-| RunPod containment | Managed-worker resource controls and cleanup passed on a compatible host; that profile requires checks on each new host. The supervised profile uses the disposable Pod boundary and does not claim nested cgroup enforcement. |
-| Model images | Separate Base and posttrained images use pinned public assets. Both supervised runs verified model/image provenance and returned artifact hashes. |
-| Supervised GPU execution | **Both models passed:** each completed 29 numerical checks, including 25 exact comparisons and nine retained tensors, followed by verified collection, process exit and confirmed Pod deletion. |
-| Managed-worker acceptance | Incomplete. The supervised result does not establish installed-ledger dispatch, resource-limit enforcement, cancellation, recovery or replacement. |
-| Scientific workflow | Private held-out evaluation, independent Explorer/Skeptic/Replicator sessions and blind scientific calibration remain future work. |
-
-The selected path is [supervised public calibration](docs/supervised-public-calibration.md),
-which runs one fixed command without another controller installation or nested
-cgroup requirement. Both models passed on RunPod RTX 4090s in EU-RO-1. The
-[calibration results](docs/calibration-results.md) record the evidence, including
-a corrected Base host-verifier mismatch with the original report preserved.
-
-Next, implement the [first fixed public exploratory experiment](docs/first-public-experiment.md).
-The [deployment checklist](docs/live-deployment-plan.md) retains the
-original five managed-service steps separately. Its 18 prepared acceptance plans
-remain useful for that larger milestone; they are not prerequisites for a
-bounded, supervised public experiment.
-
-RunPod support currently permits short, supervised runs. Unattended operation,
-provider shutdown during controller-host loss, direct Pod resumes and private
-confirmation/replication evaluation are not accepted capabilities. Interventions
-apply to prompt prefill; generation is a separate, unmodified operation.
+- The supervised GPU profile has passed exact numerical calibration on both models; the managed-worker profile has not passed and is deferred.
+- No interpretability results or validated scientific findings exist yet.
+- [STATUS.md](STATUS.md) is the single source of truth for what works, with evidence; the current milestone is listed there.
 
 ## How the pieces fit
 
@@ -143,14 +118,16 @@ rename runtime components.
 ## Deployment and documentation
 
 Installing the package does not configure a lab or approve paid compute. Start
-with the deployment checklist, then follow the relevant component guide:
+with [STATUS.md](STATUS.md), then follow the relevant component guide:
 
 | Need | Guide |
 | --- | --- |
+| Learn what works today and the current milestone | [Status](STATUS.md) |
+| Understand the roadmap and its invariants | [Redirect plan](REDIRECT-PLAN.md) |
 | Inspect the two passing numerical calibrations | [Calibration results](docs/calibration-results.md) |
 | Run the smaller fixed public GPU calibration | [Supervised public calibration](docs/supervised-public-calibration.md) |
 | Prepare the next exploratory milestone | [First public experiment](docs/first-public-experiment.md) |
-| Understand what is complete and what is still required | [Live deployment checklist](docs/live-deployment-plan.md) |
+| Understand the managed-service deployment requirements (deferred) | [Managed-service requirements](docs/live-deployment-plan.md) |
 | Understand the implemented scope and boundaries | [Implementation overview](IMPLEMENTATION.md) |
 | Set up the Ubuntu accounts and services | [Host installation](docs/host-installation.md) |
 | Understand compute requests, approvals and shutdown | [Controller services](docs/controller-services.md) |
@@ -159,6 +136,7 @@ with the deployment checklist, then follow the relevant component guide:
 | Configure independent recoverable backups | [Backup and restore](docs/backup-restore.md) |
 | Use the queue, manifests and audit APIs | [Core guide](docs/core-guide.md) |
 | Interpret test and deployment evidence | [Validation](docs/validation.md) |
+| Read superseded plans and attempt logs | [History](docs/history/README.md) |
 
 The controller uses the `controller` and `mcp` extras; it does not need the GPU
 worker's PyTorch installation. The host installer expects a reviewed release
@@ -172,25 +150,17 @@ Model weights and credentials are not stored in this repository. Worker image
 recipes fetch pinned public model files and synthetic calibration prompts; they
 contain no hidden evaluation dataset.
 
-## After the first working GPU path
+## Roadmap and contributing
 
-The next useful milestone is the [first public experiment](docs/first-public-experiment.md),
-with a declared question, metric, matched control and retained per-prompt results.
-This needs a separate reviewed experiment recipe;
-the current standalone command accepts only the numerical calibration. Reuse
-the supervised deadline, credential separation, verified collection and Pod
-deletion, and back up its standalone artifacts explicitly.
+Work follows the [redirect plan](REDIRECT-PLAN.md): each milestone must end with
+a result an interpretability researcher would recognise, and builds only the
+infrastructure that result needs. Its invariants on credentials, budgets,
+held-out data and the audit trail are never weakened.
 
-Managed resource, cancellation, recovery and replacement checks remain deferred
-work for the full service profile. Private held-out evaluation and independent
-research roles are later requirements for confirmatory research. Neither set of
-work blocks a bounded public exploratory experiment, which must remain labelled
-exploratory. SAE/Qwen-Scope, circuit tracing and automatic novelty assessment
-remain outside the current implementation.
-
-Contributions should state the behavior being changed and provide evidence for
-claims about correctness, containment and scientific results. Changes to the
-execution model or research protocol should describe their acceptance criteria.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing code. Changes to
+`probe_core/` or `deploy/` update [STATUS.md](STATUS.md) and every affected
+guide in the same commit, and superseded text moves to
+[docs/history/](docs/history/README.md).
 
 ## License
 

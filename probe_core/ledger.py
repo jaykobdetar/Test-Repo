@@ -260,8 +260,9 @@ class Ledger:
     ``clock`` is injectable for deterministic recovery/deadline tests.
     """
 
-    def __init__(self, path: str | Path, *, audit_path: str | Path | None = None,
-                 clock: Callable[[], datetime] | None = None):
+    def __init__(
+        self, path: str | Path, *, audit_path: str | Path | None = None, clock: Callable[[], datetime] | None = None
+    ):
         self.path = _require_local_path(Path(path))
         with self._directory(self.path.parent, create=True):
             pass
@@ -359,7 +360,9 @@ class Ledger:
                 with self._gate:
                     self._closed = True
                     if current_future is not None and not current_future.done():
-                        current_future.set_exception(LedgerError("writer terminated; inspect durable state before retrying"))
+                        current_future.set_exception(
+                            LedgerError("writer terminated; inspect durable state before retrying")
+                        )
                     while not self._tasks.empty():
                         pending = self._tasks.get_nowait()
                         if pending is not None:
@@ -381,8 +384,7 @@ class Ledger:
         """An independent connection supporting explicit, concurrent WAL snapshots."""
         if self._closed:
             raise LedgerError("ledger is closed")
-        conn = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True,
-                               isolation_level=None, timeout=5.0)
+        conn = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, isolation_level=None, timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=5000;")
         conn.execute("PRAGMA query_only=ON;")
@@ -417,6 +419,7 @@ class Ledger:
         # Serialize with writers; the outer transaction contains no state mutations.
         def sync(conn: sqlite3.Connection, now: datetime) -> None:
             self._export(conn, AuditLog(self.audit_path), strict=True)
+
         self._submit(sync)
 
     def audit_records(self) -> list[dict[str, Any]]:
@@ -424,17 +427,16 @@ class Ledger:
             return self._records(conn)
 
     @staticmethod
-    def _event(conn: sqlite3.Connection, now: datetime, event_type: str,
-               payload: dict[str, Any]) -> dict[str, Any]:
+    def _event(conn: sqlite3.Connection, now: datetime, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not conn.in_transaction:
             raise LedgerError("audit append requires a transaction")
         last = conn.execute("SELECT sequence, hash FROM audit_events ORDER BY sequence DESC LIMIT 1").fetchone()
-        payload = {key: value.value if isinstance(value, StrEnum) else value
-                   for key, value in payload.items()}
-        record = make_record(last[0] + 1 if last else 1, last[1] if last else GENESIS_HASH,
-                             event_type, payload, now)
-        conn.execute("INSERT INTO audit_events(sequence, record, hash) VALUES (?,?,?)",
-                     (record["sequence"], canonical_json(record), record["hash"]))
+        payload = {key: value.value if isinstance(value, StrEnum) else value for key, value in payload.items()}
+        record = make_record(last[0] + 1 if last else 1, last[1] if last else GENESIS_HASH, event_type, payload, now)
+        conn.execute(
+            "INSERT INTO audit_events(sequence, record, hash) VALUES (?,?,?)",
+            (record["sequence"], canonical_json(record), record["hash"]),
+        )
         return record
 
     def record_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -454,11 +456,21 @@ class Ledger:
 
     @staticmethod
     def _job(row: sqlite3.Row) -> JobRecord:
-        return JobRecord(row["job_id"], JobSpec.model_validate_json(row["spec_json"]),
-                         JobState(row["state"]), _time(row["created_at"]), _time(row["updated_at"]),
-                         row["attempt_id"], row["worker_id"], _time(row["lease_expires_at"]),
-                         row["attempt_count"], row["retry_count"], row["approval_id"],
-                         row["failure_kind"], row["failure_reason"])
+        return JobRecord(
+            row["job_id"],
+            JobSpec.model_validate_json(row["spec_json"]),
+            JobState(row["state"]),
+            _time(row["created_at"]),
+            _time(row["updated_at"]),
+            row["attempt_id"],
+            row["worker_id"],
+            _time(row["lease_expires_at"]),
+            row["attempt_count"],
+            row["retry_count"],
+            row["approval_id"],
+            row["failure_kind"],
+            row["failure_reason"],
+        )
 
     def get_job(self, job_id: str) -> JobRecord:
         with self.read_connection() as conn:
@@ -482,20 +494,27 @@ class Ledger:
             if spec.hypothesis_id is not None:
                 hypothesis = self._hypothesis(conn, spec.hypothesis_id)
                 if spec.experiment_stage in (ExperimentStage.CONFIRMATORY, ExperimentStage.REPLICATION):
-                    required = (HypothesisState.TESTING if spec.experiment_stage == ExperimentStage.CONFIRMATORY
-                                else HypothesisState.REPLICATING)
+                    required = (
+                        HypothesisState.TESTING
+                        if spec.experiment_stage == ExperimentStage.CONFIRMATORY
+                        else HypothesisState.REPLICATING
+                    )
                     if hypothesis.status != required:
                         raise InvalidTransition("hypothesis is not in the required scientific phase")
                     plan = hypothesis.preregistration_plan
                     if plan is None or plan.model != spec.model or plan.operation != spec.operation:
                         raise InvalidTransition("job does not match the frozen experiment plan")
             job_id = uuid.uuid4().hex
-            conn.execute("""INSERT INTO jobs(job_id,idempotency_key,spec_json,spec_hash,state,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?)""", (job_id, spec.idempotency_key, document, digest,
-                                              JobState.PENDING, now.timestamp(), now.timestamp()))
-            self._event(conn, now, "state_change", {"job_id": job_id, "from": None,
-                        "to": JobState.PENDING, "spec_hash": digest})
+            conn.execute(
+                """INSERT INTO jobs(job_id,idempotency_key,spec_json,spec_hash,state,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (job_id, spec.idempotency_key, document, digest, JobState.PENDING, now.timestamp(), now.timestamp()),
+            )
+            self._event(
+                conn, now, "state_change", {"job_id": job_id, "from": None, "to": JobState.PENDING, "spec_hash": digest}
+            )
             return self._job(self._row(conn, job_id))
+
         return self._submit(submit)
 
     @staticmethod
@@ -517,51 +536,95 @@ class Ledger:
         nonce = ApprovalNonce.model_validate({**nonce.model_dump(), "token": nonce.token})
         # Existing research approvals predate the purpose field. Keep their
         # canonical documents stable while giving infrastructure a disjoint scope.
-        public = canonical_json(nonce.model_dump(mode="json", exclude={"token", "purpose"}
-                                                if nonce.purpose == "research" else {"token"}))
+        public = canonical_json(
+            nonce.model_dump(mode="json", exclude={"token", "purpose"} if nonce.purpose == "research" else {"token"})
+        )
         token_hash = hashlib.sha256(nonce.token.get_secret_value().encode()).hexdigest()
 
         def register(conn: sqlite3.Connection, now: datetime) -> None:
             if not nonce.issued_at <= now < nonce.expires_at:
                 raise ApprovalError("approval is not currently valid")
-            old = conn.execute("SELECT document, token_hash FROM approvals WHERE approval_id=?",
-                               (nonce.approval_id,)).fetchone()
+            old = conn.execute(
+                "SELECT document, token_hash FROM approvals WHERE approval_id=?", (nonce.approval_id,)
+            ).fetchone()
             if old is not None:
                 if old[0] == public and hmac.compare_digest(old[1], token_hash):
                     return
                 raise ApprovalError("approval identifier already exists")
             try:
-                conn.execute("INSERT INTO approvals(approval_id,document,token_hash) VALUES (?,?,?)",
-                             (nonce.approval_id, public, token_hash))
+                conn.execute(
+                    "INSERT INTO approvals(approval_id,document,token_hash) VALUES (?,?,?)",
+                    (nonce.approval_id, public, token_hash),
+                )
             except sqlite3.IntegrityError as exc:
                 raise ApprovalError("approval secret has already been registered") from exc
-            self._event(conn, now, "policy_evaluation", {"decision": "approval_registered",
-                        "approval_id": nonce.approval_id, "batch_hash": nonce.batch_hash})
+            self._event(
+                conn,
+                now,
+                "policy_evaluation",
+                {"decision": "approval_registered", "approval_id": nonce.approval_id, "batch_hash": nonce.batch_hash},
+            )
+
         self._submit(register)
 
-    def consume_approval(self, approval_id: str, token: str, *, pod_id: str,
-                         job_ids: Sequence[str], live_price_usd_per_hour: float,
-                         requested_runtime_seconds: int) -> ApprovalGrant:
-        return self._consume_approval(approval_id, token, pod_id=pod_id, job_ids=job_ids,
-                                     live_price_usd_per_hour=live_price_usd_per_hour,
-                                     requested_runtime_seconds=requested_runtime_seconds)
+    def consume_approval(
+        self,
+        approval_id: str,
+        token: str,
+        *,
+        pod_id: str,
+        job_ids: Sequence[str],
+        live_price_usd_per_hour: float,
+        requested_runtime_seconds: int,
+    ) -> ApprovalGrant:
+        return self._consume_approval(
+            approval_id,
+            token,
+            pod_id=pod_id,
+            job_ids=job_ids,
+            live_price_usd_per_hour=live_price_usd_per_hour,
+            requested_runtime_seconds=requested_runtime_seconds,
+        )
 
-    def consume_infrastructure_approval(self, approval_id: str, token: str, *, pod_id: str,
-                                        infrastructure_hash: str, live_price_usd_per_hour: float,
-                                        requested_runtime_seconds: int) -> ApprovalGrant:
+    def consume_infrastructure_approval(
+        self,
+        approval_id: str,
+        token: str,
+        *,
+        pod_id: str,
+        infrastructure_hash: str,
+        live_price_usd_per_hour: float,
+        requested_runtime_seconds: int,
+    ) -> ApprovalGrant:
         """Consume a human infrastructure allowance with no dispatchable jobs."""
-        if (not isinstance(infrastructure_hash, str) or len(infrastructure_hash) != 71 or
-                not infrastructure_hash.startswith("sha256:") or
-                any(character not in "0123456789abcdef" for character in infrastructure_hash[7:])):
+        if (
+            not isinstance(infrastructure_hash, str)
+            or len(infrastructure_hash) != 71
+            or not infrastructure_hash.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in infrastructure_hash[7:])
+        ):
             raise ApprovalError("infrastructure scope must be an immutable SHA256 hash")
-        return self._consume_approval(approval_id, token, pod_id=pod_id, job_ids=(),
-                                     infrastructure_hash=infrastructure_hash,
-                                     live_price_usd_per_hour=live_price_usd_per_hour,
-                                     requested_runtime_seconds=requested_runtime_seconds)
+        return self._consume_approval(
+            approval_id,
+            token,
+            pod_id=pod_id,
+            job_ids=(),
+            infrastructure_hash=infrastructure_hash,
+            live_price_usd_per_hour=live_price_usd_per_hour,
+            requested_runtime_seconds=requested_runtime_seconds,
+        )
 
-    def _consume_approval(self, approval_id: str, token: str, *, pod_id: str,
-                          job_ids: Sequence[str], live_price_usd_per_hour: float,
-                          requested_runtime_seconds: int, infrastructure_hash: str | None = None) -> ApprovalGrant:
+    def _consume_approval(
+        self,
+        approval_id: str,
+        token: str,
+        *,
+        pod_id: str,
+        job_ids: Sequence[str],
+        live_price_usd_per_hour: float,
+        requested_runtime_seconds: int,
+        infrastructure_hash: str | None = None,
+    ) -> ApprovalGrant:
         _positive_seconds(requested_runtime_seconds)
         if isinstance(live_price_usd_per_hour, bool) or not isinstance(live_price_usd_per_hour, (int, float)):
             raise ApprovalError("a finite live price is required")
@@ -603,23 +666,42 @@ class Ledger:
                     raise ApprovalError("an earlier execution has not been confirmed stopped")
                 if conn.execute("SELECT 1 FROM jobs WHERE state IN ('DISPATCHED','RUNNING','FINALIZING')").fetchone():
                     raise ApprovalError("previous job finalization remains unresolved")
-                if conn.execute("SELECT 1 FROM approvals WHERE consumed_at IS NOT NULL AND ended_at IS NULL").fetchone():
+                if conn.execute(
+                    "SELECT 1 FROM approvals WHERE consumed_at IS NOT NULL AND ended_at IS NULL"
+                ).fetchone():
                     raise ApprovalError("previous Pod shutdown has not been confirmed")
             except (ApprovalError, NotFoundError, ValueError) as exc:
-                self._event(conn, now, "policy_evaluation", {"decision": "deny_start",
-                            "approval_id": approval_id, "reason_code": type(exc).__name__})
+                self._event(
+                    conn,
+                    now,
+                    "policy_evaluation",
+                    {"decision": "deny_start", "approval_id": approval_id, "reason_code": type(exc).__name__},
+                )
                 return ApprovalError(str(exc))
             deadline = now + timedelta(seconds=requested_runtime_seconds)
-            conn.execute("UPDATE approvals SET consumed_at=?,deadline=? WHERE approval_id=?",
-                         (now.timestamp(), deadline.timestamp(), approval_id))
-            conn.executemany("INSERT INTO approval_jobs(approval_id,job_id) VALUES (?,?)",
-                             [(approval_id, jid) for jid in ids])
-            self._event(conn, now, "policy_evaluation", {"decision": "allow_start",
-                        "approval_id": approval_id, "pod_id": pod_id,
-                        "purpose": expected_purpose,
-                        "batch_hash": public["batch_hash"], "deadline": deadline.isoformat(),
-                        "live_price_usd_per_hour": live_price_usd_per_hour})
+            conn.execute(
+                "UPDATE approvals SET consumed_at=?,deadline=? WHERE approval_id=?",
+                (now.timestamp(), deadline.timestamp(), approval_id),
+            )
+            conn.executemany(
+                "INSERT INTO approval_jobs(approval_id,job_id) VALUES (?,?)", [(approval_id, jid) for jid in ids]
+            )
+            self._event(
+                conn,
+                now,
+                "policy_evaluation",
+                {
+                    "decision": "allow_start",
+                    "approval_id": approval_id,
+                    "pod_id": pod_id,
+                    "purpose": expected_purpose,
+                    "batch_hash": public["batch_hash"],
+                    "deadline": deadline.isoformat(),
+                    "live_price_usd_per_hour": live_price_usd_per_hour,
+                },
+            )
             return ApprovalGrant(approval_id, pod_id, public["batch_hash"], now, deadline)
+
         result = self._submit(consume)
         if isinstance(result, ApprovalError):
             raise result
@@ -627,6 +709,7 @@ class Ledger:
 
     def end_approval(self, approval_id: str) -> None:
         """Close an interval after the trusted controller confirms the Pod is off."""
+
         def end(conn: sqlite3.Connection, now: datetime) -> None:
             if conn.execute("SELECT 1 FROM attempts WHERE stopped_at IS NULL").fetchone():
                 raise ApprovalError("execution must be confirmed stopped before closing approval")
@@ -635,14 +718,19 @@ class Ledger:
                 raise ApprovalError("approval has not been consumed")
             if row["ended_at"] is not None:
                 return
-            conn.execute("UPDATE approvals SET deadline=MIN(deadline,?),ended_at=? WHERE approval_id=?",
-                         (now.timestamp(), now.timestamp(), approval_id))
+            conn.execute(
+                "UPDATE approvals SET deadline=MIN(deadline,?),ended_at=? WHERE approval_id=?",
+                (now.timestamp(), now.timestamp(), approval_id),
+            )
             self._event(conn, now, "policy_evaluation", {"decision": "interval_closed", "approval_id": approval_id})
+
         self._submit(end)
 
     @staticmethod
     def _grant_deadline(conn: sqlite3.Connection, approval_id: str, now: datetime) -> float:
-        row = conn.execute("SELECT consumed_at,deadline,ended_at FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
+        row = conn.execute(
+            "SELECT consumed_at,deadline,ended_at FROM approvals WHERE approval_id=?", (approval_id,)
+        ).fetchone()
         if row is None or row[0] is None or row[1] <= now.timestamp() or row[2] is not None:
             raise ApprovalError("no active consumed approval")
         return row[1]
@@ -653,18 +741,29 @@ class Ledger:
 
         def dispatch(conn: sqlite3.Connection, now: datetime) -> JobRecord | None:
             deadline = self._grant_deadline(conn, approval_id, now)
-            if conn.execute("SELECT 1 FROM attempts WHERE stopped_at IS NULL").fetchone() or conn.execute(
-                    "SELECT 1 FROM jobs WHERE state IN ('DISPATCHED','RUNNING','FINALIZING')").fetchone():
+            if (
+                conn.execute("SELECT 1 FROM attempts WHERE stopped_at IS NULL").fetchone()
+                or conn.execute("SELECT 1 FROM jobs WHERE state IN ('DISPATCHED','RUNNING','FINALIZING')").fetchone()
+            ):
                 return None
-            rows = conn.execute("""SELECT j.* FROM jobs j JOIN approval_jobs a ON a.job_id=j.job_id
-                WHERE a.approval_id=? AND j.state='PENDING' ORDER BY j.created_at,j.job_id""", (approval_id,)).fetchall()
+            rows = conn.execute(
+                """SELECT j.* FROM jobs j JOIN approval_jobs a ON a.job_id=j.job_id
+                WHERE a.approval_id=? AND j.state='PENDING' ORDER BY j.created_at,j.job_id""",
+                (approval_id,),
+            ).fetchall()
             for row in rows:
                 if row["retry_count"] and row["approval_id"] != approval_id:
                     continue
                 spec = JobSpec.model_validate_json(row["spec_json"])
-                if spec.hypothesis_id and spec.experiment_stage in (ExperimentStage.CONFIRMATORY, ExperimentStage.REPLICATION):
-                    required = (HypothesisState.TESTING if spec.experiment_stage == ExperimentStage.CONFIRMATORY
-                                else HypothesisState.REPLICATING)
+                if spec.hypothesis_id and spec.experiment_stage in (
+                    ExperimentStage.CONFIRMATORY,
+                    ExperimentStage.REPLICATION,
+                ):
+                    required = (
+                        HypothesisState.TESTING
+                        if spec.experiment_stage == ExperimentStage.CONFIRMATORY
+                        else HypothesisState.REPLICATING
+                    )
                     if self._hypothesis(conn, spec.hypothesis_id).status != required:
                         continue
                 execution_deadline = now.timestamp() + spec.limits.max_runtime_seconds
@@ -672,23 +771,48 @@ class Ledger:
                     continue
                 attempt_id = uuid.uuid4().hex
                 expiry = min(now.timestamp() + lease_seconds, execution_deadline)
-                conn.execute("""INSERT INTO attempts(attempt_id,job_id,attempt_number,worker_id,approval_id,
+                conn.execute(
+                    """INSERT INTO attempts(attempt_id,job_id,attempt_number,worker_id,approval_id,
                     dispatched_at,heartbeat_at,lease_expires_at,execution_deadline) VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (attempt_id, row["job_id"], row["attempt_count"] + 1, worker_id, approval_id,
-                     now.timestamp(), now.timestamp(), expiry, execution_deadline))
-                conn.execute("""UPDATE jobs SET state='DISPATCHED',attempt_id=?,worker_id=?,lease_expires_at=?,
+                    (
+                        attempt_id,
+                        row["job_id"],
+                        row["attempt_count"] + 1,
+                        worker_id,
+                        approval_id,
+                        now.timestamp(),
+                        now.timestamp(),
+                        expiry,
+                        execution_deadline,
+                    ),
+                )
+                conn.execute(
+                    """UPDATE jobs SET state='DISPATCHED',attempt_id=?,worker_id=?,lease_expires_at=?,
                     attempt_count=attempt_count+1,approval_id=?,updated_at=?,failure_kind=NULL,failure_reason=NULL
-                    WHERE job_id=?""", (attempt_id, worker_id, expiry, approval_id, now.timestamp(), row["job_id"]))
-                self._event(conn, now, "state_change", {"job_id": row["job_id"], "attempt_id": attempt_id,
-                            "from": "PENDING", "to": "DISPATCHED", "worker_id": worker_id,
-                            "approval_id": approval_id, "execution_deadline": _time(execution_deadline).isoformat()})
+                    WHERE job_id=?""",
+                    (attempt_id, worker_id, expiry, approval_id, now.timestamp(), row["job_id"]),
+                )
+                self._event(
+                    conn,
+                    now,
+                    "state_change",
+                    {
+                        "job_id": row["job_id"],
+                        "attempt_id": attempt_id,
+                        "from": "PENDING",
+                        "to": "DISPATCHED",
+                        "worker_id": worker_id,
+                        "approval_id": approval_id,
+                        "execution_deadline": _time(execution_deadline).isoformat(),
+                    },
+                )
                 return self._job(self._row(conn, row["job_id"]))
             return None
+
         return self._submit(dispatch)
 
     @staticmethod
-    def _owned(conn: sqlite3.Connection, now: datetime, job_id: str, attempt_id: str,
-               worker_id: str) -> sqlite3.Row:
+    def _owned(conn: sqlite3.Connection, now: datetime, job_id: str, attempt_id: str, worker_id: str) -> sqlite3.Row:
         row = Ledger._row(conn, job_id)
         if row["attempt_id"] != attempt_id or row["worker_id"] != worker_id:
             raise LeaseError("attempt does not own this job")
@@ -697,8 +821,7 @@ class Ledger:
         Ledger._grant_deadline(conn, row["approval_id"], now)
         return row
 
-    def _advance(self, job_id: str, attempt_id: str, worker_id: str,
-                 expected: JobState, target: JobState) -> JobRecord:
+    def _advance(self, job_id: str, attempt_id: str, worker_id: str, expected: JobState, target: JobState) -> JobRecord:
         def advance(conn: sqlite3.Connection, now: datetime) -> JobRecord:
             row = self._owned(conn, now, job_id, attempt_id, worker_id)
             if row["state"] == target:
@@ -706,9 +829,11 @@ class Ledger:
             if row["state"] != expected:
                 raise InvalidTransition(f"{row['state']} cannot transition to {target}")
             conn.execute("UPDATE jobs SET state=?,updated_at=? WHERE job_id=?", (target, now.timestamp(), job_id))
-            self._event(conn, now, "state_change", {"job_id": job_id, "attempt_id": attempt_id,
-                        "from": expected, "to": target})
+            self._event(
+                conn, now, "state_change", {"job_id": job_id, "attempt_id": attempt_id, "from": expected, "to": target}
+            )
             return self._job(self._row(conn, job_id))
+
         return self._submit(advance)
 
     def start_job(self, job_id: str, attempt_id: str, worker_id: str) -> JobRecord:
@@ -722,51 +847,90 @@ class Ledger:
 
         def beat(conn: sqlite3.Connection, now: datetime) -> JobRecord:
             self._owned(conn, now, job_id, attempt_id, worker_id)
-            attempt = conn.execute("SELECT execution_deadline FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            attempt = conn.execute(
+                "SELECT execution_deadline FROM attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
             expiry = min(now.timestamp() + lease_seconds, attempt[0])
-            conn.execute("UPDATE jobs SET lease_expires_at=?,updated_at=? WHERE job_id=?", (expiry, now.timestamp(), job_id))
-            conn.execute("UPDATE attempts SET lease_expires_at=?,heartbeat_at=? WHERE attempt_id=?",
-                         (expiry, now.timestamp(), attempt_id))
-            self._event(conn, now, "heartbeat", {"job_id": job_id, "attempt_id": attempt_id,
-                        "lease_expires_at": _time(expiry).isoformat()})
+            conn.execute(
+                "UPDATE jobs SET lease_expires_at=?,updated_at=? WHERE job_id=?", (expiry, now.timestamp(), job_id)
+            )
+            conn.execute(
+                "UPDATE attempts SET lease_expires_at=?,heartbeat_at=? WHERE attempt_id=?",
+                (expiry, now.timestamp(), attempt_id),
+            )
+            self._event(
+                conn,
+                now,
+                "heartbeat",
+                {"job_id": job_id, "attempt_id": attempt_id, "lease_expires_at": _time(expiry).isoformat()},
+            )
             return self._job(self._row(conn, job_id))
+
         return self._submit(beat)
 
-    def _fail(self, conn: sqlite3.Connection, now: datetime, row: sqlite3.Row,
-              kind: str, reason: str) -> JobRecord:
-        conn.execute("UPDATE jobs SET state='FAILED',updated_at=?,failure_kind=?,failure_reason=? WHERE job_id=?",
-                     (now.timestamp(), kind, reason, row["job_id"]))
+    def _fail(self, conn: sqlite3.Connection, now: datetime, row: sqlite3.Row, kind: str, reason: str) -> JobRecord:
+        conn.execute(
+            "UPDATE jobs SET state='FAILED',updated_at=?,failure_kind=?,failure_reason=? WHERE job_id=?",
+            (now.timestamp(), kind, reason, row["job_id"]),
+        )
         if row["attempt_id"]:
             conn.execute("UPDATE attempts SET outcome=? WHERE attempt_id=?", (kind, row["attempt_id"]))
-        self._event(conn, now, "state_change", {"job_id": row["job_id"], "attempt_id": row["attempt_id"],
-                    "from": row["state"], "to": "FAILED", "failure_kind": kind,
-                    "reason_hash": _digest(reason)})
+        self._event(
+            conn,
+            now,
+            "state_change",
+            {
+                "job_id": row["job_id"],
+                "attempt_id": row["attempt_id"],
+                "from": row["state"],
+                "to": "FAILED",
+                "failure_kind": kind,
+                "reason_hash": _digest(reason),
+            },
+        )
         return self._job(self._row(conn, row["job_id"]))
 
-    def fail_job(self, job_id: str, attempt_id: str, worker_id: str, *, failure_kind: str = "scientific",
-                 reason: str) -> JobRecord:
+    def fail_job(
+        self, job_id: str, attempt_id: str, worker_id: str, *, failure_kind: str = "scientific", reason: str
+    ) -> JobRecord:
         if failure_kind not in _FAILURE_KINDS:
             raise ValueError("unknown failure kind")
         _text(reason, "reason")
-        return self._submit(lambda conn, now: self._fail(conn, now,
-            self._owned(conn, now, job_id, attempt_id, worker_id), failure_kind, reason))
+        return self._submit(
+            lambda conn, now: self._fail(
+                conn, now, self._owned(conn, now, job_id, attempt_id, worker_id), failure_kind, reason
+            )
+        )
 
     def recover_expired(self) -> list[JobRecord]:
         """Mark lost attempts failed; never infer that a remote process has stopped."""
+
         def recover(conn: sqlite3.Connection, now: datetime) -> list[JobRecord]:
-            rows = conn.execute("""SELECT j.*,a.execution_deadline FROM jobs j
+            rows = conn.execute(
+                """SELECT j.*,a.execution_deadline FROM jobs j
                 JOIN attempts a ON a.attempt_id=j.attempt_id
                 WHERE j.state IN ('DISPATCHED','RUNNING','FINALIZING') AND j.lease_expires_at<=?
                 AND NOT (j.state='FINALIZING' AND a.stopped_at IS NOT NULL)""",
-                (now.timestamp(),)).fetchall()
-            return [self._fail(conn, now, row,
-                              "timeout" if row["execution_deadline"] <= now.timestamp() else "infrastructure",
-                              "execution deadline elapsed" if row["execution_deadline"] <= now.timestamp()
-                              else "execution lease expired") for row in rows]
+                (now.timestamp(),),
+            ).fetchall()
+            return [
+                self._fail(
+                    conn,
+                    now,
+                    row,
+                    "timeout" if row["execution_deadline"] <= now.timestamp() else "infrastructure",
+                    "execution deadline elapsed"
+                    if row["execution_deadline"] <= now.timestamp()
+                    else "execution lease expired",
+                )
+                for row in rows
+            ]
+
         return self._submit(recover)
 
     def confirm_stopped(self, job_id: str, attempt_id: str) -> None:
         """Persist the trusted supervisor's positive termination acknowledgement."""
+
         def stopped(conn: sqlite3.Connection, now: datetime) -> None:
             row = self._row(conn, job_id)
             if row["attempt_id"] != attempt_id:
@@ -779,14 +943,17 @@ class Ledger:
             if attempt[0] is None:
                 conn.execute("UPDATE attempts SET stopped_at=? WHERE attempt_id=?", (now.timestamp(), attempt_id))
                 self._event(conn, now, "execution_stopped", {"job_id": job_id, "attempt_id": attempt_id})
+
         self._submit(stopped)
 
     def retry_job(self, job_id: str, attempt_id: str) -> JobRecord:
         def retry(conn: sqlite3.Connection, now: datetime) -> JobRecord:
             row = self._row(conn, job_id)
             if row["state"] == JobState.PENDING and row["retry_count"] == 1:
-                old = conn.execute("SELECT 1 FROM attempts WHERE job_id=? AND attempt_id=? AND stopped_at IS NOT NULL",
-                                   (job_id, attempt_id)).fetchone()
+                old = conn.execute(
+                    "SELECT 1 FROM attempts WHERE job_id=? AND attempt_id=? AND stopped_at IS NOT NULL",
+                    (job_id, attempt_id),
+                ).fetchone()
                 if old:
                     return self._job(row)
             if row["attempt_id"] != attempt_id:
@@ -803,15 +970,30 @@ class Ledger:
             spec = JobSpec.model_validate_json(row["spec_json"])
             if now.timestamp() + spec.limits.max_runtime_seconds > deadline:
                 raise RetryNotAllowed("remaining approved interval cannot fit the retry")
-            conn.execute("""UPDATE jobs SET state='PENDING',updated_at=?,retry_count=retry_count+1,
-                attempt_id=NULL,worker_id=NULL,lease_expires_at=NULL WHERE job_id=?""", (now.timestamp(), job_id))
-            self._event(conn, now, "state_change", {"job_id": job_id, "previous_attempt_id": attempt_id,
-                        "from": "FAILED", "to": "PENDING", "reason": "infrastructure_retry"})
+            conn.execute(
+                """UPDATE jobs SET state='PENDING',updated_at=?,retry_count=retry_count+1,
+                attempt_id=NULL,worker_id=NULL,lease_expires_at=NULL WHERE job_id=?""",
+                (now.timestamp(), job_id),
+            )
+            self._event(
+                conn,
+                now,
+                "state_change",
+                {
+                    "job_id": job_id,
+                    "previous_attempt_id": attempt_id,
+                    "from": "FAILED",
+                    "to": "PENDING",
+                    "reason": "infrastructure_retry",
+                },
+            )
             return self._job(self._row(conn, job_id))
+
         return self._submit(retry)
 
     def cancel_job(self, job_id: str, reason: str = "operator cancelled") -> JobRecord:
         _text(reason, "reason")
+
         def cancel(conn: sqlite3.Connection, now: datetime) -> JobRecord:
             row = self._row(conn, job_id)
             if row["state"] == JobState.FAILED and row["failure_kind"] == "cancelled":
@@ -819,6 +1001,7 @@ class Ledger:
             if row["state"] in (JobState.COMPLETED, JobState.FAILED):
                 raise InvalidTransition("terminal jobs cannot be cancelled")
             return self._fail(conn, now, row, "cancelled", reason)
+
         return self._submit(cancel)
 
     @staticmethod
@@ -855,8 +1038,7 @@ class Ledger:
             os.close(current)
 
     @staticmethod
-    def _copy_artifacts(manifest: RunManifest, source: Path, destination: Path | None,
-                        max_bytes: int) -> int:
+    def _copy_artifacts(manifest: RunManifest, source: Path, destination: Path | None, max_bytes: int) -> int:
         total = 0
         with Ledger._directory(source) as source_fd:
             for artifact in manifest.artifacts:
@@ -897,7 +1079,10 @@ class Ledger:
                                 output.close()
                         after = os.fstat(stream.fileno())
                         if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
-                                after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                            after.st_size,
+                            after.st_mtime_ns,
+                            after.st_ctime_ns,
+                        ):
                             raise ArtifactError("artifact changed during verification")
                         if digest.hexdigest() != artifact.sha256:
                             raise ArtifactError("artifact checksum does not match")
@@ -909,8 +1094,7 @@ class Ledger:
             raise ArtifactError("bytes_persisted must equal the retained artifact byte count")
         return total
 
-    def _seal_bundle(self, manifest: RunManifest, source: Path, job_id: str,
-                     attempt_id: str, max_bytes: int) -> Path:
+    def _seal_bundle(self, manifest: RunManifest, source: Path, job_id: str, attempt_id: str, max_bytes: int) -> Path:
         """Copy verified outputs into a private, read-only, attempt-bound bundle.
 
         Filesystem publication precedes the database commit. A crash can leave an
@@ -921,8 +1105,9 @@ class Ledger:
         with self._directory(parent, create=True):
             pass
         final = parent / attempt_id
-        seal = canonical_json({"job_id": job_id, "attempt_id": attempt_id,
-                               "manifest_hash": _digest(manifest.model_dump(mode="json"))})
+        seal = canonical_json(
+            {"job_id": job_id, "attempt_id": attempt_id, "manifest_hash": _digest(manifest.model_dump(mode="json"))}
+        )
         marker = ".probe-bundle.json"
         if any(artifact.path == marker for artifact in manifest.artifacts):
             raise ArtifactError("reserved artifact filename")
@@ -959,8 +1144,9 @@ class Ledger:
                 shutil.rmtree(staging)
         return final
 
-    def complete_job(self, job_id: str, attempt_id: str, worker_id: str,
-                     manifest: RunManifest, *, artifact_root: str | Path) -> JobRecord:
+    def complete_job(
+        self, job_id: str, attempt_id: str, worker_id: str, manifest: RunManifest, *, artifact_root: str | Path
+    ) -> JobRecord:
         manifest = RunManifest.model_validate_json(manifest.model_dump_json())
         document = canonical_json(manifest.model_dump(mode="json"))
         digest = _digest(manifest.model_dump(mode="json"))
@@ -989,12 +1175,25 @@ class Ledger:
                 raise ArtifactError("manifest scientific stage does not match the job")
             if manifest.experiment.intervention_hash != self.operation_hash(spec):
                 raise ArtifactError("manifest intervention does not match the dispatched specification")
-            tools = {"capture": "capture_activation", "patch": "activation_patch", "ablate": "ablate_component",
-                     "steer": "steer_direction", "fit_probe": "fit_probe", "generate": "generate_batch",
-                     "weight_stats": "weight_stats", "tensor_slice": "tensor_slice", "module_manifest": "module_manifest", "backend_parity": "backend_parity"}
+            tools = {
+                "capture": "capture_activation",
+                "patch": "activation_patch",
+                "ablate": "ablate_component",
+                "steer": "steer_direction",
+                "fit_probe": "fit_probe",
+                "generate": "generate_batch",
+                "weight_stats": "weight_stats",
+                "tensor_slice": "tensor_slice",
+                "module_manifest": "module_manifest",
+                "backend_parity": "backend_parity",
+            }
             if manifest.experiment.tool != tools[spec.operation.kind]:
                 raise ArtifactError("manifest tool does not match the dispatched primitive")
-            if not attempt["dispatched_at"] <= manifest.run.started_at.timestamp() <= min(now.timestamp(), attempt["execution_deadline"]):
+            if (
+                not attempt["dispatched_at"]
+                <= manifest.run.started_at.timestamp()
+                <= min(now.timestamp(), attempt["execution_deadline"])
+            ):
                 raise ArtifactError("run start must be inside the execution interval")
             if manifest.cost.gpu_seconds > spec.limits.max_runtime_seconds:
                 raise ArtifactError("reported compute exceeds the declared runtime")
@@ -1004,27 +1203,45 @@ class Ledger:
                     raise ArtifactError("manifest preregistration does not match the hypothesis")
                 if spec.experiment_stage in (ExperimentStage.CONFIRMATORY, ExperimentStage.REPLICATION):
                     plan = hypothesis.preregistration_plan
-                    if (plan is None or manifest.experiment.primary_metric != plan.primary_metric
-                            or manifest.controls != plan.controls
-                            or manifest.experiment.predicted_direction != hypothesis.predicted_direction
-                            or manifest.experiment.falsifier != hypothesis.falsifier
-                            or manifest.run.started_at < hypothesis.frozen_at):
+                    if (
+                        plan is None
+                        or manifest.experiment.primary_metric != plan.primary_metric
+                        or manifest.controls != plan.controls
+                        or manifest.experiment.predicted_direction != hypothesis.predicted_direction
+                        or manifest.experiment.falsifier != hypothesis.falsifier
+                        or manifest.run.started_at < hypothesis.frozen_at
+                    ):
                         raise ArtifactError("manifest changed a preregistered prediction, metric or control")
             sealed = self._seal_bundle(manifest, source, job_id, attempt_id, spec.limits.max_output_bytes)
             # Execution is positively stopped. CPU publication is recoverable after
             # compute expiry and cannot authorize more GPU work or a replacement attempt.
             finished_at = _utc(self._clock())
             try:
-                conn.execute("INSERT INTO manifests(job_id,run_id,document,digest,artifact_root) VALUES (?,?,?,?,?)",
-                             (job_id, manifest.run.run_id, document, digest, str(sealed)))
+                conn.execute(
+                    "INSERT INTO manifests(job_id,run_id,document,digest,artifact_root) VALUES (?,?,?,?,?)",
+                    (job_id, manifest.run.run_id, document, digest, str(sealed)),
+                )
             except sqlite3.IntegrityError as exc:
                 raise IdempotencyConflict("run identifier already has a manifest") from exc
-            conn.execute("UPDATE jobs SET state='COMPLETED',updated_at=? WHERE job_id=?", (finished_at.timestamp(), job_id))
+            conn.execute(
+                "UPDATE jobs SET state='COMPLETED',updated_at=? WHERE job_id=?", (finished_at.timestamp(), job_id)
+            )
             conn.execute("UPDATE attempts SET outcome='completed' WHERE attempt_id=?", (attempt_id,))
-            self._event(conn, finished_at, "state_change", {"job_id": job_id, "attempt_id": attempt_id,
-                        "from": "FINALIZING", "to": "COMPLETED", "run_id": manifest.run.run_id,
-                        "manifest_hash": digest})
+            self._event(
+                conn,
+                finished_at,
+                "state_change",
+                {
+                    "job_id": job_id,
+                    "attempt_id": attempt_id,
+                    "from": "FINALIZING",
+                    "to": "COMPLETED",
+                    "run_id": manifest.run.run_id,
+                    "manifest_hash": digest,
+                },
+            )
             return self._job(self._row(conn, job_id))
+
         return self._submit(complete)
 
     def get_artifact_root(self, job_id: str) -> Path:
@@ -1054,26 +1271,43 @@ class Ledger:
         if hypothesis.status != HypothesisState.DRAFT:
             raise InvalidTransition("new hypotheses must start in DRAFT")
         document = canonical_json(hypothesis.model_dump(mode="json"))
+
         def register(conn: sqlite3.Connection, now: datetime) -> HypothesisRecord:
-            old = conn.execute("SELECT document FROM hypotheses WHERE hypothesis_id=?", (hypothesis.hypothesis_id,)).fetchone()
+            old = conn.execute(
+                "SELECT document FROM hypotheses WHERE hypothesis_id=?", (hypothesis.hypothesis_id,)
+            ).fetchone()
             if old:
                 if old[0] == document:
                     return hypothesis
                 raise IdempotencyConflict("hypothesis identifier already exists")
-            conn.execute("INSERT INTO hypotheses(hypothesis_id,document) VALUES (?,?)", (hypothesis.hypothesis_id, document))
-            self._event(conn, now, "state_change", {"hypothesis_id": hypothesis.hypothesis_id,
-                        "from": None, "to": "DRAFT", "definition_hash": _digest(hypothesis.model_dump(mode="json"))})
+            conn.execute(
+                "INSERT INTO hypotheses(hypothesis_id,document) VALUES (?,?)", (hypothesis.hypothesis_id, document)
+            )
+            self._event(
+                conn,
+                now,
+                "state_change",
+                {
+                    "hypothesis_id": hypothesis.hypothesis_id,
+                    "from": None,
+                    "to": "DRAFT",
+                    "definition_hash": _digest(hypothesis.model_dump(mode="json")),
+                },
+            )
             return hypothesis
+
         return self._submit(register)
 
     def get_hypothesis(self, hypothesis_id: str) -> HypothesisRecord:
         with self.read_connection() as conn:
             return self._hypothesis(conn, hypothesis_id)
 
-    def transition_hypothesis(self, hypothesis_id: str, target: HypothesisState | str, *,
-                              replication_ids: Sequence[str] | None = None) -> HypothesisRecord:
+    def transition_hypothesis(
+        self, hypothesis_id: str, target: HypothesisState | str, *, replication_ids: Sequence[str] | None = None
+    ) -> HypothesisRecord:
         target = HypothesisState(target)
         evidence = tuple(replication_ids) if replication_ids is not None else None
+
         def transition(conn: sqlite3.Connection, now: datetime) -> HypothesisRecord:
             old = self._hypothesis(conn, hypothesis_id)
             if old.status == target:
@@ -1096,22 +1330,36 @@ class Ledger:
                     if row is None:
                         raise InvalidTransition("replication evidence is not a completed run")
                     manifest = RunManifest.model_validate_json(row[0])
-                    if (manifest.run.hypothesis_id != hypothesis_id
-                            or manifest.run.preregistration_hash != old.preregistration_hash
-                            or manifest.run.experiment_stage != ExperimentStage.REPLICATION
-                            or manifest.results.replication_status != "passed"
-                            or manifest.results.effect_size is None):
+                    if (
+                        manifest.run.hypothesis_id != hypothesis_id
+                        or manifest.run.preregistration_hash != old.preregistration_hash
+                        or manifest.run.experiment_stage != ExperimentStage.REPLICATION
+                        or manifest.results.replication_status != "passed"
+                        or manifest.results.effect_size is None
+                    ):
                         raise InvalidTransition("replication evidence does not support this hypothesis")
             if target == HypothesisState.FROZEN:
                 body["preregistration_hash"] = _digest(body)
                 body["frozen_at"] = now.isoformat()
             body["status"] = target.value
             new = HypothesisRecord.model_validate(body)
-            conn.execute("UPDATE hypotheses SET document=? WHERE hypothesis_id=?",
-                         (canonical_json(new.model_dump(mode="json")), hypothesis_id))
-            self._event(conn, now, "state_change", {"hypothesis_id": hypothesis_id,
-                        "from": old.status, "to": target, "preregistration_hash": new.preregistration_hash})
+            conn.execute(
+                "UPDATE hypotheses SET document=? WHERE hypothesis_id=?",
+                (canonical_json(new.model_dump(mode="json")), hypothesis_id),
+            )
+            self._event(
+                conn,
+                now,
+                "state_change",
+                {
+                    "hypothesis_id": hypothesis_id,
+                    "from": old.status,
+                    "to": target,
+                    "preregistration_hash": new.preregistration_hash,
+                },
+            )
             return new
+
         return self._submit(transition)
 
     def backup(self, destination: str | Path) -> Path:

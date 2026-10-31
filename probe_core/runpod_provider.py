@@ -31,7 +31,14 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .audit import canonical_json, validate_audit_payload
-from .provider import DeploymentSpec, PriceQuote, ProviderBudgetRefused, ProviderLaunchRefused, WorkerState, WorkerStatus
+from .provider import (
+    DeploymentSpec,
+    PriceQuote,
+    ProviderBudgetRefused,
+    ProviderLaunchRefused,
+    WorkerState,
+    WorkerStatus,
+)
 from .rpc import UnixRPCClient, UnixRPCServer
 
 
@@ -64,12 +71,21 @@ def provider_http_metadata(status, headers=None):
         return value.strip() if type(value) is str and len(value) <= 256 else ""
 
     media = header("Content-Type").split(";", 1)[0].lower()
-    content_type = ("json" if media == "application/json" or media.startswith("application/") and media.endswith("+json")
-                    else "html" if media in {"text/html", "application/xhtml+xml"} else "other")
+    content_type = (
+        "json"
+        if media == "application/json" or media.startswith("application/") and media.endswith("+json")
+        else "html"
+        if media in {"text/html", "application/xhtml+xml"}
+        else "other"
+    )
     retry = header("Retry-After")
     retry_seconds = int(retry) if re.fullmatch(r"[0-9]{1,5}", retry) and int(retry) <= 86400 else None
-    return {"http_status": status, "content_type": content_type,
-            "retry_after_seconds": retry_seconds, "cf_mitigated_challenge": header("cf-mitigated") == "challenge"}
+    return {
+        "http_status": status,
+        "content_type": content_type,
+        "retry_after_seconds": retry_seconds,
+        "cf_mitigated_challenge": header("cf-mitigated") == "challenge",
+    }
 
 
 class ProviderHTTPError(ProviderResponseError):
@@ -77,8 +93,11 @@ class ProviderHTTPError(ProviderResponseError):
         self.metadata = provider_http_metadata(status, headers)
         # Do not treat an unparsed explicit backoff (including an HTTP date) as
         # permission to retry early. Retain only this boolean, never its value.
-        self.retry_after_unusable = (headers is not None and headers.get("Retry-After") is not None
-                                     and self.metadata["retry_after_seconds"] is None)
+        self.retry_after_unusable = (
+            headers is not None
+            and headers.get("Retry-After") is not None
+            and self.metadata["retry_after_seconds"] is None
+        )
         self.status = status
         super().__init__(f"RunPod HTTP status {status}")
 
@@ -96,7 +115,9 @@ class RunPodLaunchConfig(BaseModel):
     @field_validator("ports")
     @classmethod
     def supported_ports(cls, ports):
-        if any(not re.fullmatch(r"[0-9]{1,5}/tcp", port) or not 1 <= int(port.split('/')[0]) <= 65535 for port in ports):
+        if any(
+            not re.fullmatch(r"[0-9]{1,5}/tcp", port) or not 1 <= int(port.split("/")[0]) <= 65535 for port in ports
+        ):
             raise ValueError("only explicit valid TCP ports are supported")
         return ports
 
@@ -106,10 +127,14 @@ class RunPodLaunchConfig(BaseModel):
         if set(environment) - {"PUBLIC_KEY", "PROBE_CGROUP_ROOT"}:
             raise ValueError("only the dedicated SSH public key and delegated cgroup path may be supplied")
         public_key = environment.get("PUBLIC_KEY")
-        if public_key is not None and not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]{68}={0,2}(?: [^\r\n]{1,100})?", public_key):
+        if public_key is not None and not re.fullmatch(
+            r"ssh-ed25519 [A-Za-z0-9+/]{68}={0,2}(?: [^\r\n]{1,100})?", public_key
+        ):
             raise ValueError("PUBLIC_KEY must be one Ed25519 public key")
         cgroup = environment.get("PROBE_CGROUP_ROOT")
-        if cgroup is not None and (not cgroup.startswith("/sys/fs/cgroup/") or ".." in cgroup.split('/') or '\n' in cgroup):
+        if cgroup is not None and (
+            not cgroup.startswith("/sys/fs/cgroup/") or ".." in cgroup.split("/") or "\n" in cgroup
+        ):
             raise ValueError("cgroup delegation must use an absolute cgroup filesystem path")
         return environment
 
@@ -126,6 +151,7 @@ class StorageRates(BaseModel):
     conservative daily bound, including February. We deliberately do not apply
     large-volume discounts.
     """
+
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
     checked_at: datetime
     source: Literal["https://docs.runpod.io/pods/pricing"] = "https://docs.runpod.io/pods/pricing"
@@ -155,8 +181,13 @@ def _read_owned_file(path, owner_uid, *, private):
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
         forbidden = 0o077 if private else 0o022
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid or
-                info.st_nlink != 1 or info.st_mode & forbidden or info.st_size > 131072):
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != owner_uid
+            or info.st_nlink != 1
+            or info.st_mode & forbidden
+            or info.st_size > 131072
+        ):
             raise PermissionError("provider configuration or credential file has unsafe ownership, type or permissions")
         return stream.read(131073)
 
@@ -180,10 +211,16 @@ class RunPodHTTP:
         key = _read_owned_file(self.api_key_file, os.geteuid(), private=True).decode().strip()
         if not key or any(c.isspace() for c in key):
             raise PermissionError("invalid provider credential")
-        request = Request("https://api.runpod.io" + path, method=method,
-                          data=canonical_json(body).encode() if body is not None else None,
-                          headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
-                                   "User-Agent": "Mozilla/5.0 Probe-MCP/0.2"})
+        request = Request(
+            "https://api.runpod.io" + path,
+            method=method,
+            data=canonical_json(body).encode() if body is not None else None,
+            headers={
+                "Authorization": "Bearer " + key,
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 Probe-MCP/0.2",
+            },
+        )
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
                 raw = response.read(8 * 1024 * 1024 + 1)
@@ -230,7 +267,12 @@ class RunPodProvider:
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1 or info.st_mode & 0o077:
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_nlink != 1
+                or info.st_mode & 0o077
+            ):
                 raise PermissionError("provider state must be a private owned regular file")
             os.fsync(fd)
         finally:
@@ -259,12 +301,18 @@ class RunPodProvider:
             connection.close()
 
     def capabilities(self):
-        return {"provider": "runpod", "mode": self.config.mode, "create_price_ceiling": True,
-                "resume_supported": False, "native_stop_only_credential": False,
-                "host_loss_guarantee": "unverified", "provider_deadline": "stopAfter sent; delivery unverified",
-                "max_runtime_seconds": self.config.max_runtime_seconds,
-                "launch_config_hash": self.config.launch.digest,
-                "launch": self.config.launch.model_dump(mode="json")}
+        return {
+            "provider": "runpod",
+            "mode": self.config.mode,
+            "create_price_ceiling": True,
+            "resume_supported": False,
+            "native_stop_only_credential": False,
+            "host_loss_guarantee": "unverified",
+            "provider_deadline": "stopAfter sent; delivery unverified",
+            "max_runtime_seconds": self.config.max_runtime_seconds,
+            "launch_config_hash": self.config.launch.digest,
+            "launch": self.config.launch.model_dump(mode="json"),
+        }
 
     def _intent(self, worker_id):
         _identifier(worker_id)
@@ -294,10 +342,13 @@ class RunPodProvider:
     @staticmethod
     def _matches(pod, intent):
         env = pod.get("env", {})
-        return (pod.get("name") == "probe-" + intent["worker_id"] and type(env) is dict and
-                env.get("PROBE_WORKER_ID") == intent["worker_id"] and
-                env.get("PROBE_REQUEST_ID") == intent["request_key"] and
-                env.get("PROBE_CONFIGURATION_HASH") == intent["configuration_hash"])
+        return (
+            pod.get("name") == "probe-" + intent["worker_id"]
+            and type(env) is dict
+            and env.get("PROBE_WORKER_ID") == intent["worker_id"]
+            and env.get("PROBE_REQUEST_ID") == intent["request_key"]
+            and env.get("PROBE_CONFIGURATION_HASH") == intent["configuration_hash"]
+        )
 
     def _observe(self, pod, intent):
         if not self._matches(pod, intent):
@@ -312,44 +363,69 @@ class RunPodProvider:
             # Reject unknown mount kinds and malformed/ambiguous persistent
             # entries rather than treating falsy values as an empty inventory.
             persistent = reported.get("persistent") if type(reported) is dict else None
-            storage_matches = (type(reported) is dict and not set(reported) - {"network", "persistent"}
+            storage_matches = (
+                type(reported) is dict
+                and not set(reported) - {"network", "persistent"}
                 and reported.get("network", []) == []
-                and (persistent is None or (type(persistent) is dict
-                    and not set(persistent) - {"size", "path"}
-                    and type(persistent.get("size")) is int and persistent["size"] == 0)))
+                and (
+                    persistent is None
+                    or (
+                        type(persistent) is dict
+                        and not set(persistent) - {"size", "path"}
+                        and type(persistent.get("size")) is int
+                        and persistent["size"] == 0
+                    )
+                )
+            )
         elif spec.storage_mode == "ephemeral_preflight":
             persistent = pod.get("mounts", {}).get("persistent")
-            storage_matches = not mounts and (persistent is None or persistent == {} or
-                                              (type(persistent) is dict and persistent.get("size") == 0))
+            storage_matches = not mounts and (
+                persistent is None or persistent == {} or (type(persistent) is dict and persistent.get("size") == 0)
+            )
         else:
             storage_matches = any(v.get("volumeId") == spec.volume_id and v.get("path") == "/workspace" for v in mounts)
-        if (pod.get("image") != spec.image_repository + "@" + spec.image_digest or
-                pod.get("gpu", {}).get("id") != spec.gpu_model or pod.get("gpu", {}).get("count") != 1 or
-                pod.get("dataCenterId") not in (None, spec.region) or
-                not storage_matches or
-                pod.get("locked") is not False or pod.get("disk") != launch.container_disk_gb or
-                pod.get("args") != launch.args or set(pod.get("ports", [])) != set(launch.ports) or
-                any(pod.get("env", {}).get(key) != value for key, value in launch.environment.items())):
+        if (
+            pod.get("image") != spec.image_repository + "@" + spec.image_digest
+            or pod.get("gpu", {}).get("id") != spec.gpu_model
+            or pod.get("gpu", {}).get("count") != 1
+            or pod.get("dataCenterId") not in (None, spec.region)
+            or not storage_matches
+            or pod.get("locked") is not False
+            or pod.get("disk") != launch.container_disk_gb
+            or pod.get("args") != launch.args
+            or set(pod.get("ports", [])) != set(launch.ports)
+            or any(pod.get("env", {}).get(key) != value for key, value in launch.environment.items())
+        ):
             raise ProviderUncertain("provider configuration differs from approved deployment")
         if pod.get("status") == "RUNNING":
             cuda = pod.get("cudaVersion")
-            if (type(cuda) is not str or not re.fullmatch(r"\d+\.\d+", cuda) or
-                    tuple(map(int, cuda.split('.'))) < tuple(map(int, launch.min_cuda_version.split('.'))) or
-                    not 0 < _decimal(pod.get("cost")) <= _decimal(intent["price_ceiling"])):
+            if (
+                type(cuda) is not str
+                or not re.fullmatch(r"\d+\.\d+", cuda)
+                or tuple(map(int, cuda.split("."))) < tuple(map(int, launch.min_cuda_version.split(".")))
+                or not 0 < _decimal(pod.get("cost")) <= _decimal(intent["price_ceiling"])
+            ):
                 raise ProviderUncertain("running provider CUDA or price does not satisfy approval")
         if intent["provider_id"] not in (None, provider_id):
             raise ProviderUncertain("logical worker maps to multiple physical pods")
         with self._connect() as connection:
-            connection.execute("UPDATE runpod_intents SET provider_id=?,provider_seen=1 WHERE worker_id=? AND (provider_id IS NULL OR provider_id=?)",
-                               (provider_id, intent["worker_id"], provider_id))
-        state = {"RUNNING": WorkerState.RUNNING, "PROVISIONING": WorkerState.STARTING,
-                 "STARTING": WorkerState.STARTING}.get(pod.get("status"), WorkerState.UNKNOWN)
+            connection.execute(
+                "UPDATE runpod_intents SET provider_id=?,provider_seen=1 WHERE worker_id=? AND (provider_id IS NULL OR provider_id=?)",
+                (provider_id, intent["worker_id"], provider_id),
+            )
+        state = {
+            "RUNNING": WorkerState.RUNNING,
+            "PROVISIONING": WorkerState.STARTING,
+            "STARTING": WorkerState.STARTING,
+        }.get(pod.get("status"), WorkerState.UNKNOWN)
         if pod.get("status") in ("EXITED", "TERMINATED"):
             # Never treat a crashed-but-billable or inconsistent observation as
             # proof that the provider released compute.
             if _decimal(pod.get("cost")) == 0 and pod.get("runtime") in (None, {}):
                 state = WorkerState.STOPPED
-        return WorkerStatus(intent["worker_id"], state, provider_id, intent["request_key"], intent["configuration_hash"])
+        return WorkerStatus(
+            intent["worker_id"], state, provider_id, intent["request_key"], intent["configuration_hash"]
+        )
 
     def status(self, worker_id):
         intent = self._intent(worker_id)
@@ -362,8 +438,13 @@ class RunPodProvider:
                 if exc.status == 404:
                     # A create response can precede inventory visibility. Its
                     # first 404 is uncertainty, not evidence of termination.
-                    return WorkerStatus(worker_id, WorkerState.ABSENT if intent["provider_seen"] else WorkerState.UNKNOWN,
-                                        intent["provider_id"], intent["request_key"], intent["configuration_hash"])
+                    return WorkerStatus(
+                        worker_id,
+                        WorkerState.ABSENT if intent["provider_seen"] else WorkerState.UNKNOWN,
+                        intent["provider_id"],
+                        intent["request_key"],
+                        intent["configuration_hash"],
+                    )
                 raise
             return self._observe(pod, intent)
         matches = [pod for pod in self._pods() if self._matches(pod, intent)]
@@ -372,8 +453,12 @@ class RunPodProvider:
         if not matches:
             # A timed-out create can become visible later. This cannot close an
             # approval or authorize a replacement merely because list is empty.
-            return WorkerStatus(worker_id, WorkerState.UNKNOWN, request_key=intent["request_key"],
-                                configuration_hash=intent["configuration_hash"])
+            return WorkerStatus(
+                worker_id,
+                WorkerState.UNKNOWN,
+                request_key=intent["request_key"],
+                configuration_hash=intent["configuration_hash"],
+            )
         return self._observe(matches[0], intent)
 
     def reconcile_status(self, worker_id, *, provider_id, deadline):
@@ -385,10 +470,15 @@ class RunPodProvider:
         period, returns a cached observation or extends the original deadline.
         """
         intent = self._intent(worker_id)
-        eligible = (intent is not None and intent["provider_seen"] == 1
-                    and provider_id is not None and intent["provider_id"] == provider_id
-                    and type(deadline) in (int, float) and math.isfinite(deadline)
-                    and intent["deadline"] == deadline)
+        eligible = (
+            intent is not None
+            and intent["provider_seen"] == 1
+            and provider_id is not None
+            and intent["provider_id"] == provider_id
+            and type(deadline) in (int, float)
+            and math.isfinite(deadline)
+            and intent["deadline"] == deadline
+        )
         if not eligible:
             return self.status(worker_id)
         if self.clock().timestamp() >= deadline:
@@ -398,19 +488,26 @@ class RunPodProvider:
         except ProviderHTTPError as exc:
             delay = 2
             retry_after = exc.metadata["retry_after_seconds"]
-            if (exc.status not in {429, 502, 503, 504}
-                    or exc.metadata["cf_mitigated_challenge"]
-                    or exc.retry_after_unusable
-                    or retry_after is not None and retry_after > delay
-                    or deadline - self.clock().timestamp() <= delay + self.config.request_timeout_seconds):
+            if (
+                exc.status not in {429, 502, 503, 504}
+                or exc.metadata["cf_mitigated_challenge"]
+                or exc.retry_after_unusable
+                or retry_after is not None
+                and retry_after > delay
+                or deadline - self.clock().timestamp() <= delay + self.config.request_timeout_seconds
+            ):
                 raise
             self.sleep(delay)
             # Sleep, a concurrent stop, or a scheduling delay must not reopen
             # an expired allowance or permit a different physical resource.
             current = self._intent(worker_id)
-            if (current is None or current["provider_seen"] != 1
-                    or current["provider_id"] != provider_id or current["deadline"] != deadline
-                    or deadline - self.clock().timestamp() <= self.config.request_timeout_seconds):
+            if (
+                current is None
+                or current["provider_seen"] != 1
+                or current["provider_id"] != provider_id
+                or current["deadline"] != deadline
+                or deadline - self.clock().timestamp() <= self.config.request_timeout_seconds
+            ):
                 raise
             observed = self.status(worker_id)
         if self.clock().timestamp() >= deadline:
@@ -418,8 +515,10 @@ class RunPodProvider:
         return observed
 
     def _check_spec(self, deployment):
-        if (deployment.image_repository != self.config.launch.image_repository or
-                deployment.launch_config_hash != self.config.launch.digest):
+        if (
+            deployment.image_repository != self.config.launch.image_repository
+            or deployment.launch_config_hash != self.config.launch.digest
+        ):
             raise ProviderCapabilityError("deployment must bind the exact trusted launch configuration")
 
     def _storage(self, deployment):
@@ -433,31 +532,61 @@ class RunPodProvider:
         volumes = body["networkVolumes"]
         if deployment.storage_mode not in {"ephemeral_preflight", "disposable_research"}:
             target = [v for v in volumes if v.get("id") == deployment.volume_id]
-            if len(target) != 1 or target[0].get("size") != deployment.volume_gb or target[0].get("dataCenter") != deployment.region:
-                raise ProviderCapabilityError("approved persistent volume must already exist in the exact size and data center")
+            if (
+                len(target) != 1
+                or target[0].get("size") != deployment.volume_gb
+                or target[0].get("dataCenter") != deployment.region
+            ):
+                raise ProviderCapabilityError(
+                    "approved persistent volume must already exist in the exact size and data center"
+                )
         total = Decimal(0)
         for volume in volumes:
             if volume.get("type") != "STANDARD":
                 raise ProviderCapabilityError("non-Standard storage tier requires a separate official price review")
             total += _decimal(volume.get("size")) * _decimal(rates.network_usd_per_gb_month) / 28
         for pod in self._pods():
-            total += _decimal(pod.get("mounts", {}).get("persistent", {}).get("size", 0)) * _decimal(rates.volume_idle_usd_per_gb_month) / 28
+            total += (
+                _decimal(pod.get("mounts", {}).get("persistent", {}).get("size", 0))
+                * _decimal(rates.volume_idle_usd_per_gb_month)
+                / 28
+            )
         return total
 
     def quote(self, *, worker_id=None, deployment=None):
         if worker_id is not None:
-            raise ProviderCapabilityError("RunPod resume lacks an atomic price ceiling; request a newly approved replacement")
+            raise ProviderCapabilityError(
+                "RunPod resume lacks an atomic price ceiling; request a newly approved replacement"
+            )
         if deployment is None:
             raise ValueError("deployment is required")
         self._check_spec(deployment)
-        gpu = self.transport.request("GET", "/v2/catalog/gpus/" + quote(deployment.gpu_model, safe="") + "?" +
-                                     urlencode({"include": "AVAILABILITY", "product": "POD", "cloud": "SECURE",
-                                                "count": 1, "minCudaVersion": self.config.launch.min_cuda_version}))
-        if (gpu.get("id") != deployment.gpu_model or not any(dc.get("id") == deployment.region and
-                dc.get("availability") in ("LOW", "MEDIUM", "HIGH") for dc in gpu.get("dataCenters", []))):
+        gpu = self.transport.request(
+            "GET",
+            "/v2/catalog/gpus/"
+            + quote(deployment.gpu_model, safe="")
+            + "?"
+            + urlencode(
+                {
+                    "include": "AVAILABILITY",
+                    "product": "POD",
+                    "cloud": "SECURE",
+                    "count": 1,
+                    "minCudaVersion": self.config.launch.min_cuda_version,
+                }
+            ),
+        )
+        if gpu.get("id") != deployment.gpu_model or not any(
+            dc.get("id") == deployment.region and dc.get("availability") in ("LOW", "MEDIUM", "HIGH")
+            for dc in gpu.get("dataCenters", [])
+        ):
             raise ProviderCapabilityError("approved GPU and CUDA floor have no current capacity in this data center")
         storage = self._storage(deployment)
-        disk_hourly = self.config.launch.container_disk_gb * _decimal(self.config.storage_rates.container_usd_per_gb_month) / (28 * 24)
+        disk_hourly = (
+            self.config.launch.container_disk_gb
+            * _decimal(self.config.storage_rates.container_usd_per_gb_month)
+            / (28 * 24)
+        )
         compute_price = _decimal(gpu.get("price", {}).get("secure"))
         if compute_price <= 0:
             raise ProviderResponseError("provider GPU price must be positive")
@@ -467,36 +596,67 @@ class RunPodProvider:
     def start(self, worker_id, **kwargs):
         raise ProviderCapabilityError("RunPod resumes are disabled; create a newly approved replacement")
 
-    def create(self, worker_id, deployment, *, request_key, price_ceiling_usd_per_hour,
-               storage_ceiling_usd_per_day, absolute_deadline=None):
+    def create(
+        self,
+        worker_id,
+        deployment,
+        *,
+        request_key,
+        price_ceiling_usd_per_hour,
+        storage_ceiling_usd_per_day,
+        absolute_deadline=None,
+    ):
         _identifier(worker_id)
         _identifier(request_key)
         self._check_spec(deployment)
         now = self.clock()
         if self.config.mode != "supervised_acceptance":
-            raise ProviderCapabilityError("unattended RunPod launches are disabled: host-loss shutdown guarantee is unverified")
-        if (absolute_deadline is None or absolute_deadline.tzinfo is None or
-                not 0 < (absolute_deadline - now).total_seconds() <= self.config.max_runtime_seconds):
+            raise ProviderCapabilityError(
+                "unattended RunPod launches are disabled: host-loss shutdown guarantee is unverified"
+            )
+        if (
+            absolute_deadline is None
+            or absolute_deadline.tzinfo is None
+            or not 0 < (absolute_deadline - now).total_seconds() <= self.config.max_runtime_seconds
+        ):
             raise ProviderCapabilityError("supervised acceptance requires a short, already committed absolute deadline")
         supplied = self.quote(deployment=deployment)
         ceiling = _decimal(price_ceiling_usd_per_hour)
-        if (not 0 < ceiling < Decimal("1.50") or _decimal(supplied.usd_per_hour) > ceiling or
-                _decimal(supplied.projected_storage_usd_per_day) >= _decimal(storage_ceiling_usd_per_day)):
+        if (
+            not 0 < ceiling < Decimal("1.50")
+            or _decimal(supplied.usd_per_hour) > ceiling
+            or _decimal(supplied.projected_storage_usd_per_day) >= _decimal(storage_ceiling_usd_per_day)
+        ):
             raise ProviderBudgetRefused("live quote exceeds the approved compute or total storage ceiling")
         launch = self.config.launch
-        disk_hourly = launch.container_disk_gb * _decimal(self.config.storage_rates.container_usd_per_gb_month) / (28 * 24)
-        env = {**launch.environment, "PROBE_WORKER_ID": worker_id, "PROBE_REQUEST_ID": request_key,
-               "PROBE_CONFIGURATION_HASH": deployment.digest,
-               "PROBE_ABSOLUTE_DEADLINE": absolute_deadline.astimezone(UTC).isoformat()}
-        body = {"cloudType": "SECURE", "name": "probe-" + worker_id,
-                "imageName": deployment.image_repository + "@" + deployment.image_digest,
-                "gpuTypeId": deployment.gpu_model, "gpuCount": 1, "dataCenterId": deployment.region,
-                "volumeInGb": 0,
-                "containerDiskInGb": launch.container_disk_gb, "dockerArgs": launch.args,
-                "minCudaVersion": launch.min_cuda_version, "deployCost": float(ceiling - disk_hourly),
-                "startSsh": launch.start_ssh, "startJupyter": False, "ports": ",".join(launch.ports),
-                "stopAfter": absolute_deadline.astimezone(UTC).isoformat(),
-                "env": [{"key": key, "value": value} for key, value in env.items()]}
+        disk_hourly = (
+            launch.container_disk_gb * _decimal(self.config.storage_rates.container_usd_per_gb_month) / (28 * 24)
+        )
+        env = {
+            **launch.environment,
+            "PROBE_WORKER_ID": worker_id,
+            "PROBE_REQUEST_ID": request_key,
+            "PROBE_CONFIGURATION_HASH": deployment.digest,
+            "PROBE_ABSOLUTE_DEADLINE": absolute_deadline.astimezone(UTC).isoformat(),
+        }
+        body = {
+            "cloudType": "SECURE",
+            "name": "probe-" + worker_id,
+            "imageName": deployment.image_repository + "@" + deployment.image_digest,
+            "gpuTypeId": deployment.gpu_model,
+            "gpuCount": 1,
+            "dataCenterId": deployment.region,
+            "volumeInGb": 0,
+            "containerDiskInGb": launch.container_disk_gb,
+            "dockerArgs": launch.args,
+            "minCudaVersion": launch.min_cuda_version,
+            "deployCost": float(ceiling - disk_hourly),
+            "startSsh": launch.start_ssh,
+            "startJupyter": False,
+            "ports": ",".join(launch.ports),
+            "stopAfter": absolute_deadline.astimezone(UTC).isoformat(),
+            "env": [{"key": key, "value": value} for key, value in env.items()],
+        }
         if deployment.storage_mode not in {"ephemeral_preflight", "disposable_research"}:
             body.update(networkVolumeId=deployment.volume_id, volumeMountPath="/workspace")
         validate_audit_payload(body)
@@ -505,14 +665,26 @@ class RunPodProvider:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                connection.execute("INSERT INTO runpod_intents VALUES(?,?,?,?,?,?,?,?,?,0)",
-                                   (worker_id, request_key, canonical_json(deployment.model_dump(exclude_none=True)),
-                                    deployment.digest, absolute_deadline.timestamp(), None, now.timestamp(),
-                                    canonical_json(launch.model_dump(mode="json")), float(ceiling)))
+                connection.execute(
+                    "INSERT INTO runpod_intents VALUES(?,?,?,?,?,?,?,?,?,0)",
+                    (
+                        worker_id,
+                        request_key,
+                        canonical_json(deployment.model_dump(exclude_none=True)),
+                        deployment.digest,
+                        absolute_deadline.timestamp(),
+                        None,
+                        now.timestamp(),
+                        canonical_json(launch.model_dump(mode="json")),
+                        float(ceiling),
+                    ),
+                )
                 connection.execute("COMMIT")
             except sqlite3.IntegrityError:
                 connection.execute("ROLLBACK")
-                raise ProviderUncertain("create intent is already consumed; reconcile it without resubmitting") from None
+                raise ProviderUncertain(
+                    "create intent is already consumed; reconcile it without resubmitting"
+                ) from None
         # The intent is committed before the first network write. No exception,
         # HTTP status, or process restart reopens it for a second submission.
         try:
@@ -523,7 +695,9 @@ class RunPodProvider:
                 raise ProviderUncertain("GraphQL create did not confirm one resource")
             provider_id = _identifier(reply.get("data", {}).get("podFindAndDeployOnDemand", {}).get("id"))
             with self._connect() as connection:
-                connection.execute("UPDATE runpod_intents SET provider_id=? WHERE worker_id=?", (provider_id, worker_id))
+                connection.execute(
+                    "UPDATE runpod_intents SET provider_id=? WHERE worker_id=?", (provider_id, worker_id)
+                )
         except Exception:
             raise ProviderUncertain("RunPod create outcome requires inventory reconciliation") from None
         until = min(absolute_deadline.timestamp(), self.clock().timestamp() + self.config.ready_timeout_seconds)
@@ -587,8 +761,13 @@ class StopBrokerClient:
 
     def status(self, worker_id):
         body = self.client.call("status", {"worker_id": worker_id})
-        return WorkerStatus(body["worker_id"], WorkerState(body["state"]), body.get("provider_id"),
-                            body.get("request_key"), body.get("configuration_hash"))
+        return WorkerStatus(
+            body["worker_id"],
+            WorkerState(body["state"]),
+            body.get("provider_id"),
+            body.get("request_key"),
+            body.get("configuration_hash"),
+        )
 
     def stop(self, worker_id):
         self.client.call("stop", {"worker_id": worker_id})
@@ -608,11 +787,14 @@ def serve_stop_broker(backend, path, *, watchdog_uid, socket_gid=None):
             backend.stop(worker_id)
             return backend.status(worker_id).as_dict()
         raise PermissionError("stop broker does not expose provisioning, start, credentials or arbitrary requests")
+
     return UnixRPCServer(path, dispatch, allowed_uids={watchdog_uid}, socket_gid=socket_gid)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RunPod provider inspection and independently supervised stop-only broker")
+    parser = argparse.ArgumentParser(
+        description="RunPod provider inspection and independently supervised stop-only broker"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     inspect = sub.add_parser("inspect-config")
     inspect.add_argument("--config", required=True)

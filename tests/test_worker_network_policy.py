@@ -1,4 +1,5 @@
 """Actual syscall policy checks without importing Torch or loading a model."""
+
 import ctypes
 import errno
 import json
@@ -14,7 +15,7 @@ from probe_core.worker_contracts import WorkerRequestError
 
 
 def test_unix_creation_and_all_other_domain_denials_in_actual_child(tmp_path):
-    script = r'''
+    script = r"""
 import errno, json, socket, sys
 sys.path.insert(0, sys.argv[1])
 from probe_core.worker import _block_network
@@ -70,11 +71,12 @@ for item in (listener, receiver, left, right, inherited_udp):
 print(json.dumps({'allowed_unix': allowed, 'denied_domains': blocked,
                   'denied_unix_connect_sendto_sendmsg': True,
                   'denied_inherited_inet_connect_sendto_sendmsg': True}))
-'''
+"""
     result = subprocess.run(
-        [sys.executable, "-I", "-B", "-c", script,
-         str(Path(__file__).resolve().parents[1]), str(tmp_path)],
-        capture_output=True, text=True, timeout=10,
+        [sys.executable, "-I", "-B", "-c", script, str(Path(__file__).resolve().parents[1]), str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
@@ -114,8 +116,7 @@ class _Library:
                 assert type(compare).op.offset == 4
                 assert type(compare).datum_a.offset == 8
                 assert type(compare).datum_b.offset == 16
-                assert (compare.arg, compare.op, compare.datum_a, compare.datum_b) == (
-                    0, 1, socket.AF_UNIX, 0)
+                assert (compare.arg, compare.op, compare.datum_a, compare.datum_b) == (0, 1, socket.AF_UNIX, 0)
             else:
                 assert count == 0 and comparisons is None
             self.rules.append(syscall)
@@ -143,11 +144,14 @@ def test_socket_comparison_uses_fixed_array_abi_and_only_creation_exception(monk
     assert len(library.seccomp_rule_add_array.argtypes) == 5
 
 
-@pytest.mark.parametrize("failure", [
-    ("init", None), ("load", None),
-    *((kind, name) for kind in ("resolve", "rule")
-      for name in (b"socket", b"connect", b"sendto", b"sendmsg")),
-])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ("init", None),
+        ("load", None),
+        *((kind, name) for kind in ("resolve", "rule") for name in (b"socket", b"connect", b"sendto", b"sendmsg")),
+    ],
+)
 def test_policy_setup_failure_refuses_execution_and_releases_context(monkeypatch, failure):
     library = _Library(failure)
     monkeypatch.setattr(worker.ctypes, "CDLL", lambda *_args, **_kwargs: library)

@@ -4,6 +4,7 @@ Run as the trusted service UID, using its actual Podman store, delegated cgroup
 and service restrictions. Exit status, not a report from an earlier invocation,
 is the installation gate. This checks local CPU containment, not GPU acceptance.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,7 +31,16 @@ class AcceptanceError(RuntimeError):
 
 
 _DIAGNOSTIC_BYTES = 8192
-_STAGES = {"configuration", "runtime", "cpu_and_isolation", "pid_and_output", "memory", "wall_time", "launcher_crash", "complete"}
+_STAGES = {
+    "configuration",
+    "runtime",
+    "cpu_and_isolation",
+    "pid_and_output",
+    "memory",
+    "wall_time",
+    "launcher_crash",
+    "complete",
+}
 _PUBLIC_REASONS = {
     "report parent must be a trusted, owned directory without symlinks": "unsafe_report_directory",
     "report must be an owned regular file": "unsafe_report_file",
@@ -50,14 +60,20 @@ _PUBLIC_REASONS = {
 
 def _safe_reason(error: BaseException) -> str:
     # Never make arbitrary exception or subprocess text part of public output.
-    return (_PUBLIC_REASONS.get(str(error), "acceptance_check_failed")
-            if isinstance(error, AcceptanceError) else "runtime_error")
+    return (
+        _PUBLIC_REASONS.get(str(error), "acceptance_check_failed")
+        if isinstance(error, AcceptanceError)
+        else "runtime_error"
+    )
 
 
 def _bounded_diagnostic(value: str | bytes) -> dict:
     raw = value.encode("utf-8", errors="replace") if isinstance(value, str) else value
-    return {"tail": raw[-_DIAGNOSTIC_BYTES:].decode("utf-8", errors="ignore"),
-            "bytes": len(raw), "truncated": len(raw) > _DIAGNOSTIC_BYTES}
+    return {
+        "tail": raw[-_DIAGNOSTIC_BYTES:].decode("utf-8", errors="ignore"),
+        "bytes": len(raw),
+        "truncated": len(raw) > _DIAGNOSTIC_BYTES,
+    }
 
 
 def _exception_diagnostics(error: BaseException) -> dict:
@@ -72,8 +88,17 @@ def _exception_diagnostics(error: BaseException) -> dict:
 
 
 _ATTESTATION_FIELDS = (
-    "uid", "cap_eff", "seccomp", "no_new_privs", "memory_max", "pids_max",
-    "cpu_max", "interfaces", "socket_denied", "input_readonly", "root_readonly",
+    "uid",
+    "cap_eff",
+    "seccomp",
+    "no_new_privs",
+    "memory_max",
+    "pids_max",
+    "cpu_max",
+    "interfaces",
+    "socket_denied",
+    "input_readonly",
+    "root_readonly",
 )
 
 
@@ -88,7 +113,7 @@ class _RecordedSandbox(PodmanSandbox):
         self.attestations.append({key: report[key] for key in _ATTESTATION_FIELDS})
 
 
-_CPU_CODE = '''import json, os, pathlib, socket
+_CPU_CODE = """import json, os, pathlib, socket
 import numpy as np
 import torch
 from scipy.stats import pearsonr
@@ -128,9 +153,9 @@ pathlib.Path("result.json").write_text(json.dumps({
     "host_path_denied": True, "trusted_paths_readonly": True,
     "credentials_absent": True, "numpy_version": np.__version__, "torch_version": torch.__version__,
 }))
-'''
+"""
 
-_BOUNDS_CODE = '''import errno, json, pathlib, subprocess, sys
+_BOUNDS_CODE = """import errno, json, pathlib, subprocess, sys
 events = pathlib.Path("/sys/fs/cgroup/pids.events")
 def maximum_events():
     return int(dict(line.split() for line in events.read_text().splitlines())["max"])
@@ -160,19 +185,19 @@ with open("pressure.bin", "wb") as stream:
 assert denied and pathlib.Path("pressure.bin").stat().st_size <= 1048576
 pathlib.Path("pressure.bin").unlink()
 pathlib.Path("result.json").write_text(json.dumps({"pid_limit_enforced": True, "output_limit_enforced": True}))
-'''
+"""
 
-_MEMORY_CODE = '''print("PROBE_MEMORY_STARTED", flush=True)
+_MEMORY_CODE = """print("PROBE_MEMORY_STARTED", flush=True)
 try: value = bytearray(1024 * 1024 * 1024)
 except MemoryError:
     print("PROBE_MEMORY_REFUSED", flush=True)
     raise SystemExit(42)
 print("PROBE_MEMORY_UNBOUNDED", flush=True)
-'''
+"""
 
-_TIME_CODE = '''print("PROBE_TIME_STARTED", flush=True)
+_TIME_CODE = """print("PROBE_TIME_STARTED", flush=True)
 while True: pass
-'''
+"""
 
 
 def _write_report(path: Path, report: dict):
@@ -204,16 +229,21 @@ def _write_report(path: Path, report: dict):
 def _image_identity(sandbox: PodmanSandbox) -> str:
     result = subprocess.run(
         sandbox._command("image", "inspect", "--format", "{{.Id}}", sandbox.image),
-        capture_output=True, env=sandbox._environment(), timeout=15, check=False,
+        capture_output=True,
+        env=sandbox._environment(),
+        timeout=15,
+        check=False,
     )
     identity = result.stdout.decode("ascii").strip()
     if not identity.startswith("sha256:"):
         identity = "sha256:" + identity
     if result.returncode or identity != sandbox.image:
         error = AcceptanceError("the requested immutable image is not present in the service Podman store")
-        error.private_diagnostics = {"returncode": result.returncode,
-                                     "stdout": _bounded_diagnostic(result.stdout),
-                                     "stderr": _bounded_diagnostic(result.stderr)}
+        error.private_diagnostics = {
+            "returncode": result.returncode,
+            "stdout": _bounded_diagnostic(result.stdout),
+            "stderr": _bounded_diagnostic(result.stderr),
+        }
         raise error
     return identity
 
@@ -231,13 +261,20 @@ def _json_result(result: SandboxResult, expected: set[str]) -> dict:
     return payload
 
 
-def run_acceptance(*, image: str, workspace: Path, output: Path,
-                   podman: str = "podman", seccomp_profile: Path | None = None) -> dict:
+def run_acceptance(
+    *, image: str, workspace: Path, output: Path, podman: str = "podman", seccomp_profile: Path | None = None
+) -> dict:
     """Run actual containers and durably replace the report, failing on any gap."""
     output = Path(output).absolute()
-    report = {"schema_version": 1, "status": "in_progress", "image": image,
-              "service_uid": os.getuid(), "started_at": datetime.now(timezone.utc).isoformat(),
-              "stage": "configuration", "checks": {}}
+    report = {
+        "schema_version": 1,
+        "status": "in_progress",
+        "image": image,
+        "service_uid": os.getuid(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "stage": "configuration",
+        "checks": {},
+    }
     _write_report(output, report)
     scratch: Path | None = None
     try:
@@ -260,14 +297,24 @@ def run_acceptance(*, image: str, workspace: Path, output: Path,
             report["stage"] = stage
             before = len(sandbox.attestations)
             started = time.monotonic()
-            info = {"limits": asdict(limits), "returncode": None, "termination_reason": None,
-                    "elapsed_seconds": None, "attestation_count": 0}
+            info = {
+                "limits": asdict(limits),
+                "returncode": None,
+                "termination_reason": None,
+                "elapsed_seconds": None,
+                "attestation_count": 0,
+            }
             report.setdefault("runs", {})[stage] = info
             try:
                 result = sandbox.run(code, limits=limits, inputs=inputs)
-                info.update(returncode=result.returncode, termination_reason=result.termination_reason,
-                            private_diagnostics={"stdout": _bounded_diagnostic(result.stdout),
-                                                 "stderr": _bounded_diagnostic(result.stderr)})
+                info.update(
+                    returncode=result.returncode,
+                    termination_reason=result.termination_reason,
+                    private_diagnostics={
+                        "stdout": _bounded_diagnostic(result.stdout),
+                        "stderr": _bounded_diagnostic(result.stderr),
+                    },
+                )
             except BaseException as error:
                 info["private_diagnostics"] = _exception_diagnostics(error)
                 raise
@@ -283,49 +330,82 @@ def run_acceptance(*, image: str, workspace: Path, output: Path,
         sentinel = scratch / "unmounted-host-sentinel"
         sentinel.write_text("this file must not enter the container\n")
         sentinel.chmod(0o600)
-        cpu_checks = {"cpu_job", "network_denied", "gpu_unavailable", "host_path_denied",
-                      "trusted_paths_readonly", "credentials_absent"}
-        result = run("cpu_and_isolation", _CPU_CODE,
-                     SandboxLimits(wall_seconds=60, max_output_bytes=1048576, max_broker_requests=0),
-                     inputs={"host-sentinel.json": json.dumps({"path": str(sentinel)}).encode()})
+        cpu_checks = {
+            "cpu_job",
+            "network_denied",
+            "gpu_unavailable",
+            "host_path_denied",
+            "trusted_paths_readonly",
+            "credentials_absent",
+        }
+        result = run(
+            "cpu_and_isolation",
+            _CPU_CODE,
+            SandboxLimits(wall_seconds=60, max_output_bytes=1048576, max_broker_requests=0),
+            inputs={"host-sentinel.json": json.dumps({"path": str(sentinel)}).encode()},
+        )
         cpu = _json_result(result, cpu_checks)
         report["checks"].update({name: True for name in cpu_checks})
         report["cpu_libraries"] = {name: cpu[name] for name in ("numpy_version", "torch_version")}
 
         bounds_checks = {"pid_limit_enforced", "output_limit_enforced"}
-        result = run("pid_and_output", _BOUNDS_CODE, SandboxLimits(
-            wall_seconds=20, memory_bytes=256 * 1024**2, pids=16,
-            max_output_bytes=1048576, max_broker_requests=0))
+        result = run(
+            "pid_and_output",
+            _BOUNDS_CODE,
+            SandboxLimits(
+                wall_seconds=20, memory_bytes=256 * 1024**2, pids=16, max_output_bytes=1048576, max_broker_requests=0
+            ),
+        )
         _json_result(result, bounds_checks)
         report["checks"].update({name: True for name in bounds_checks})
 
-        result = run("memory", _MEMORY_CODE, SandboxLimits(
-            wall_seconds=15, memory_bytes=128 * 1024**2, max_broker_requests=0))
-        if (result.termination_reason is not None or result.artifacts
-                or "PROBE_MEMORY_STARTED" not in result.stdout
-                or "PROBE_MEMORY_UNBOUNDED" in result.stdout
-                or not (result.returncode == 137 or
-                        result.returncode == 42 and "PROBE_MEMORY_REFUSED" in result.stdout)):
+        result = run(
+            "memory", _MEMORY_CODE, SandboxLimits(wall_seconds=15, memory_bytes=128 * 1024**2, max_broker_requests=0)
+        )
+        if (
+            result.termination_reason is not None
+            or result.artifacts
+            or "PROBE_MEMORY_STARTED" not in result.stdout
+            or "PROBE_MEMORY_UNBOUNDED" in result.stdout
+            or not (result.returncode == 137 or result.returncode == 42 and "PROBE_MEMORY_REFUSED" in result.stdout)
+        ):
             raise AcceptanceError("memory pressure was not refused after verified startup")
         report["checks"]["memory_limit_enforced"] = True
 
         # The core budget includes container startup. Give a cold rootless
         # runtime enough time to attest and release the deliberately busy job.
         result = run("wall_time", _TIME_CODE, SandboxLimits(wall_seconds=10, max_broker_requests=0))
-        if (result.termination_reason != "wall_time_limit" or result.artifacts
-                or "PROBE_TIME_STARTED" not in result.stdout
-                or report["runs"]["wall_time"]["elapsed_seconds"] >= 45):
+        if (
+            result.termination_reason != "wall_time_limit"
+            or result.artifacts
+            or "PROBE_TIME_STARTED" not in result.stdout
+            or report["runs"]["wall_time"]["elapsed_seconds"] >= 45
+        ):
             raise AcceptanceError("wall time did not terminate a verified running job within the cleanup bound")
-        report["checks"].update({"wall_time_enforced": True, "runtime_attestation": True,
-                                 "cpu_cgroup_limit_attested": True, "container_removal_confirmed": True})
+        report["checks"].update(
+            {
+                "wall_time_enforced": True,
+                "runtime_attestation": True,
+                "cpu_cgroup_limit_attested": True,
+                "container_removal_confirmed": True,
+            }
+        )
         report["stage"] = "launcher_crash"
         try:
             report["lifecycle"] = run_lifecycle_check(sandbox)
         except BaseException as error:
             report["lifecycle"] = getattr(error, "lifecycle_report", {})
             raise
-        if any(report["lifecycle"].get(key) is not True for key in (
-                "program_started", "launchers_killed", "host_timer_excluded", "container_processes_stopped", "container_removed")):
+        if any(
+            report["lifecycle"].get(key) is not True
+            for key in (
+                "program_started",
+                "launchers_killed",
+                "host_timer_excluded",
+                "container_processes_stopped",
+                "container_removed",
+            )
+        ):
             raise AcceptanceError("launcher crash did not prove independent termination and removal")
         report["checks"].update({"crash_deadline_enforced": True, "crash_removal_confirmed": True})
         report["stage"] = "complete"
@@ -359,11 +439,21 @@ def main(argv=None) -> int:
         report = run_acceptance(**vars(args))
     except Exception as error:
         stage = getattr(error, "acceptance_stage", "configuration")
-        print(json.dumps({"status": "failed", "error_type": type(error).__name__,
-                          "stage": stage if stage in _STAGES else "configuration",
-                          "reason": _safe_reason(error)}), file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "error_type": type(error).__name__,
+                    "stage": stage if stage in _STAGES else "configuration",
+                    "reason": _safe_reason(error),
+                }
+            ),
+            file=sys.stderr,
+        )
         return 1
-    print(json.dumps({"status": report["status"], "image": report["image"], "checks": report["checks"]}, sort_keys=True))
+    print(
+        json.dumps({"status": report["status"], "image": report["image"], "checks": report["checks"]}, sort_keys=True)
+    )
     return 0
 
 

@@ -1,4 +1,5 @@
 """Output accounting must tolerate publication without hiding other I/O errors."""
+
 import errno
 import os
 from pathlib import Path
@@ -79,11 +80,14 @@ def test_file_metadata_errors_other_than_disappearance_propagate(tmp_path, monke
     assert caught.value is failure
 
 
-@pytest.mark.parametrize("error_type,number,ignored", [
-    (FileNotFoundError, errno.ENOENT, True),
-    (PermissionError, errno.EACCES, False),
-    (OSError, errno.EIO, False),
-])
+@pytest.mark.parametrize(
+    "error_type,number,ignored",
+    [
+        (FileNotFoundError, errno.ENOENT, True),
+        (PermissionError, errno.EACCES, False),
+        (OSError, errno.EIO, False),
+    ],
+)
 def test_directory_scan_ignores_only_concurrent_disappearance(tmp_path, monkeypatch, error_type, number, ignored):
     directory = tmp_path / "nested"
     directory.mkdir()

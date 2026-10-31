@@ -1,10 +1,11 @@
 # Auto Interpretability Lab: Trusted worker and dispatcher
 
-[Project overview](../README.md) · [Validation status](validation.md) · [Deployment checklist](live-deployment-plan.md)
+[Project overview](../README.md) · [Status](../STATUS.md) · [Validation](validation.md)
 
 This guide covers Auto Interpretability Lab's worker/dispatcher contracts. The
-selected images and 18 prepared case plans still have zero successful live
-canonical GPU cases; use the linked validation page for current evidence.
+managed HTTP worker described here has not passed a live canonical GPU case;
+the separate supervised profile has. See [STATUS.md](../STATUS.md) for current
+standing.
 
 The worker executes fixed numerical operations using local Hugging Face weights and NNsight. The dispatcher follows the controller's already approved, consumed compute interval and publishes verified artifacts to the ledger. Neither process can authorize compute, provision a Pod, renew an allowance, or run agent-supplied Python. Provider actions belong to the separate controller; these instructions do not provision or start cloud resources.
 

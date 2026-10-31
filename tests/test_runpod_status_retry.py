@@ -1,4 +1,5 @@
 """Exact-Pod reconciliation reads use fake HTTP; no cloud calls or real waits."""
+
 from datetime import timedelta
 
 import pytest
@@ -50,9 +51,17 @@ def test_second_failure_escapes_without_another_wait_or_cached_success(runpod, m
     assert clock() == before + timedelta(seconds=2) and len(http.purchases) == 1
 
 
-@pytest.mark.parametrize("error", [ProviderHTTPError(401), ProviderHTTPError(403),
-    ProviderHTTPError(500), ProviderResponseError("invalid response"),
-    ProviderUncertain("configuration mismatch"), TimeoutError("uncertain transport")])
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProviderHTTPError(401),
+        ProviderHTTPError(403),
+        ProviderHTTPError(500),
+        ProviderResponseError("invalid response"),
+        ProviderUncertain("configuration mismatch"),
+        TimeoutError("uncertain transport"),
+    ],
+)
 def test_non_transient_errors_remain_one_shot(runpod, monkeypatch, error):
     backend, _, clock, reads, args = observe(runpod, monkeypatch, [error])
     before = clock()
@@ -68,9 +77,16 @@ def test_confirmed_absence_is_not_retried(runpod, monkeypatch):
     assert len(reads) == 1 and clock() == before
 
 
-@pytest.mark.parametrize("headers", [{"Retry-After": "3"}, {"Retry-After": "86401"},
-    {"Retry-After": "Sun, 20 Sep 2026 16:00:00 GMT"}, {"Retry-After": "invalid"},
-    {"cf-mitigated": "challenge"}])
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Retry-After": "3"},
+        {"Retry-After": "86401"},
+        {"Retry-After": "Sun, 20 Sep 2026 16:00:00 GMT"},
+        {"Retry-After": "invalid"},
+        {"cf-mitigated": "challenge"},
+    ],
+)
 def test_long_backoff_or_challenge_does_not_receive_an_early_retry(runpod, monkeypatch, headers):
     backend, _, clock, reads, args = observe(runpod, monkeypatch, [503], headers=headers)
     before = clock()

@@ -32,14 +32,26 @@ spec.loader.exec_module(verify)
 
 
 def local_plan(checks):
-    return {"role": "research", "account": "local-test", "uid": os.getuid(), "gid": os.getgid(),
-            "groups": os.getgroups(), "checks": checks}
+    return {
+        "role": "research",
+        "account": "local-test",
+        "uid": os.getuid(),
+        "gid": os.getgid(),
+        "groups": os.getgroups(),
+        "checks": checks,
+    }
 
 
 def child(checks, **updates):
     plan = local_plan(checks) | updates
-    result = subprocess.run([sys.executable, "-I", "-c", verify.CHILD], input=json.dumps(plan).encode(),
-                            capture_output=True, env=verify.ENV, cwd="/", timeout=10)
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", verify.CHILD],
+        input=json.dumps(plan).encode(),
+        capture_output=True,
+        env=verify.ENV,
+        cwd="/",
+        timeout=10,
+    )
     assert result.returncode == 0, "child must return only bounded boolean results"
     return json.loads(result.stdout)
 
@@ -150,8 +162,14 @@ def test_socket_connection_denial_is_distinguished_from_missing_or_available(rpc
     assert child([rpc_check(tmp_path / "missing.sock", "deny_connect")])["checks"]["rpc_access"] is False
 
 
-@pytest.mark.parametrize("body", [{"jobs": [], "gpu_start_authority": True, "evaluation_authority": False},
-                                 {"jobs": [], "gpu_start_authority": False}, "PRIVATE_SERVER_ERROR"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"jobs": [], "gpu_start_authority": True, "evaluation_authority": False},
+        {"jobs": [], "gpu_start_authority": False},
+        "PRIVATE_SERVER_ERROR",
+    ],
+)
 def test_unexpected_status_contract_fails_without_disclosing_payload(rpc_server, body):
     path = rpc_server(lambda method, params: body)
     result = child([rpc_check(path)])
@@ -159,12 +177,15 @@ def test_unexpected_status_contract_fails_without_disclosing_payload(rpc_server,
     assert "PRIVATE" not in json.dumps(result)
 
 
-@pytest.mark.parametrize("kind,states,allowed", [
-    ("discovery", ["COMPLETED", "FAILED"], True),
-    ("discovery", ["COMPLETED", "RUNNING"], False),
-    ("controller_status", ["STOPPED", "REJECTED", "PENDING"], True),
-    ("controller_status", ["STOPPED", "UNCERTAIN"], False),
-])
+@pytest.mark.parametrize(
+    "kind,states,allowed",
+    [
+        ("discovery", ["COMPLETED", "FAILED"], True),
+        ("discovery", ["COMPLETED", "RUNNING"], False),
+        ("controller_status", ["STOPPED", "REJECTED", "PENDING"], True),
+        ("controller_status", ["STOPPED", "UNCERTAIN"], False),
+    ],
+)
 def test_rpc_idle_views_retain_history_but_reject_active_states(rpc_server, kind, states, allowed):
     path = rpc_server(lambda method, params: [{"state": state} for state in states])
     assert child([rpc_check(path, kind)])["checks"]["rpc_access"] is allowed
@@ -187,13 +208,16 @@ def test_runuser_receives_exact_groups_and_accessible_cwd(tmp_path, monkeypatch)
     assert verify.run_probe(plan, run=run) == {"research_identity": True, "file_access": True}
 
 
-@pytest.mark.parametrize("payload", [b'{"identity":true,"checks":{}}',
-                                    b'{"identity":true,"checks":{"file_access":1}}', b"x" * 8193])
+@pytest.mark.parametrize(
+    "payload", [b'{"identity":true,"checks":{}}', b'{"identity":true,"checks":{"file_access":1}}', b"x" * 8193]
+)
 def test_invalid_child_results_never_count_as_success(payload):
     plan = local_plan([file_check("/not-read")])
     plan["groups"] = []
     with pytest.raises(verify.CheckFailure):
-        verify.run_probe(plan, run=lambda command, **kwargs: subprocess.CompletedProcess(command, 0, payload, b"SECRET"))
+        verify.run_probe(
+            plan, run=lambda command, **kwargs: subprocess.CompletedProcess(command, 0, payload, b"SECRET")
+        )
 
 
 @pytest.fixture
@@ -202,7 +226,9 @@ def installed_units(tmp_path):
     unit_root.mkdir()
     proc_root.mkdir()
     groups = {name: 3000 + index for index, name in enumerate(verify.GROUPS)}
-    users = {name: SimpleNamespace(pw_uid=2000 + index, pw_gid=groups[name]) for index, name in enumerate(verify.ACCOUNTS)}
+    users = {
+        name: SimpleNamespace(pw_uid=2000 + index, pw_gid=groups[name]) for index, name in enumerate(verify.ACCOUNTS)
+    }
     memberships = {name: set() for name in users}
     memberships["probe-watchdog"] = {groups["probe-ledger-read"], groups["probe-stop"], groups["probe-watch-read"]}
     values = {}
@@ -212,34 +238,68 @@ def installed_units(tmp_path):
         path.chmod(0o644)
         research = name == "probe-research.service"
         pid = 500 + index if module else 0
-        values[name] = {"LoadState": "loaded", "ActiveState": "active" if module else "inactive",
-            "SubState": "running" if module else "dead", "MainPID": str(pid), "User": account, "Group": primary,
-            "SupplementaryGroups": " ".join(sorted(supplements)), "FragmentPath": str(path), "DropInPaths": "",
-            "UnitFileState": "enabled" if module else "static", "ExecMainStatus": "0",
-            "NoNewPrivileges": "no" if research else "yes", "ProtectSystem": "strict",
-            "ProtectHome": "read-only" if research else "yes", "PrivateTmp": "yes"}
+        values[name] = {
+            "LoadState": "loaded",
+            "ActiveState": "active" if module else "inactive",
+            "SubState": "running" if module else "dead",
+            "MainPID": str(pid),
+            "User": account,
+            "Group": primary,
+            "SupplementaryGroups": " ".join(sorted(supplements)),
+            "FragmentPath": str(path),
+            "DropInPaths": "",
+            "UnitFileState": "enabled" if module else "static",
+            "ExecMainStatus": "0",
+            "NoNewPrivileges": "no" if research else "yes",
+            "ProtectSystem": "strict",
+            "ProtectHome": "read-only" if research else "yes",
+            "PrivateTmp": "yes",
+        }
         if module:
             process = proc_root / str(pid)
             process.mkdir()
             uid, gid = users[account].pw_uid, groups[primary]
             effective_groups = memberships[account] | {groups[item] for item in supplements} | {gid}
-            (process / "status").write_text("Uid:\t" + "\t".join([str(uid)] * 4) + "\nGid:\t" + "\t".join([str(gid)] * 4)
-                                           + "\nGroups:\t" + " ".join(map(str, sorted(effective_groups))) + "\n")
+            (process / "status").write_text(
+                "Uid:\t"
+                + "\t".join([str(uid)] * 4)
+                + "\nGid:\t"
+                + "\t".join([str(gid)] * 4)
+                + "\nGroups:\t"
+                + " ".join(map(str, sorted(effective_groups)))
+                + "\n"
+            )
             argv = ["/opt/probe-core/venv/bin/python", "-I", "-m", module] + ([command] if command else [])
             (process / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
 
     def run(command, **kwargs):
         assert command[:2] == ["/usr/bin/systemctl", "show"]
         assert kwargs["timeout"] == 5 and kwargs["cwd"] == "/"
-        return subprocess.CompletedProcess(command, 0, "\n".join(key + "=" + value for key, value in values[command[2]].items()).encode(), b"")
+        return subprocess.CompletedProcess(
+            command, 0, "\n".join(key + "=" + value for key, value in values[command[2]].items()).encode(), b""
+        )
 
-    return SimpleNamespace(users=users, groups=groups, memberships=memberships, values=values, run=run,
-                           proc_root=proc_root, unit_root=unit_root)
+    return SimpleNamespace(
+        users=users,
+        groups=groups,
+        memberships=memberships,
+        values=values,
+        run=run,
+        proc_root=proc_root,
+        unit_root=unit_root,
+    )
 
 
 def inspect(fixture):
-    return verify.inspect_units(fixture.users, fixture.groups, fixture.memberships, run=fixture.run,
-                                proc_root=fixture.proc_root, unit_root=fixture.unit_root, owner=os.getuid())
+    return verify.inspect_units(
+        fixture.users,
+        fixture.groups,
+        fixture.memberships,
+        run=fixture.run,
+        proc_root=fixture.proc_root,
+        unit_root=fixture.unit_root,
+        owner=os.getuid(),
+    )
 
 
 def test_effective_service_groups_follow_unit_and_nss_without_passwd_primary(installed_units):
@@ -251,17 +311,29 @@ def test_effective_service_groups_follow_unit_and_nss_without_passwd_primary(ins
     assert len(pids) == 4 and "probe-backup.service" not in pids
 
 
-@pytest.mark.parametrize("field,value", [("User", "root"), ("Group", "probe-trusted"),
-    ("SupplementaryGroups", "probe-trusted"), ("DropInPaths", "/unexpected.conf"), ("MainPID", "0"),
-    ("ProtectSystem", "no"), ("NoNewPrivileges", "no"), ("ActiveState", "failed")])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("User", "root"),
+        ("Group", "probe-trusted"),
+        ("SupplementaryGroups", "probe-trusted"),
+        ("DropInPaths", "/unexpected.conf"),
+        ("MainPID", "0"),
+        ("ProtectSystem", "no"),
+        ("NoNewPrivileges", "no"),
+        ("ActiveState", "failed"),
+    ],
+)
 def test_changed_installed_unit_is_refused(installed_units, field, value):
     installed_units.values["probe-watchdog.service"][field] = value
     with pytest.raises(verify.CheckFailure):
         inspect(installed_units)
 
 
-@pytest.mark.parametrize("file,content", [("status", b"Uid: 0 0 0 0\nGid: 0 0 0 0\nGroups: 0\n"),
-                                         ("cmdline", b"/usr/bin/python3\0-I\0-m\0other_module\0")])
+@pytest.mark.parametrize(
+    "file,content",
+    [("status", b"Uid: 0 0 0 0\nGid: 0 0 0 0\nGroups: 0\n"), ("cmdline", b"/usr/bin/python3\0-I\0-m\0other_module\0")],
+)
 def test_live_process_must_match_unit_identity_and_entrypoint(installed_units, file, content):
     pid = installed_units.values["probe-watchdog.service"]["MainPID"]
     (installed_units.proc_root / pid / file).write_bytes(content)
@@ -278,29 +350,74 @@ def test_failed_backup_cannot_pass_as_completed(installed_units):
 def history_fixture(tmp_path, *, closed=True, pending=False):
     ledger, provider = tmp_path / "ledger.sqlite", tmp_path / "provider.sqlite"
     now = datetime.now(timezone.utc)
-    RunPodProvider(RunPodConfig(state_path=str(provider), api_key_file=str(tmp_path / "unused-key"),
-        launch=RunPodLaunchConfig(image_repository="example/worker"), storage_rates=StorageRates(checked_at=now)))
-    deployment = DeploymentSpec(gpu_model="NVIDIA GeForce RTX 4090", image_digest="sha256:" + "a" * 64,
-        image_repository="example/worker", launch_config_hash="sha256:" + "b" * 64,
-        storage_mode="ephemeral_preflight", volume_gb=0, region="EU-RO-1")
+    RunPodProvider(
+        RunPodConfig(
+            state_path=str(provider),
+            api_key_file=str(tmp_path / "unused-key"),
+            launch=RunPodLaunchConfig(image_repository="example/worker"),
+            storage_rates=StorageRates(checked_at=now),
+        )
+    )
+    deployment = DeploymentSpec(
+        gpu_model="NVIDIA GeForce RTX 4090",
+        image_digest="sha256:" + "a" * 64,
+        image_repository="example/worker",
+        launch_config_hash="sha256:" + "b" * 64,
+        storage_mode="ephemeral_preflight",
+        volume_gb=0,
+        region="EU-RO-1",
+    )
     with Ledger(ledger, clock=lambda: now) as core:
-        controller = Controller(core, object(), watchdog_health_path=tmp_path / "unused-health", controller_idle_usd_per_day=0)
+        controller = Controller(
+            core, object(), watchdog_health_path=tmp_path / "unused-health", controller_idle_usd_per_day=0
+        )
         request = controller.request_infrastructure_preflight(deployment, "sha256:" + "c" * 64, 60)
         if pending:
             return ledger, provider, request
-        nonce = ApprovalNonce(approval_id=request["approval_id"], token="synthetic-test-value-" + "x" * 48,
-            pod_id=request["worker_id"], batch_hash=request["batch_hash"], purpose="infrastructure_preflight",
-            max_runtime_seconds=60, price_ceiling_usd_per_hour=0.8, issued_at=now, expires_at=now + timedelta(minutes=5))
+        nonce = ApprovalNonce(
+            approval_id=request["approval_id"],
+            token="synthetic-test-value-" + "x" * 48,
+            pod_id=request["worker_id"],
+            batch_hash=request["batch_hash"],
+            purpose="infrastructure_preflight",
+            max_runtime_seconds=60,
+            price_ceiling_usd_per_hour=0.8,
+            issued_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
         core.register_approval(nonce)
-        grant = core.consume_infrastructure_approval(nonce.approval_id, nonce.token.get_secret_value(),
-            infrastructure_hash=request["batch_hash"], pod_id=request["worker_id"], live_price_usd_per_hour=0.74, requested_runtime_seconds=60)
-        controller._state(request["request_id"], "STOPPED" if closed else "RUNNING", deadline=grant.deadline.timestamp(), provider_id="owned-test-pod")
+        grant = core.consume_infrastructure_approval(
+            nonce.approval_id,
+            nonce.token.get_secret_value(),
+            infrastructure_hash=request["batch_hash"],
+            pod_id=request["worker_id"],
+            live_price_usd_per_hour=0.74,
+            requested_runtime_seconds=60,
+        )
+        controller._state(
+            request["request_id"],
+            "STOPPED" if closed else "RUNNING",
+            deadline=grant.deadline.timestamp(),
+            provider_id="owned-test-pod",
+        )
         if closed:
             core.end_approval(nonce.approval_id)
     with closing(sqlite3.connect(provider)) as connection, connection:
-        connection.execute("INSERT INTO runpod_intents VALUES(?,?,?,?,?,?,?,?,?,?)", (
-            request["worker_id"], request["request_id"], canonical_json(deployment.model_dump(exclude_none=True)), deployment.digest,
-            grant.deadline.timestamp(), "owned-test-pod", now.timestamp(), "{}", 0.8, 1))
+        connection.execute(
+            "INSERT INTO runpod_intents VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                request["worker_id"],
+                request["request_id"],
+                canonical_json(deployment.model_dump(exclude_none=True)),
+                deployment.digest,
+                grant.deadline.timestamp(),
+                "owned-test-pod",
+                now.timestamp(),
+                "{}",
+                0.8,
+                1,
+            ),
+        )
     return ledger, provider, request
 
 
@@ -333,9 +450,19 @@ def test_job_gate_rejects_all_nonterminal_states(tmp_path, state):
     ledger, provider, _ = history_fixture(tmp_path)
     manifest = json.loads((PROJECT / "tests/fixtures/manifest.json").read_text())
     with Ledger(ledger) as core:
-        job = core.submit_job(JobSpec(idempotency_key="preserved-job", model=manifest["model"], inputs=manifest["inputs"],
-            operation={"kind": "capture", "modules": [{"layer": 0, "component": "residual"}], "positions": ["last"]},
-            limits={"max_runtime_seconds": 60, "max_output_bytes": 1000000}))
+        job = core.submit_job(
+            JobSpec(
+                idempotency_key="preserved-job",
+                model=manifest["model"],
+                inputs=manifest["inputs"],
+                operation={
+                    "kind": "capture",
+                    "modules": [{"layer": 0, "component": "residual"}],
+                    "positions": ["last"],
+                },
+                limits={"max_runtime_seconds": 60, "max_output_bytes": 1000000},
+            )
+        )
     with closing(sqlite3.connect(ledger)) as connection, connection:
         connection.execute("UPDATE jobs SET state=? WHERE job_id=?", (state, job.job_id))
     if state in {"COMPLETED", "FAILED"}:
@@ -352,9 +479,19 @@ def test_unconsumed_nonce_is_only_idle_after_expiry(tmp_path, expired):
     issued = now - timedelta(minutes=10)
     expiry = now + timedelta(minutes=-1 if expired else 1)
     with Ledger(ledger, clock=lambda: issued) as core:
-        core.register_approval(ApprovalNonce(approval_id="unused-test-approval", token="synthetic-unconsumed-" + "z" * 48,
-            pod_id="unused-test-worker", batch_hash="sha256:" + "d" * 64, purpose="infrastructure_preflight",
-            max_runtime_seconds=60, price_ceiling_usd_per_hour=0.8, issued_at=issued, expires_at=expiry))
+        core.register_approval(
+            ApprovalNonce(
+                approval_id="unused-test-approval",
+                token="synthetic-unconsumed-" + "z" * 48,
+                pod_id="unused-test-worker",
+                batch_hash="sha256:" + "d" * 64,
+                purpose="infrastructure_preflight",
+                max_runtime_seconds=60,
+                price_ceiling_usd_per_hour=0.8,
+                issued_at=issued,
+                expires_at=expiry,
+            )
+        )
     if expired:
         assert verify.state_counts(ledger=ledger, provider=provider)["approvals"] == 2
     else:
@@ -374,13 +511,25 @@ def test_terminal_job_with_unstopped_attempt_still_refuses_upgrade(tmp_path):
     ledger, provider, request = history_fixture(tmp_path)
     manifest = json.loads((PROJECT / "tests/fixtures/manifest.json").read_text())
     with Ledger(ledger) as core:
-        job = core.submit_job(JobSpec(idempotency_key="orphaned-attempt-job", model=manifest["model"], inputs=manifest["inputs"],
-            operation={"kind": "capture", "modules": [{"layer": 0, "component": "residual"}], "positions": ["last"]},
-            limits={"max_runtime_seconds": 60, "max_output_bytes": 1000000}))
+        job = core.submit_job(
+            JobSpec(
+                idempotency_key="orphaned-attempt-job",
+                model=manifest["model"],
+                inputs=manifest["inputs"],
+                operation={
+                    "kind": "capture",
+                    "modules": [{"layer": 0, "component": "residual"}],
+                    "positions": ["last"],
+                },
+                limits={"max_runtime_seconds": 60, "max_output_bytes": 1000000},
+            )
+        )
     with closing(sqlite3.connect(ledger)) as connection, connection:
         connection.execute("UPDATE jobs SET state='FAILED' WHERE job_id=?", (job.job_id,))
-        connection.execute("INSERT INTO attempts(attempt_id,job_id,attempt_number,worker_id,approval_id,dispatched_at,heartbeat_at,lease_expires_at,execution_deadline) VALUES(?,?,?,?,?,?,?,?,?)",
-                           ("orphaned-attempt", job.job_id, 1, request["worker_id"], request["approval_id"], 1, 1, 2, 2))
+        connection.execute(
+            "INSERT INTO attempts(attempt_id,job_id,attempt_number,worker_id,approval_id,dispatched_at,heartbeat_at,lease_expires_at,execution_deadline) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("orphaned-attempt", job.job_id, 1, request["worker_id"], request["approval_id"], 1, 1, 2, 2),
+        )
     with pytest.raises(verify.CheckFailure, match="UNSTOPPED_ATTEMPT_EXISTS"):
         verify.state_counts(ledger=ledger, provider=provider)
 
@@ -388,10 +537,12 @@ def test_terminal_job_with_unstopped_attempt_still_refuses_upgrade(tmp_path):
 @pytest.mark.parametrize("fault", ["unbound", "wrong_worker", "wrong_configuration", "unknown_request"])
 def test_provider_mapping_must_be_complete_and_consistent(tmp_path, fault):
     ledger, provider, _ = history_fixture(tmp_path)
-    statement = {"unbound": "UPDATE runpod_intents SET provider_id=NULL",
-                 "wrong_worker": "UPDATE runpod_intents SET worker_id='other'",
-                 "wrong_configuration": "UPDATE runpod_intents SET configuration='{}'",
-                 "unknown_request": "UPDATE runpod_intents SET request_key='other'"}[fault]
+    statement = {
+        "unbound": "UPDATE runpod_intents SET provider_id=NULL",
+        "wrong_worker": "UPDATE runpod_intents SET worker_id='other'",
+        "wrong_configuration": "UPDATE runpod_intents SET configuration='{}'",
+        "unknown_request": "UPDATE runpod_intents SET request_key='other'",
+    }[fault]
     with closing(sqlite3.connect(provider)) as connection, connection:
         connection.execute(statement)
     with pytest.raises(verify.CheckFailure, match="UNRESOLVED_PROVIDER_INTENT|PROVIDER_CONFIGURATION_MISMATCH"):
@@ -439,8 +590,12 @@ def test_completed_archive_requires_exact_hash_and_full_verification_receipt(tmp
     archive.write_bytes(b"bounded retained archive fixture")
     archive.chmod(0o640)
     receipt = receipts / "receipt.json"
-    data = {"verified": True, "readback_verified": True, "restore_verified": True,
-            "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}
+    data = {
+        "verified": True,
+        "readback_verified": True,
+        "restore_verified": True,
+        "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+    }
     receipt.write_text(json.dumps(data))
     receipt.chmod(0o640)
     kwargs = dict(outbox=outbox, receipts=receipts, trusted_uid=os.getuid(), backup_uid=os.getuid())
@@ -483,10 +638,12 @@ def test_actual_provider_unknown_worker_status_never_uses_http(tmp_path):
         def request(self, *args, **kwargs):
             raise AssertionError("identity acceptance must never reach provider HTTP")
 
-    config = RunPodConfig(state_path=str(tmp_path / "provider" / "runpod.sqlite"),
+    config = RunPodConfig(
+        state_path=str(tmp_path / "provider" / "runpod.sqlite"),
         api_key_file=str(tmp_path / "absent-key-must-not-be-read"),
         launch=RunPodLaunchConfig(image_repository="ghcr.io/test/worker", ports=("22/tcp",)),
-        storage_rates=StorageRates(checked_at=datetime.now(timezone.utc)))
+        storage_rates=StorageRates(checked_at=datetime.now(timezone.utc)),
+    )
     provider = RunPodProvider(config, transport=ForbiddenTransport())
     before = provider.path.read_bytes()
     result = provider.status("identity-check-never-registered")
@@ -497,8 +654,9 @@ def test_actual_provider_unknown_worker_status_never_uses_http(tmp_path):
 @pytest.fixture
 def nss(monkeypatch):
     groups = {name: 3000 + index for index, name in enumerate(verify.GROUPS)}
-    users = {name: SimpleNamespace(pw_uid=2000 + index, pw_gid=groups[name])
-             for index, name in enumerate(verify.ACCOUNTS)}
+    users = {
+        name: SimpleNamespace(pw_uid=2000 + index, pw_gid=groups[name]) for index, name in enumerate(verify.ACCOUNTS)
+    }
     users["human"] = SimpleNamespace(pw_uid=1000, pw_gid=1000)
     entries = [SimpleNamespace(gr_gid=gid, gr_mem=[]) for gid in groups.values()]
     monkeypatch.setattr(verify.pwd, "getpwnam", users.__getitem__)
@@ -555,7 +713,9 @@ def test_report_is_private_exclusive_and_rejects_symlink_parents(tmp_path, monke
 
 
 @pytest.mark.parametrize("audit_after,restarted,passed", [(11, False, True), (9, False, False), (11, True, False)])
-def test_orchestration_preserves_prior_audit_and_checks_service_continuity(installed_units, monkeypatch, audit_after, restarted, passed):
+def test_orchestration_preserves_prior_audit_and_checks_service_continuity(
+    installed_units, monkeypatch, audit_after, restarted, passed
+):
     fixture = installed_units
     fixture.users["human"] = SimpleNamespace(pw_uid=1000, pw_gid=1000)
     fixture.memberships["human"] = {1000}
@@ -564,9 +724,19 @@ def test_orchestration_preserves_prior_audit_and_checks_service_continuity(insta
     monkeypatch.setattr(verify, "inspect_units", lambda *args: (roles, pids))
     monkeypatch.setattr(verify, "validate_config", lambda *args: None)
     monkeypatch.setattr(verify, "completed_archive", lambda **kwargs: Path("/verified/archive.tar"))
-    states = [{"jobs": 0, "approvals": 0, "compute_requests": 0, "runpod_intents": 0, "audit_events": count,
-               "history_sha256": "a" * 64, "audit_tip": "b" * 64, "audit_prefix_sha256": "b" * 64}
-              for count in (9, audit_after)]
+    states = [
+        {
+            "jobs": 0,
+            "approvals": 0,
+            "compute_requests": 0,
+            "runpod_intents": 0,
+            "audit_events": count,
+            "history_sha256": "a" * 64,
+            "audit_tip": "b" * 64,
+            "audit_prefix_sha256": "b" * 64,
+        }
+        for count in (9, audit_after)
+    ]
     workers = []
 
     def state_counts(**kwargs):
@@ -589,7 +759,14 @@ def test_orchestration_preserves_prior_audit_and_checks_service_continuity(insta
     assert [plan["role"] for plan in probes] == ["research", "watchdog", "backup", "human"]
     assert len(checks) == 26
     assert {check["kind"] for plan in probes for check in plan["checks"]} == {
-        "deny_read", "read_file", "deny_connect", "lab_status", "discovery", "stop_status", "controller_status"}
+        "deny_read",
+        "read_file",
+        "deny_connect",
+        "lab_status",
+        "discovery",
+        "stop_status",
+        "controller_status",
+    }
 
 
 @pytest.fixture
@@ -606,10 +783,17 @@ def installed_config(tmp_path, rpc_server, monkeypatch):
         monkeypatch.setattr(verify, name, path)
     users = {name: SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()) for name in (*verify.ACCOUNTS, "human")}
     groups = {name: os.getgid() for name in verify.GROUPS}
-    research = {"ledger_path": str(verify.LEDGER), "socket_path": str(verify.RESEARCH_SOCKET),
-        "service_uid": os.getuid(), "research_uid": os.getuid(), "admin_uid": os.getuid(),
-        "socket_gid": os.getgid(), "controller_uid": os.getuid(),
-        "controller_socket": "/run/probe-controller/research.sock", "sandbox_image": None}
+    research = {
+        "ledger_path": str(verify.LEDGER),
+        "socket_path": str(verify.RESEARCH_SOCKET),
+        "service_uid": os.getuid(),
+        "research_uid": os.getuid(),
+        "admin_uid": os.getuid(),
+        "socket_gid": os.getgid(),
+        "controller_uid": os.getuid(),
+        "controller_socket": "/run/probe-controller/research.sock",
+        "sandbox_image": None,
+    }
     path = tmp_path / "research.json"
     path.write_text(json.dumps(research))
     path.chmod(0o640)
@@ -627,8 +811,9 @@ def test_guarded_null_sandbox_config_keeps_identity_gate_available(installed_con
     validate(installed_config)
 
 
-@pytest.mark.parametrize("field,value", [("service_uid", False), ("research_uid", 1234567),
-                                        ("controller_socket", "/unexpected.sock")])
+@pytest.mark.parametrize(
+    "field,value", [("service_uid", False), ("research_uid", 1234567), ("controller_socket", "/unexpected.sock")]
+)
 def test_identity_config_mismatch_fails(installed_config, field, value):
     installed_config.research[field] = value
     installed_config.path.write_text(json.dumps(installed_config.research))

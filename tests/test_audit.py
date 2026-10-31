@@ -48,7 +48,9 @@ def test_canonical_json_is_deterministic_utf8():
     assert canonical_json({"b": 2, "a": 1}) == canonical_json({"a": 1, "b": 2})
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), {1: "value"}, (1, 2), {"x": object()}, "\ud800"])
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), float("-inf"), {1: "value"}, (1, 2), {"x": object()}, "\ud800"]
+)
 def test_canonical_json_rejects_non_json(value):
     with pytest.raises((ValueError, TypeError, UnicodeError)):
         canonical_json(value)
@@ -63,13 +65,36 @@ def test_canonical_json_rejects_cycles_but_allows_shared_children():
     assert canonical_json([shared, shared]) == '[{"a":1},{"a":1}]'
 
 
-@pytest.mark.parametrize("key", [
-    "token", "TOKEN", "tokens", "access_token", "refreshToken", "rawApprovalToken",
-    "approval_token_hash", "api_key", "APIKey", "runpodApiKey", "X-API-Key",
-    "password", "dbPassword", "passwd", "clientSecret", "credentials", "credential",
-    "private_key", "privateKey", "authorization", "AuthorizationHeader", "authorisation",
-    "ＦＵＬＬ＿ＡＰＩ＿ＫＥＹ", "accesstoken", "tokenValue",
-])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "token",
+        "TOKEN",
+        "tokens",
+        "access_token",
+        "refreshToken",
+        "rawApprovalToken",
+        "approval_token_hash",
+        "api_key",
+        "APIKey",
+        "runpodApiKey",
+        "X-API-Key",
+        "password",
+        "dbPassword",
+        "passwd",
+        "clientSecret",
+        "credentials",
+        "credential",
+        "private_key",
+        "privateKey",
+        "authorization",
+        "AuthorizationHeader",
+        "authorisation",
+        "ＦＵＬＬ＿ＡＰＩ＿ＫＥＹ",
+        "accesstoken",
+        "tokenValue",
+    ],
+)
 def test_sensitive_keys_rejected_recursively_without_echo(key):
     with pytest.raises(SecretDetectedError) as raised:
         validate_audit_payload({"safe": [{"nested": {key: "do-not-echo-this"}}]})
@@ -84,14 +109,16 @@ def test_rejection_happens_before_any_file_creation(tmp_path):
 
 
 def test_model_token_metadata_remains_allowed():
-    validate_audit_payload({
-        "token_generation": {"max_new_tokens": 42, "minNewTokens": 1},
-        "maxNewTokens": 128,
-        "tokenizer": {"name": "example", "revision": "abc", "eos_token_id": 3},
-        "tokenizer_config": {"padding_side": "left"},
-        "input_tokens": 10,
-        "token_ids": [1, 2, 3],
-    })
+    validate_audit_payload(
+        {
+            "token_generation": {"max_new_tokens": 42, "minNewTokens": 1},
+            "maxNewTokens": 128,
+            "tokenizer": {"name": "example", "revision": "abc", "eos_token_id": 3},
+            "tokenizer_config": {"padding_side": "left"},
+            "input_tokens": 10,
+            "token_ids": [1, 2, 3],
+        }
+    )
 
 
 def test_allowed_model_metadata_still_rejects_nested_secrets():
@@ -109,14 +136,17 @@ def test_record_hash_utc_timestamp_and_detached_payload():
     assert record["payload"] == {"nested": ["café"]}
 
 
-@pytest.mark.parametrize("arguments", [
-    (0, GENESIS_HASH, "job.created", {}, NOW),
-    (True, GENESIS_HASH, "job.created", {}, NOW),
-    (1, "invalid", "job.created", {}, NOW),
-    (1, GENESIS_HASH, "raw event text\n", {}, NOW),
-    (1, GENESIS_HASH, "job.created", [], NOW),
-    (1, GENESIS_HASH, "job.created", {}, NOW.replace(tzinfo=None)),
-])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        (0, GENESIS_HASH, "job.created", {}, NOW),
+        (True, GENESIS_HASH, "job.created", {}, NOW),
+        (1, "invalid", "job.created", {}, NOW),
+        (1, GENESIS_HASH, "raw event text\n", {}, NOW),
+        (1, GENESIS_HASH, "job.created", [], NOW),
+        (1, GENESIS_HASH, "job.created", {}, NOW.replace(tzinfo=None)),
+    ],
+)
 def test_make_record_rejects_invalid_inputs(arguments):
     with pytest.raises((ValueError, TypeError)):
         make_record(*arguments)
@@ -165,7 +195,7 @@ def test_trusted_tip_detects_complete_suffix_deletion(tmp_path):
         AuditLog(path).verify(expected_sequence=3, expected_hash=records[-1]["hash"])
 
 
-@pytest.mark.parametrize("tail", [b'{"sequence":2', b'{}', b'\n', b'{"bad":NaN}\n', b'\xff\n'])
+@pytest.mark.parametrize("tail", [b'{"sequence":2', b"{}", b"\n", b'{"bad":NaN}\n', b"\xff\n"])
 def test_partial_or_invalid_jsonl_tail_is_never_repaired(tmp_path, tail):
     path = tmp_path / "audit.jsonl"
     records = chain(2)
@@ -247,7 +277,9 @@ def test_invalid_authority_is_rejected_before_file_creation(tmp_path):
 def test_thread_writers_across_instances_share_one_chain(tmp_path):
     path = tmp_path / "audit.jsonl"
     with ThreadPoolExecutor(max_workers=8) as executor:
-        records = list(executor.map(lambda number: AuditLog(path).append("thread.event", {"number": number}, NOW), range(40)))
+        records = list(
+            executor.map(lambda number: AuditLog(path).append("thread.event", {"number": number}, NOW), range(40))
+        )
     assert sorted(record["sequence"] for record in records) == list(range(1, 41))
     assert {record["payload"]["number"] for record in AuditLog(path).verify()} == set(range(40))
 
@@ -267,7 +299,9 @@ def test_process_writers_share_one_chain(tmp_path):
         assert process.exitcode == 0
     records = AuditLog(path).verify()
     assert len(records) == 32
-    assert {(record["payload"]["worker"], record["payload"]["number"]) for record in records} == {(worker, number) for worker in range(4) for number in range(8)}
+    assert {(record["payload"]["worker"], record["payload"]["number"]) for record in records} == {
+        (worker, number) for worker in range(4) for number in range(8)
+    }
 
 
 def test_symlink_file_and_parent_are_rejected(tmp_path):

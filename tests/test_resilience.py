@@ -35,30 +35,49 @@ def _finalizing_case(ledger, source):
     )
     submitted = ledger.submit_job(spec)
     nonce = ApprovalNonce(
-        approval_id="resilience-approval", token="resilience-test-" + "a" * 40,
-        pod_id="pod-1", batch_hash=ledger.batch_hash([submitted.job_id]),
-        max_runtime_seconds=300, price_ceiling_usd_per_hour=1.20,
-        issued_at=NOW, expires_at=NOW + timedelta(minutes=5),
+        approval_id="resilience-approval",
+        token="resilience-test-" + "a" * 40,
+        pod_id="pod-1",
+        batch_hash=ledger.batch_hash([submitted.job_id]),
+        max_runtime_seconds=300,
+        price_ceiling_usd_per_hour=1.20,
+        issued_at=NOW,
+        expires_at=NOW + timedelta(minutes=5),
     )
     ledger.register_approval(nonce)
-    ledger.consume_approval(nonce.approval_id, nonce.token.get_secret_value(), pod_id="pod-1",
-                            job_ids=[submitted.job_id], live_price_usd_per_hour=1.0,
-                            requested_runtime_seconds=300)
+    ledger.consume_approval(
+        nonce.approval_id,
+        nonce.token.get_secret_value(),
+        pod_id="pod-1",
+        job_ids=[submitted.job_id],
+        live_price_usd_per_hour=1.0,
+        requested_runtime_seconds=300,
+    )
     record = ledger.dispatch_next("worker-1", approval_id=nonce.approval_id)
     assert record is not None
     ledger.start_job(record.job_id, record.attempt_id, "worker-1")
     ledger.begin_finalization(record.job_id, record.attempt_id, "worker-1")
     ledger.confirm_stopped(record.job_id, record.attempt_id)
     data["run"].update(
-        run_id=record.job_id, started_at=NOW.isoformat(), experiment_stage="exploratory",
-        hypothesis_id=None, preregistration_hash=None, approval_id=nonce.approval_id,
+        run_id=record.job_id,
+        started_at=NOW.isoformat(),
+        experiment_stage="exploratory",
+        hypothesis_id=None,
+        preregistration_hash=None,
+        approval_id=nonce.approval_id,
         replicator_blinded=False,
     )
-    data["experiment"].update(tool="capture_activation", modules=["model.layers.0"],
-                               positions=["last"], intervention_hash=Ledger.operation_hash(spec))
+    data["experiment"].update(
+        tool="capture_activation",
+        modules=["model.layers.0"],
+        positions=["last"],
+        intervention_hash=Ledger.operation_hash(spec),
+    )
     data["results"].update(heldout=False, replication_status="not_applicable")
     data["cost"] = {"gpu_seconds": 0, "estimated_compute_usd": 0.0, "bytes_persisted": len(CONTENT)}
-    data["artifacts"] = [{"path": RELATIVE_ARTIFACT, "sha256": hashlib.sha256(CONTENT).hexdigest(), "retention_class": "validated"}]
+    data["artifacts"] = [
+        {"path": RELATIVE_ARTIFACT, "sha256": hashlib.sha256(CONTENT).hexdigest(), "retention_class": "validated"}
+    ]
     artifact = source / RELATIVE_ARTIFACT
     artifact.parent.mkdir(parents=True)
     artifact.write_bytes(CONTENT)
@@ -134,10 +153,12 @@ def test_initialization_retries_real_wal_lock_then_preserves_busy_timeout(tmp_pa
                 blocker.execute("ROLLBACK;")
             with opening.result(timeout=5) as instance:
                 instance.record_event("tool_call", {"after_contention": True})
-                settings = instance._submit(lambda connection, now: (
-                    connection.execute("PRAGMA journal_mode;").fetchone()[0],
-                    connection.execute("PRAGMA busy_timeout;").fetchone()[0],
-                ))
+                settings = instance._submit(
+                    lambda connection, now: (
+                        connection.execute("PRAGMA journal_mode;").fetchone()[0],
+                        connection.execute("PRAGMA busy_timeout;").fetchone()[0],
+                    )
+                )
                 assert settings == ("wal", 5000)
                 assert instance.audit_export_error is None
             thread.join(timeout=1)
@@ -160,9 +181,14 @@ def test_initialization_wal_contention_has_a_five_second_deadline(tmp_path, monk
     try:
         blocker.execute("BEGIN;")
         blocker.execute("SELECT name FROM sqlite_schema;").fetchall()
-        monkeypatch.setattr(ledger_module, "time", SimpleNamespace(
-            monotonic=lambda: elapsed[0], sleep=advance,
-        ))
+        monkeypatch.setattr(
+            ledger_module,
+            "time",
+            SimpleNamespace(
+                monotonic=lambda: elapsed[0],
+                sleep=advance,
+            ),
+        )
         with pytest.raises(sqlite3.OperationalError) as rejected:
             Ledger(database)
         assert rejected.value.sqlite_errorcode & 0xFF == sqlite3.SQLITE_BUSY
@@ -224,6 +250,7 @@ def test_fatal_rollback_failure_releases_current_and_queued_callers(tmp_path, mo
     with monkeypatch.context() as patch:
         patch.setattr(ledger_module.sqlite3, "connect", fault_connect)
         with Ledger(database) as instance:
+
             def failing_operation(connection, now):
                 instance._event(connection, now, "tool_call", {"must_rollback": True})
                 in_transaction.set()
@@ -278,8 +305,9 @@ def test_sealing_rejects_symlink_parent_directories(tmp_path, location):
             original.symlink_to(external, target_is_directory=True)
             presented_source = source
         with pytest.raises(ArtifactError):
-            instance.complete_job(record.job_id, record.attempt_id, "worker-1", manifest,
-                                  artifact_root=presented_source)
+            instance.complete_job(
+                record.job_id, record.attempt_id, "worker-1", manifest, artifact_root=presented_source
+            )
         assert str(instance.get_job(record.job_id).state) == "FINALIZING"
         with pytest.raises(NotFoundError):
             instance.get_artifact_root(record.job_id)
@@ -300,8 +328,7 @@ def test_orphan_bundle_survives_reopen_and_postcommit_audit_failure(tmp_path, mo
         with monkeypatch.context() as patch:
             patch.setattr(ledger_module, "make_record", fail_completion_event)
             with pytest.raises(ValueError, match="transactional audit failure"):
-                instance.complete_job(record.job_id, record.attempt_id, "worker-1", manifest,
-                                      artifact_root=source)
+                instance.complete_job(record.job_id, record.attempt_id, "worker-1", manifest, artifact_root=source)
         assert str(instance.get_job(record.job_id).state) == "FINALIZING"
         with pytest.raises(NotFoundError):
             instance.get_manifest(record.job_id)
@@ -314,13 +341,15 @@ def test_orphan_bundle_survives_reopen_and_postcommit_audit_failure(tmp_path, mo
     # when replaying the exact attempt after the transaction rolled back.
     shutil.rmtree(source)
     with Ledger(database, clock=lambda: NOW) as reopened:
+
         def offline_export(self, records):
             raise OSError("simulated audit projection outage")
 
         with monkeypatch.context() as patch:
             patch.setattr(AuditLog, "sync_records", offline_export)
-            completed = reopened.complete_job(record.job_id, record.attempt_id, "worker-1", manifest,
-                                              artifact_root=source)
+            completed = reopened.complete_job(
+                record.job_id, record.attempt_id, "worker-1", manifest, artifact_root=source
+            )
             assert str(completed.state) == "COMPLETED"
             assert isinstance(reopened.audit_export_error, OSError)
             assert reopened.get_artifact_root(record.job_id) == orphan
@@ -335,8 +364,7 @@ def test_orphan_bundle_survives_reopen_and_postcommit_audit_failure(tmp_path, mo
         assert (orphan / RELATIVE_ARTIFACT).stat().st_mode & 0o222 == 0
         assert orphan.stat().st_mode & 0o222 == 0
         assert AuditLog(recovered.audit_path).verify() == committed_records
-        repeated = recovered.complete_job(record.job_id, record.attempt_id, "worker-1", manifest,
-                                          artifact_root=source)
+        repeated = recovered.complete_job(record.job_id, record.attempt_id, "worker-1", manifest, artifact_root=source)
         assert str(repeated.state) == "COMPLETED"
         assert recovered.audit_records() == committed_records
 
@@ -356,13 +384,13 @@ def test_stopped_finalization_survives_expired_lease_and_approval_on_reopen(tmp_
         assert reopened.recover_expired() == []
         assert str(reopened.get_job(record.job_id).state) == "FINALIZING"
         reopened.end_approval(record.approval_id)
-        completed = reopened.complete_job(record.job_id, record.attempt_id, "worker-1", manifest,
-                                          artifact_root=source)
+        completed = reopened.complete_job(record.job_id, record.attempt_id, "worker-1", manifest, artifact_root=source)
         assert str(completed.state) == "COMPLETED"
         assert (reopened.get_artifact_root(record.job_id) / RELATIVE_ARTIFACT).read_bytes() == CONTENT
         with reopened.read_connection() as reader:
-            approval = reader.execute("SELECT deadline,ended_at FROM approvals WHERE approval_id=?",
-                                      (record.approval_id,)).fetchone()
+            approval = reader.execute(
+                "SELECT deadline,ended_at FROM approvals WHERE approval_id=?", (record.approval_id,)
+            ).fetchone()
             assert approval["deadline"] == (NOW + timedelta(seconds=300)).timestamp()
             assert approval["ended_at"] == clock[0].timestamp()
 
@@ -380,16 +408,17 @@ def test_slow_sealing_after_stop_does_not_require_or_extend_compute_lease(tmp_pa
             return copied
 
         monkeypatch.setattr(Ledger, "_copy_artifacts", staticmethod(slow_copy))
-        completed = instance.complete_job(record.job_id, record.attempt_id, "worker-1", manifest,
-                                          artifact_root=source)
+        completed = instance.complete_job(record.job_id, record.attempt_id, "worker-1", manifest, artifact_root=source)
         assert str(completed.state) == "COMPLETED"
         assert (instance.get_artifact_root(record.job_id) / RELATIVE_ARTIFACT).read_bytes() == CONTENT
         with instance.read_connection() as reader:
-            attempt = reader.execute("SELECT execution_deadline,lease_expires_at FROM attempts WHERE attempt_id=?",
-                                     (record.attempt_id,)).fetchone()
+            attempt = reader.execute(
+                "SELECT execution_deadline,lease_expires_at FROM attempts WHERE attempt_id=?", (record.attempt_id,)
+            ).fetchone()
             assert attempt["execution_deadline"] == (NOW + timedelta(seconds=60)).timestamp()
             assert attempt["lease_expires_at"] == record.lease_expires_at.timestamp()
-            approval = reader.execute("SELECT deadline,ended_at FROM approvals WHERE approval_id=?",
-                                      (record.approval_id,)).fetchone()
+            approval = reader.execute(
+                "SELECT deadline,ended_at FROM approvals WHERE approval_id=?", (record.approval_id,)
+            ).fetchone()
             assert approval["deadline"] == (NOW + timedelta(seconds=300)).timestamp()
             assert approval["ended_at"] is None

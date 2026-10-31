@@ -4,6 +4,7 @@ Snapshots never include arbitrary directories, service configuration, credential
 model caches, or evaluator corpora. Restoration is offline into a new directory;
 it never starts services, consumes an approval, or changes provider state.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,9 +39,15 @@ class BackupError(ValueError):
 
 
 def _relative(value: str) -> Path:
-    if (not isinstance(value, str) or not value or len(value) > 4096 or
-            "\\" in value or "\x00" in value or Path(value).is_absolute() or
-            any(part in {"", ".", ".."} for part in value.split("/"))):
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 4096
+        or "\\" in value
+        or "\x00" in value
+        or Path(value).is_absolute()
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+    ):
         raise BackupError("unsafe snapshot member")
     return Path(value)
 
@@ -81,7 +88,11 @@ def _copy(source: Path, destination: Path, limit: int, expected: str | None = No
             digest.update(block)
             outgoing.write(block)
         after = os.fstat(incoming.fileno())
-        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
             raise BackupError("snapshot input changed while copying")
         outgoing.flush()
         os.fchmod(outgoing.fileno(), 0o600)
@@ -131,7 +142,12 @@ def _verify_provider_state(path: Path) -> None:
     with _database(path) as connection:
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise BackupError("provider SQLite integrity failed")
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
         if tables != {"runpod_intents"}:
             raise BackupError("provider snapshot contains an unsupported table; review its credential policy")
         for row in connection.execute("SELECT * FROM runpod_intents"):
@@ -142,9 +158,15 @@ def _verify_provider_state(path: Path) -> None:
             validate_audit_payload(values)
 
 
-def create_snapshot(ledger: Ledger, destination: str | Path, *, input_store: str | Path,
-                    source_commit: str, provider_database: str | Path | None = None,
-                    max_bytes: int = MAX_SNAPSHOT_BYTES) -> dict:
+def create_snapshot(
+    ledger: Ledger,
+    destination: str | Path,
+    *,
+    input_store: str | Path,
+    source_commit: str,
+    provider_database: str | Path | None = None,
+    max_bytes: int = MAX_SNAPSHOT_BYTES,
+) -> dict:
     """Back up live WAL state first, then exactly its immutable referenced files."""
     if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", source_commit) is None:
         raise BackupError("reviewed full source commit is required")
@@ -171,8 +193,12 @@ def create_snapshot(ledger: Ledger, destination: str | Path, *, input_store: str
                 with closing(sqlite3.connect(stage / "state/provider.sqlite")) as outgoing:
                     incoming.backup(outgoing)
             _verify_provider_state(stage / "state/provider.sqlite")
-            provider_state = {"path": "state/provider.sqlite", "snapshot_at": datetime.now(timezone.utc).isoformat(),
-                              "cross_database_atomic": False, "reconciliation_required": True}
+            provider_state = {
+                "path": "state/provider.sqlite",
+                "snapshot_at": datetime.now(timezone.utc).isoformat(),
+                "cross_database_atomic": False,
+                "reconciliation_required": True,
+            }
         files, bundles, total = [], [], 0
 
         def retain(source, name, expected=None):
@@ -184,7 +210,9 @@ def create_snapshot(ledger: Ledger, destination: str | Path, *, input_store: str
 
         with _database(database) as connection:
             records, tip = _audit(connection)
-            for row in connection.execute("SELECT m.*, j.attempt_id FROM manifests m JOIN jobs j USING(job_id) ORDER BY m.job_id"):
+            for row in connection.execute(
+                "SELECT m.*, j.attempt_id FROM manifests m JOIN jobs j USING(job_id) ORDER BY m.job_id"
+            ):
                 manifest = RunManifest.model_validate_json(row["document"])
                 if manifest.run.experiment_stage.value in {"confirmatory", "replication"}:
                     raise BackupError("private evaluator results require a separately supported backup policy")
@@ -194,8 +222,14 @@ def create_snapshot(ledger: Ledger, destination: str | Path, *, input_store: str
                 for artifact in manifest.artifacts:
                     retain(original / artifact.path, f"{archive_root}/{artifact.path}", artifact.sha256)
                 retain(original / ".probe-bundle.json", f"{archive_root}/.probe-bundle.json")
-                bundles.append({"job_id": row["job_id"], "attempt_id": row["attempt_id"],
-                                "original_root": str(original), "archive_root": archive_root})
+                bundles.append(
+                    {
+                        "job_id": row["job_id"],
+                        "attempt_id": row["attempt_id"],
+                        "original_root": str(original),
+                        "archive_root": archive_root,
+                    }
+                )
         # Published input-store directories are immutable. Concurrent new inputs
         # may be included; no partially registered .stage directory is included.
         for directory in sorted(store.root.iterdir()):
@@ -214,11 +248,17 @@ def create_snapshot(ledger: Ledger, destination: str | Path, *, input_store: str
             item = _inventory(path, max_bytes - total)
             files.append({"path": str(path.relative_to(stage)), **item})
             total += item["bytes"]
-        body = {"schema_version": 1, "created_at": datetime.now(timezone.utc).isoformat(),
-                "source_commit": source_commit, "audit_tip": tip, "files": files,
-                "bundles": bundles, "total_bytes": total,
-                "provider_state": provider_state,
-                "excluded": ["credentials", "service_configuration", "model_caches", "evaluator_data"]}
+        body = {
+            "schema_version": 1,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_commit": source_commit,
+            "audit_tip": tip,
+            "files": files,
+            "bundles": bundles,
+            "total_bytes": total,
+            "provider_state": provider_state,
+            "excluded": ["credentials", "service_configuration", "model_caches", "evaluator_data"],
+        }
         body["snapshot_id"] = hashlib.sha256(canonical_json(body).encode()).hexdigest()
         _write_json(stage / "snapshot.json", body)
         partial = stage / "archive.tar"
@@ -237,9 +277,14 @@ def create_snapshot(ledger: Ledger, destination: str | Path, *, input_store: str
         partial.unlink()
         with Ledger._directory(destination.parent) as parent:
             os.fsync(parent)
-    return {"snapshot_id": body["snapshot_id"], "archive": str(destination),
-            "archive_sha256": archive_sha256, "archive_bytes": destination.stat().st_size,
-            "audit_tip": tip, "files": len(files)}
+    return {
+        "snapshot_id": body["snapshot_id"],
+        "archive": str(destination),
+        "archive_sha256": archive_sha256,
+        "archive_bytes": destination.stat().st_size,
+        "audit_tip": tip,
+        "files": len(files),
+    }
 
 
 def _unpack(archive_path: Path, stage: Path, max_bytes: int) -> dict:
@@ -298,7 +343,10 @@ def _verify_stage(stage: Path, metadata: dict) -> None:
             raise BackupError("unexpected provider snapshot path")
         _verify_provider_state(stage / "state/provider.sqlite")
     with _database(stage / "state/research.sqlite") as connection:
-        if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or connection.execute("PRAGMA foreign_key_check").fetchone():
+        if (
+            connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
+            or connection.execute("PRAGMA foreign_key_check").fetchone()
+        ):
             raise BackupError("restored SQLite integrity failed")
         records, tip = _audit(connection)
         if tip != metadata["audit_tip"]:
@@ -315,7 +363,11 @@ def _verify_stage(stage: Path, metadata: dict) -> None:
             digest = "sha256:" + hashlib.sha256(canonical_json(manifest.model_dump(mode="json")).encode()).hexdigest()
             entry = bundles[row["job_id"]]
             canonical_root = f"artifacts/{row['job_id']}/{row['attempt_id']}"
-            if row["digest"] != digest or entry["archive_root"] != canonical_root or entry["original_root"] != row["artifact_root"]:
+            if (
+                row["digest"] != digest
+                or entry["archive_root"] != canonical_root
+                or entry["original_root"] != row["artifact_root"]
+            ):
                 raise BackupError("accepted manifest provenance mismatch")
             bundle = stage / _relative(canonical_root)
             marker = json.loads(_read_regular(bundle / ".probe-bundle.json", 4096))
@@ -329,12 +381,20 @@ def _verify_stage(stage: Path, metadata: dict) -> None:
     for directory in inputs.iterdir():
         record = store.describe(directory.name)
         item = _inventory(store.root / record["path"], MAX_SNAPSHOT_BYTES)
-        if item != {"bytes": record["bytes"], "sha256": directory.name} or record["sha256"] != "sha256:" + directory.name:
+        if (
+            item != {"bytes": record["bytes"], "sha256": directory.name}
+            or record["sha256"] != "sha256:" + directory.name
+        ):
             raise BackupError("retained input identity mismatch")
 
 
-def verify_snapshot(archive: str | Path, *, expected_sha256: str | None = None,
-                    max_bytes: int = MAX_SNAPSHOT_BYTES, scratch_directory: str | Path | None = None) -> dict:
+def verify_snapshot(
+    archive: str | Path,
+    *,
+    expected_sha256: str | None = None,
+    max_bytes: int = MAX_SNAPSHOT_BYTES,
+    scratch_directory: str | Path | None = None,
+) -> dict:
     archive = Path(archive).absolute()
     with tempfile.TemporaryDirectory(prefix=".probe-verify-", dir=scratch_directory) as temporary:
         # Pin once into a newly created private directory. Every parser consumes
@@ -345,12 +405,18 @@ def verify_snapshot(archive: str | Path, *, expected_sha256: str | None = None,
         stage.mkdir(mode=0o700)
         metadata = _unpack(pinned, stage, max_bytes)
         _verify_stage(stage, metadata)
-    return {"snapshot_id": metadata["snapshot_id"], "archive_sha256": digest,
-            "audit_tip": metadata["audit_tip"], "files": len(metadata["files"]), "verified": True}
+    return {
+        "snapshot_id": metadata["snapshot_id"],
+        "archive_sha256": digest,
+        "audit_tip": metadata["audit_tip"],
+        "files": len(metadata["files"]),
+        "verified": True,
+    }
 
 
-def restore_snapshot(archive: str | Path, destination: str | Path, *, expected_sha256: str,
-                     max_bytes: int = MAX_SNAPSHOT_BYTES) -> dict:
+def restore_snapshot(
+    archive: str | Path, destination: str | Path, *, expected_sha256: str, max_bytes: int = MAX_SNAPSHOT_BYTES
+) -> dict:
     """Materialize a verified isolated restore. Never overwrite an installation."""
     archive, destination = Path(archive).absolute(), Path(destination).absolute()
     if destination.exists() or destination.is_symlink():
@@ -364,8 +430,13 @@ def restore_snapshot(archive: str | Path, destination: str | Path, *, expected_s
         stage.mkdir(mode=0o700)
         metadata = _unpack(pinned, stage, max_bytes)
         _verify_stage(stage, metadata)
-        verified = {"snapshot_id": metadata["snapshot_id"], "archive_sha256": digest,
-                    "audit_tip": metadata["audit_tip"], "files": len(metadata["files"]), "verified": True}
+        verified = {
+            "snapshot_id": metadata["snapshot_id"],
+            "archive_sha256": digest,
+            "audit_tip": metadata["audit_tip"],
+            "files": len(metadata["files"]),
+            "verified": True,
+        }
         database = stage / "research.sqlite"
         os.rename(stage / "state/research.sqlite", database)
         os.rename(stage / "state/research.audit.jsonl", stage / "research.audit.jsonl")
@@ -392,15 +463,31 @@ def restore_snapshot(archive: str | Path, destination: str | Path, *, expected_s
                 connection.execute("UPDATE manifests SET artifact_root=? WHERE job_id=?", (str(root), entry["job_id"]))
             connection.execute(trigger)
             connection.commit()
-        _write_json(stage / "restore-receipt.json", {**verified, "restored_at": datetime.now(timezone.utc).isoformat(),
-                    "services_started": False, "provider_reconciliation_required": True})
-        (stage / "RESTORE-OFFLINE.txt").write_text("Offline restore only. Reconcile provider state and unresolved attempts before service startup. Credentials and evaluator data are absent.\n")
+        _write_json(
+            stage / "restore-receipt.json",
+            {
+                **verified,
+                "restored_at": datetime.now(timezone.utc).isoformat(),
+                "services_started": False,
+                "provider_reconciliation_required": True,
+            },
+        )
+        (stage / "RESTORE-OFFLINE.txt").write_text(
+            "Offline restore only. Reconcile provider state and unresolved attempts before service startup. Credentials and evaluator data are absent.\n"
+        )
         os.rename(stage, destination)
         with Ledger._directory(destination.parent) as parent:
             os.fsync(parent)
     with Ledger(destination / "research.sqlite") as ledger:
-        ledger.record_event("tool_call", {"tool": "backup_restore", "snapshot_id": metadata["snapshot_id"],
-                             "source_audit_hash": metadata["audit_tip"]["hash"], "offline": True})
+        ledger.record_event(
+            "tool_call",
+            {
+                "tool": "backup_restore",
+                "snapshot_id": metadata["snapshot_id"],
+                "source_audit_hash": metadata["audit_tip"]["hash"],
+                "offline": True,
+            },
+        )
     return {**verified, "destination": str(destination), "restored": True, "services_started": False}
 
 
@@ -412,15 +499,30 @@ def _transport_failure(stderr: bytes, *, operation: str) -> tuple[str, bool]:
     for patterns, code in (
         (("invalid_grant", "invalid_client", "token expired and there's no refresh token"), "AUTHORIZATION_REJECTED"),
         (("immutable",), "IMMUTABLE_CONFLICT"),
-        (("failed to save config", "failed to create temp file for new config", "failed to move previous config"), "CREDENTIAL_WRITE_FAILED"),
-        (("permission denied", "operation not permitted", "read-only file system", "insufficient authentication scopes", "insufficientpermissions"), "PERMISSION_REFUSED"),
+        (
+            ("failed to save config", "failed to create temp file for new config", "failed to move previous config"),
+            "CREDENTIAL_WRITE_FAILED",
+        ),
+        (
+            (
+                "permission denied",
+                "operation not permitted",
+                "read-only file system",
+                "insufficient authentication scopes",
+                "insufficientpermissions",
+            ),
+            "PERMISSION_REFUSED",
+        ),
         (("x509:", "certificate verify failed", "certificate signed by unknown authority"), "TLS_VERIFICATION_FAILED"),
     ):
         if any(pattern in text for pattern in patterns):
             return code, False
     if any(pattern in text for pattern in ("ratelimitexceeded", "rate_limit_exceeded", "user rate limit exceeded")):
         return "RATE_LIMITED", True
-    status = re.search(r"(?:googleapi: error|http(?:/\d(?:\.\d)?)?(?: error| status(?: code)?)?|status(?: code)?)\s*[:=]?\s*(\d{3})\b", text)
+    status = re.search(
+        r"(?:googleapi: error|http(?:/\d(?:\.\d)?)?(?: error| status(?: code)?)?|status(?: code)?)\s*[:=]?\s*(\d{3})\b",
+        text,
+    )
     if status:
         number = int(status[1])
         if number == 429 or 500 <= number < 600:
@@ -429,15 +531,29 @@ def _transport_failure(stderr: bytes, *, operation: str) -> tuple[str, bool]:
             return "AUTHORIZATION_REFUSED", False
     if "forbidden" in text or "unauthorized" in text:
         return "AUTHORIZATION_REFUSED", False
-    if operation == "cat" and (status and status[1] == "404" or
-            any(pattern in text for pattern in ("directory not found", "object not found", "file not found"))):
+    if operation == "cat" and (
+        status
+        and status[1] == "404"
+        or any(pattern in text for pattern in ("directory not found", "object not found", "file not found"))
+    ):
         # Only used immediately after a successful immutable upload. A delayed
         # Drive lookup may be retried; a readback still must pass full SHA/restore.
         return "READBACK_NOT_VISIBLE", True
-    if re.search(r"\b(?:unexpected )?eof\b", text) or any(pattern in text for pattern in (
-            "connection reset", "connection refused", "broken pipe", "i/o timeout", "deadline exceeded",
-            "tls handshake timeout", "temporary failure in name resolution", "server misbehaving",
-            "network is unreachable", "connection timed out")):
+    if re.search(r"\b(?:unexpected )?eof\b", text) or any(
+        pattern in text
+        for pattern in (
+            "connection reset",
+            "connection refused",
+            "broken pipe",
+            "i/o timeout",
+            "deadline exceeded",
+            "tls handshake timeout",
+            "temporary failure in name resolution",
+            "server misbehaving",
+            "network is unreachable",
+            "connection timed out",
+        )
+    ):
         return "NETWORK_TEMPORARY", True
     return "UNCLASSIFIED_FAILURE", False
 
@@ -457,10 +573,15 @@ def _run_transfer(base, arguments, *, config: Path, deadline: float, output=None
             output.truncate()  # Never append a retry to an incomplete download.
         attempts = attempt
         try:
-            result = subprocess.run([*base, *arguments], stdin=subprocess.DEVNULL,
-                                    stdout=output if output is not None else subprocess.DEVNULL,
-                                    stderr=subprocess.PIPE, timeout=min(60, remaining), check=False,
-                                    env={"PATH": "/usr/bin:/bin", "HOME": str(config.parent)})
+            result = subprocess.run(
+                [*base, *arguments],
+                stdin=subprocess.DEVNULL,
+                stdout=output if output is not None else subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=min(60, remaining),
+                check=False,
+                env={"PATH": "/usr/bin:/bin", "HOME": str(config.parent)},
+            )
             if result.returncode == 0:
                 return
             code, retry = _transport_failure(result.stderr or b"", operation=operation)
@@ -479,27 +600,48 @@ def _run_transfer(base, arguments, *, config: Path, deadline: float, output=None
         time.sleep(delay)
 
 
-def upload_snapshot(archive: str | Path, *, rclone_config: str | Path, drive_folder_id: str,
-                    receipt_directory: str | Path, rclone: str = "/usr/bin/rclone",
-                    _transport_deadline: float | None = None) -> dict:
+def upload_snapshot(
+    archive: str | Path,
+    *,
+    rclone_config: str | Path,
+    drive_folder_id: str,
+    receipt_directory: str | Path,
+    rclone: str = "/usr/bin/rclone",
+    _transport_deadline: float | None = None,
+) -> dict:
     """Upload only to a pinned Drive root, then download and verify the full copy."""
     deadline = time.monotonic() + 240 if _transport_deadline is None else _transport_deadline
-    archive, config, receipts = Path(archive).absolute(), Path(rclone_config).absolute(), Path(receipt_directory).absolute()
+    archive, config, receipts = (
+        Path(archive).absolute(),
+        Path(rclone_config).absolute(),
+        Path(receipt_directory).absolute(),
+    )
     info = config.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise BackupError("rclone credential file must be private and backup-service-owned")
     if not re.fullmatch(r"[A-Za-z0-9_-]{10,256}", drive_folder_id):
         raise BackupError("a pinned Drive folder ID is required")
     import configparser
+
     parsed = configparser.ConfigParser(interpolation=None)
     parsed.read(config)
     if parsed.sections() != ["gdrive"] or parsed["gdrive"].get("type") != "drive":
         raise BackupError("backup credentials must contain only the gdrive Drive remote")
     receipts.mkdir(mode=0o700, parents=True, exist_ok=True)
-    base = [rclone, "--config", str(config), "--drive-root-folder-id", drive_folder_id,
-            # Keep Drive's normal per-request recovery; the parent process still
-            # bounds each entire command and the whole outbox transfer budget.
-            "--ask-password=false", "--retries", "1", "--low-level-retries", "10"]
+    base = [
+        rclone,
+        "--config",
+        str(config),
+        "--drive-root-folder-id",
+        drive_folder_id,
+        # Keep Drive's normal per-request recovery; the parent process still
+        # bounds each entire command and the whole outbox transfer budget.
+        "--ask-password=false",
+        "--retries",
+        "1",
+        "--low-level-retries",
+        "10",
+    ]
 
     def run(arguments, *, output=None):
         _run_transfer(base, arguments, config=config, deadline=deadline, output=output)
@@ -515,13 +657,28 @@ def upload_snapshot(archive: str | Path, *, rclone_config: str | Path, drive_fol
             run(["cat", remote], output=stream)
         remote_verified = verify_snapshot(downloaded, expected_sha256=checked["archive_sha256"])
         restored = restore_snapshot(downloaded, Path(temporary) / "restored", expected_sha256=checked["archive_sha256"])
-    receipt = {**remote_verified, "drive_folder_id": drive_folder_id, "remote": remote,
-               "readback_verified": True, "restore_verified": restored["restored"],
-               "uploaded_at": datetime.now(timezone.utc).isoformat()}
+    receipt = {
+        **remote_verified,
+        "drive_folder_id": drive_folder_id,
+        "remote": remote,
+        "readback_verified": True,
+        "restore_verified": restored["restored"],
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    }
     receipt_path = receipts / (checked["snapshot_id"] + ".json")
     if receipt_path.exists():
         previous = json.loads(_read_regular(receipt_path, 1024**2))
-        if any(previous.get(key) != receipt[key] for key in ("snapshot_id", "archive_sha256", "drive_folder_id", "remote", "readback_verified", "restore_verified")):
+        if any(
+            previous.get(key) != receipt[key]
+            for key in (
+                "snapshot_id",
+                "archive_sha256",
+                "drive_folder_id",
+                "remote",
+                "readback_verified",
+                "restore_verified",
+            )
+        ):
             raise BackupError("existing remote receipt has different identity")
         return previous
     _write_json(receipt_path, receipt)
@@ -529,15 +686,25 @@ def upload_snapshot(archive: str | Path, *, rclone_config: str | Path, drive_fol
     return receipt
 
 
-def publish_snapshot(ledger: Ledger, *, outbox: str | Path, input_store: str | Path, source_commit: str,
-                     provider_database: str | Path | None = None,
-                     receipt_directory: str | Path | None = None, drive_folder_id: str | None = None) -> dict:
+def publish_snapshot(
+    ledger: Ledger,
+    *,
+    outbox: str | Path,
+    input_store: str | Path,
+    source_commit: str,
+    provider_database: str | Path | None = None,
+    receipt_directory: str | Path | None = None,
+    drive_folder_id: str | None = None,
+) -> dict:
     outbox = Path(outbox).absolute()
     if receipt_directory is not None:
         confirmed = set()
         for path in Path(receipt_directory).glob("*.json"):
             receipt = json.loads(_read_regular(path, 1024**2))
-            if all(receipt.get(key) is True for key in ("verified", "readback_verified", "restore_verified")) and receipt.get("drive_folder_id") == drive_folder_id:
+            if (
+                all(receipt.get(key) is True for key in ("verified", "readback_verified", "restore_verified"))
+                and receipt.get("drive_folder_id") == drive_folder_id
+            ):
                 confirmed.add(receipt["archive_sha256"])
         pending = []
         for archive in outbox.glob("probe-*.tar"):
@@ -547,22 +714,34 @@ def publish_snapshot(ledger: Ledger, *, outbox: str | Path, input_store: str | P
         if pending:
             return {"snapshot_created": False, "retry_pending_archives": len(pending)}
     name = "probe-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex + ".tar"
-    receipt = create_snapshot(ledger, outbox / name, input_store=input_store, source_commit=source_commit, provider_database=provider_database)
+    receipt = create_snapshot(
+        ledger, outbox / name, input_store=input_store, source_commit=source_commit, provider_database=provider_database
+    )
     # Service's primary group is the read-only handoff group; only the producer
     # may write the outbox. Uploader never receives access to live state.
     (outbox / name).chmod(0o640)
     return receipt
 
 
-def upload_pending(*, outbox: str | Path, rclone_config: str | Path, drive_folder_id: str,
-                   receipt_directory: str | Path, rclone: str = "/usr/bin/rclone") -> list[dict]:
+def upload_pending(
+    *,
+    outbox: str | Path,
+    rclone_config: str | Path,
+    drive_folder_id: str,
+    receipt_directory: str | Path,
+    rclone: str = "/usr/bin/rclone",
+) -> list[dict]:
     # One budget for the whole outbox, not a fresh timeout for each archive.
     deadline = time.monotonic() + 240
     results, receipts = [], []
     for path in Path(receipt_directory).glob("*.json"):
         receipt = json.loads(_read_regular(path, 1024**2))
-        if (receipt.get("verified") is True and receipt.get("readback_verified") is True and
-                receipt.get("restore_verified") is True and receipt.get("drive_folder_id") == drive_folder_id):
+        if (
+            receipt.get("verified") is True
+            and receipt.get("readback_verified") is True
+            and receipt.get("restore_verified") is True
+            and receipt.get("drive_folder_id") == drive_folder_id
+        ):
             receipts.append(receipt)
     for archive in sorted(Path(outbox).glob("probe-*.tar")):
         digest = _inventory(archive, MAX_SNAPSHOT_BYTES + MAX_MANIFEST_BYTES + 1024**3)["sha256"]
@@ -570,20 +749,32 @@ def upload_pending(*, outbox: str | Path, rclone_config: str | Path, drive_folde
         if previous is not None:
             results.append({**previous, "transfer_skipped": True})
             continue
-        results.append(upload_snapshot(archive, rclone_config=rclone_config, drive_folder_id=drive_folder_id,
-                                       receipt_directory=receipt_directory, rclone=rclone, _transport_deadline=deadline))
+        results.append(
+            upload_snapshot(
+                archive,
+                rclone_config=rclone_config,
+                drive_folder_id=drive_folder_id,
+                receipt_directory=receipt_directory,
+                rclone=rclone,
+                _transport_deadline=deadline,
+            )
+        )
     return results
 
 
-def prune_verified_outbox(*, outbox: str | Path, receipt_directory: str | Path,
-                          drive_folder_id: str, keep: int = 2) -> list[str]:
+def prune_verified_outbox(
+    *, outbox: str | Path, receipt_directory: str | Path, drive_folder_id: str, keep: int = 2
+) -> list[str]:
     """Producer-only local retention; never delete unverified or unrelated files."""
     if type(keep) is not int or keep < 1:
         raise BackupError("retain at least one verified archive")
     verified = set()
     for path in Path(receipt_directory).glob("*.json"):
         receipt = json.loads(_read_regular(path, 1024**2))
-        if all(receipt.get(key) is True for key in ("verified", "readback_verified", "restore_verified")) and receipt.get("drive_folder_id") == drive_folder_id:
+        if (
+            all(receipt.get(key) is True for key in ("verified", "readback_verified", "restore_verified"))
+            and receipt.get("drive_folder_id") == drive_folder_id
+        ):
             verified.add(receipt["archive_sha256"])
     candidates = []
     for path in Path(outbox).glob("probe-*.tar"):
@@ -639,20 +830,46 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "create":
         with Ledger(args.ledger) as ledger:
-            result = create_snapshot(ledger, args.output, input_store=args.inputs, source_commit=args.source_commit, provider_database=args.provider_state)
+            result = create_snapshot(
+                ledger,
+                args.output,
+                input_store=args.inputs,
+                source_commit=args.source_commit,
+                provider_database=args.provider_state,
+            )
     elif args.command == "publish":
         with Ledger(args.ledger) as ledger:
-            result = publish_snapshot(ledger, outbox=args.outbox, input_store=args.inputs, source_commit=args.source_commit, provider_database=args.provider_state, receipt_directory=args.receipts, drive_folder_id=args.drive_folder_id)
+            result = publish_snapshot(
+                ledger,
+                outbox=args.outbox,
+                input_store=args.inputs,
+                source_commit=args.source_commit,
+                provider_database=args.provider_state,
+                receipt_directory=args.receipts,
+                drive_folder_id=args.drive_folder_id,
+            )
     elif args.command == "upload-pending":
-        result = upload_pending(outbox=args.outbox, rclone_config=args.config, drive_folder_id=args.drive_folder_id, receipt_directory=args.receipts)
+        result = upload_pending(
+            outbox=args.outbox,
+            rclone_config=args.config,
+            drive_folder_id=args.drive_folder_id,
+            receipt_directory=args.receipts,
+        )
     elif args.command == "prune-verified":
-        result = prune_verified_outbox(outbox=args.outbox, receipt_directory=args.receipts, drive_folder_id=args.drive_folder_id, keep=args.keep)
+        result = prune_verified_outbox(
+            outbox=args.outbox, receipt_directory=args.receipts, drive_folder_id=args.drive_folder_id, keep=args.keep
+        )
     elif args.command == "verify":
         result = verify_snapshot(args.archive, expected_sha256=args.sha256)
     elif args.command == "restore":
         result = restore_snapshot(args.archive, args.destination, expected_sha256=args.sha256)
     else:
-        result = upload_snapshot(args.archive, rclone_config=args.config, drive_folder_id=args.drive_folder_id, receipt_directory=args.receipts)
+        result = upload_snapshot(
+            args.archive,
+            rclone_config=args.config,
+            drive_folder_id=args.drive_folder_id,
+            receipt_directory=args.receipts,
+        )
     print(canonical_json(result))
 
 

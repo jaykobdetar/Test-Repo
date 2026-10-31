@@ -1,4 +1,5 @@
 """Fault-injected kernel observations; real enforcement is a separate Pod gate."""
+
 from contextlib import contextmanager
 import ctypes
 from dataclasses import replace
@@ -15,18 +16,22 @@ from probe_core import pod_bootstrap as bootstrap
 
 MOUNT = "1020 100 0:28 / /sys/fs/cgroup rw,nosuid,nodev,noexec - cgroup2 cgroup rw,nsdelegate\n"
 NS = tuple((name, name + ":[4026534001]") for name in bootstrap._NAMESPACES)
-LIMITS = {"cpu.max": "1020000 100000\n", "memory.max": "61999996928\n",
-          "memory.swap.max": "0\n", "pids.max": "6656\n"}
+LIMITS = {"cpu.max": "1020000 100000\n", "memory.max": "61999996928\n", "memory.swap.max": "0\n", "pids.max": "6656\n"}
 
 
 class KernelScope:
     """Explicit cgroup filesystem model, never a claim of real kernel enforcement."""
+
     def __init__(self):
         self.root = "/sys/fs/cgroup"
         self.fd = 123456
         self.members = {"": {1, 5, 41}}
-        self.files = {**LIMITS, "cgroup.type": "domain\n", "cgroup.controllers": "cpu memory pids io\n",
-                      "cgroup.subtree_control": ""}
+        self.files = {
+            **LIMITS,
+            "cgroup.type": "domain\n",
+            "cgroup.controllers": "cpu memory pids io\n",
+            "cgroup.subtree_control": "",
+        }
         self.owners = {}
         self.outer_writable = False
         self.marker = b"1"
@@ -60,8 +65,13 @@ class KernelScope:
             raise FileExistsError(name)
         self.events.append(("mkdir", name))
         self.members[name] = set()
-        self.files.update({name + "/cgroup.type": "domain\n", name + "/cgroup.controllers": "cpu memory pids\n",
-                           name + "/cgroup.subtree_control": ""})
+        self.files.update(
+            {
+                name + "/cgroup.type": "domain\n",
+                name + "/cgroup.controllers": "cpu memory pids\n",
+                name + "/cgroup.subtree_control": "",
+            }
+        )
 
     def write(self, name, value):
         self.events.append(("write", name, value))
@@ -86,8 +96,10 @@ class KernelScope:
 @pytest.fixture
 def kernel(monkeypatch):
     scope = KernelScope()
-    observations = {"/proc/self/mountinfo": MOUNT,
-                    **{f"/proc/{pid}/{name}": "0 100000 65536\n" for pid in ("self", "1") for name in ("uid_map", "gid_map")}}
+    observations = {
+        "/proc/self/mountinfo": MOUNT,
+        **{f"/proc/{pid}/{name}": "0 100000 65536\n" for pid in ("self", "1") for name in ("uid_map", "gid_map")},
+    }
     monkeypatch.setattr(bootstrap, "_Scope", lambda _root: scope)
     monkeypatch.setattr(bootstrap, "_proc_read", observations.__getitem__)
     monkeypatch.setattr(bootstrap, "_namespaces", lambda _pid: NS)
@@ -95,14 +107,18 @@ def kernel(monkeypatch):
     monkeypatch.setattr(bootstrap.os, "getresuid", lambda: (0, 0, 0))
     monkeypatch.setattr(bootstrap.os, "getresgid", lambda: (0, 0, 0))
     monkeypatch.setattr(bootstrap.os, "getxattr", lambda *_: scope.marker)
+
     def fstatfs(_fd, pointer):
         ctypes.c_long.from_buffer(pointer._obj).value = 0x63677270
         return 0
+
     monkeypatch.setattr(bootstrap.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace(fstatfs=fstatfs))
+
     def process(pid, namespaces, membership):
         bootstrap._require(namespaces == NS, "foreign namespace")
         bootstrap._require(pid in scope.members.get(membership.lstrip("/"), set()), "membership changed")
         return 1000 + pid
+
     monkeypatch.setattr(bootstrap, "_process", process)
     return scope, observations
 
@@ -113,37 +129,51 @@ def test_prepare_migrates_only_private_members_before_enabling_and_delegates_exa
     assert prepared.jobs_root == "/sys/fs/cgroup/probe-jobs"
     assert prepared.supervisor_leaf == prepared.jobs_root + "/supervisor"
     assert prepared.moved_pids == (1, 5, 41)
-    assert scope.members == {"": set(), "probe-bootstrap": {1, 5, 41}, "probe-jobs": set(), "probe-jobs/supervisor": set()}
+    assert scope.members == {
+        "": set(),
+        "probe-bootstrap": {1, 5, 41},
+        "probe-jobs": set(),
+        "probe-jobs/supervisor": set(),
+    }
     writes = [event for event in scope.events if event[0] == "write"]
     assert writes == [("write", "probe-bootstrap/cgroup.procs", str(pid)) for pid in (1, 5, 0)] + [
         ("write", "cgroup.subtree_control", "+cpu +memory +pids"),
-        ("write", "probe-jobs/cgroup.subtree_control", "+cpu +memory +pids")]
-    assert set(scope.owners) == {path + suffix for path in ("probe-jobs", "probe-jobs/supervisor")
-                                for suffix in ("", *("/" + name for name in bootstrap._DELEGATE_FILES))}
+        ("write", "probe-jobs/cgroup.subtree_control", "+cpu +memory +pids"),
+    ]
+    assert set(scope.owners) == {
+        path + suffix
+        for path in ("probe-jobs", "probe-jobs/supervisor")
+        for suffix in ("", *("/" + name for name in bootstrap._DELEGATE_FILES))
+    }
     assert all(scope.files[name] == value for name, value in LIMITS.items())
     assert scope.closed
     with pytest.raises(bootstrap.BootstrapRefused, match="fresh"):
         bootstrap.prepare()
 
 
-@pytest.mark.parametrize("change", [
-    lambda scope, obs: obs.update({"/proc/self/uid_map": "0 0 4294967295\n"}),
-    lambda scope, obs: obs.update({"/proc/1/gid_map": "0 0 4294967295\n"}),
-    lambda scope, obs: obs.update({"/proc/self/mountinfo": MOUNT.replace("cgroup2", "cgroup")}),
-    lambda scope, obs: obs.update({"/proc/self/mountinfo": MOUNT.replace("rw,nosuid", "ro,nosuid")}),
-    lambda scope, obs: obs.update({"/proc/self/mountinfo": MOUNT.replace(",nsdelegate", "")}),
-    lambda scope, obs: obs.update({"/proc/self/mountinfo": MOUNT + MOUNT.replace("1020", "1021").replace("/sys/fs/cgroup", "/other")}),
-    lambda scope, obs: setattr(scope, "outer_writable", True),
-    lambda scope, obs: scope.owners.update({"memory.max": 0}),
-    lambda scope, obs: scope.owners.update({"cgroup.procs": 10001}),
-    lambda scope, obs: scope.files.update({"cgroup.controllers": "cpu memory\n"}),
-    lambda scope, obs: scope.files.update({"cgroup.type": "threaded\n"}),
-    lambda scope, obs: scope.files.update({"cgroup.subtree_control": "cpu\n"}),
-    lambda scope, obs: scope.members[""].add(0),
-    lambda scope, obs: scope.members[""].remove(1),
-    lambda scope, obs: scope.members[""].remove(41),
-    lambda scope, obs: scope.members.update({"preexisting": set()}),
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda scope, obs: obs.update({"/proc/self/uid_map": "0 0 4294967295\n"}),
+        lambda scope, obs: obs.update({"/proc/1/gid_map": "0 0 4294967295\n"}),
+        lambda scope, obs: obs.update({"/proc/self/mountinfo": MOUNT.replace("cgroup2", "cgroup")}),
+        lambda scope, obs: obs.update({"/proc/self/mountinfo": MOUNT.replace("rw,nosuid", "ro,nosuid")}),
+        lambda scope, obs: obs.update({"/proc/self/mountinfo": MOUNT.replace(",nsdelegate", "")}),
+        lambda scope, obs: obs.update(
+            {"/proc/self/mountinfo": MOUNT + MOUNT.replace("1020", "1021").replace("/sys/fs/cgroup", "/other")}
+        ),
+        lambda scope, obs: setattr(scope, "outer_writable", True),
+        lambda scope, obs: scope.owners.update({"memory.max": 0}),
+        lambda scope, obs: scope.owners.update({"cgroup.procs": 10001}),
+        lambda scope, obs: scope.files.update({"cgroup.controllers": "cpu memory\n"}),
+        lambda scope, obs: scope.files.update({"cgroup.type": "threaded\n"}),
+        lambda scope, obs: scope.files.update({"cgroup.subtree_control": "cpu\n"}),
+        lambda scope, obs: scope.members[""].add(0),
+        lambda scope, obs: scope.members[""].remove(1),
+        lambda scope, obs: scope.members[""].remove(41),
+        lambda scope, obs: scope.members.update({"preexisting": set()}),
+    ],
+)
 def test_preflight_refuses_without_any_mutation(kernel, change):
     scope, observations = kernel
     change(scope, observations)
@@ -156,10 +186,12 @@ def test_preflight_refuses_without_any_mutation(kernel, change):
 def test_foreign_member_is_rejected_before_mkdir(kernel, monkeypatch):
     scope, _ = kernel
     original = bootstrap._process
+
     def foreign(pid, *args):
         if pid == 5:
             raise bootstrap.BootstrapRefused("foreign-namespace cgroup member refused")
         return original(pid, *args)
+
     monkeypatch.setattr(bootstrap, "_process", foreign)
     with pytest.raises(bootstrap.BootstrapRefused, match="foreign"):
         bootstrap.prepare()
@@ -168,8 +200,10 @@ def test_foreign_member_is_rejected_before_mkdir(kernel, monkeypatch):
 
 def test_missing_optional_userspace_marker_does_not_override_kernel_delegation(kernel, monkeypatch):
     scope, _ = kernel
+
     def no_marker(*_args):
         raise OSError(errno.ENODATA, "optional user.delegate marker is absent")
+
     monkeypatch.setattr(bootstrap.os, "getxattr", no_marker)
     assert bootstrap.prepare().jobs_root == "/sys/fs/cgroup/probe-jobs"
     assert all(scope.files[name] == value for name, value in LIMITS.items())
@@ -179,6 +213,7 @@ def test_process_reuse_aborts_before_migration_of_reused_pid(kernel, monkeypatch
     scope, _ = kernel
     original = bootstrap._process
     seen = 0
+
     def changed(pid, *args):
         nonlocal seen
         result = original(pid, *args)
@@ -186,6 +221,7 @@ def test_process_reuse_aborts_before_migration_of_reused_pid(kernel, monkeypatch
             seen += 1
             return result + (seen > 1)
         return result
+
     monkeypatch.setattr(bootstrap, "_process", changed)
     with pytest.raises(bootstrap.BootstrapRefused, match="identity changed"):
         bootstrap.prepare()
@@ -196,18 +232,22 @@ def test_process_reuse_aborts_before_migration_of_reused_pid(kernel, monkeypatch
 
 def test_late_root_member_gets_a_bounded_verified_migration_round(kernel):
     scope, _ = kernel
+
     def fork(name, value):
         if value == "0":
             scope.members[""].add(52)
+
     scope.after_write = fork
     assert bootstrap.prepare().moved_pids == (1, 5, 41, 52)
 
 
 def test_continuous_new_members_never_enables_controllers(kernel):
     scope, _ = kernel
+
     def fork(name, value):
         if name == "probe-bootstrap/cgroup.procs":
             scope.members[""].add(100 + len(scope.events))
+
     scope.after_write = fork
     with pytest.raises(bootstrap.BootstrapRefused, match="bounded"):
         bootstrap.prepare()
@@ -218,6 +258,7 @@ def test_continuous_new_members_never_enables_controllers(kernel):
 @pytest.mark.parametrize("fault", ["readback", "outer_change", "late_member"])
 def test_post_mutation_fault_refuses_worker_authority(kernel, fault):
     scope, _ = kernel
+
     def corrupt(name, _value):
         if name == "cgroup.subtree_control":
             if fault == "readback":
@@ -226,6 +267,7 @@ def test_post_mutation_fault_refuses_worker_authority(kernel, fault):
                 scope.files["memory.max"] = "1\n"
             if fault == "late_member":
                 scope.members[""].add(99)
+
     scope.after_write = corrupt
     with pytest.raises(bootstrap.BootstrapRefused):
         bootstrap.prepare()
@@ -274,15 +316,19 @@ def test_worker_enters_only_prepared_leaf_before_privilege_drop(kernel, monkeypa
     monkeypatch.setattr(bootstrap.os, "getresuid", lambda: identity["uid"])
     monkeypatch.setattr(bootstrap.os, "getresgid", lambda: identity["gid"])
     monkeypatch.setattr(bootstrap.os, "getgroups", lambda: identity["groups"])
+
     def set_identity(key, value):
         assert scope.members["probe-jobs/supervisor"] == {41}
         order.append(key)
         identity[key] = value
+
     monkeypatch.setattr(bootstrap.os, "setgroups", lambda groups: set_identity("groups", groups))
     monkeypatch.setattr(bootstrap.os, "setresgid", lambda *ids: set_identity("gid", ids))
     monkeypatch.setattr(bootstrap.os, "setresuid", lambda *ids: set_identity("uid", ids))
     monkeypatch.setattr(bootstrap.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace(prctl=lambda *args: 0))
-    monkeypatch.setattr(bootstrap, "_proc_read", lambda _: "NoNewPrivs:\t1\nCapEff:\t0\nCapPrm:\t0\nCapInh:\t0\nCapAmb:\t0\n")
+    monkeypatch.setattr(
+        bootstrap, "_proc_read", lambda _: "NoNewPrivs:\t1\nCapEff:\t0\nCapPrm:\t0\nCapInh:\t0\nCapAmb:\t0\n"
+    )
     bootstrap.enter_supervisor_and_drop(prepared)
     assert order == ["groups", "gid", "uid"]
     assert identity == {"uid": (10001,) * 3, "gid": (10001,) * 3, "groups": []}

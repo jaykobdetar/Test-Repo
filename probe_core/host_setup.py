@@ -3,6 +3,7 @@
 This module writes a new staging directory only. The separate administrator
 installer creates accounts and installs files; neither action happens on import.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,16 +40,28 @@ class Identities:
 
     @classmethod
     def discover(cls, human: str):
-        return cls(pwd.getpwnam("probe-trusted").pw_uid, pwd.getpwnam("probe-research").pw_uid,
-                   pwd.getpwnam("probe-watchdog").pw_uid, pwd.getpwnam("probe-backup").pw_uid,
-                   pwd.getpwnam(human).pw_uid, grp.getgrnam("probe-ipc").gr_gid,
-                   grp.getgrnam("probe-research").gr_gid, grp.getgrnam("probe-stop").gr_gid,
-                   grp.getgrnam("probe-backup-read").gr_gid)
+        return cls(
+            pwd.getpwnam("probe-trusted").pw_uid,
+            pwd.getpwnam("probe-research").pw_uid,
+            pwd.getpwnam("probe-watchdog").pw_uid,
+            pwd.getpwnam("probe-backup").pw_uid,
+            pwd.getpwnam(human).pw_uid,
+            grp.getgrnam("probe-ipc").gr_gid,
+            grp.getgrnam("probe-research").gr_gid,
+            grp.getgrnam("probe-stop").gr_gid,
+            grp.getgrnam("probe-backup-read").gr_gid,
+        )
 
 
-def render_configuration(destination: str | Path, *, identities: Identities,
-                         templates: str | Path, source_commit: str,
-                         drive_folder_id: str, sandbox_image: str | None = None) -> dict:
+def render_configuration(
+    destination: str | Path,
+    *,
+    identities: Identities,
+    templates: str | Path,
+    source_commit: str,
+    drive_folder_id: str,
+    sandbox_image: str | None = None,
+) -> dict:
     destination, templates = Path(destination), Path(templates)
     if destination.exists() or destination.is_symlink():
         raise ValueError("render destination must be new")
@@ -60,30 +73,56 @@ def render_configuration(destination: str | Path, *, identities: Identities,
         raise ValueError("sandbox image must be immutable")
     destination.mkdir(mode=0o700, parents=True)
     inputs = "/var/lib/probe-core/input-artifacts"
-    config = {"ledger_path": "/var/lib/probe-core/research.sqlite", "socket_path": "/run/probe-research/research.sock",
-              "service_uid": identities.trusted_uid, "research_uid": identities.research_uid,
-              "admin_uid": identities.human_uid, "socket_gid": identities.research_gid,
-              "policy": {"discovery_datasets": [], "allow_calibration": False},
-              "controller_socket": "/run/probe-controller/research.sock", "controller_uid": identities.trusted_uid,
-              "input_artifact_root": inputs, "sandbox_image": sandbox_image,
-              "sandbox_workspace": "/var/lib/probe-sandbox/runs", "sandbox_seccomp_profile": "/opt/probe-core/seccomp.json",
-              "podman_path": "/usr/bin/podman"}
+    config = {
+        "ledger_path": "/var/lib/probe-core/research.sqlite",
+        "socket_path": "/run/probe-research/research.sock",
+        "service_uid": identities.trusted_uid,
+        "research_uid": identities.research_uid,
+        "admin_uid": identities.human_uid,
+        "socket_gid": identities.research_gid,
+        "policy": {"discovery_datasets": [], "allow_calibration": False},
+        "controller_socket": "/run/probe-controller/research.sock",
+        "controller_uid": identities.trusted_uid,
+        "input_artifact_root": inputs,
+        "sandbox_image": sandbox_image,
+        "sandbox_workspace": "/var/lib/probe-sandbox/runs",
+        "sandbox_seccomp_profile": "/opt/probe-core/seccomp.json",
+        "podman_path": "/usr/bin/podman",
+    }
     (destination / "research.json").write_text(canonical_json(config))
     # Dispatcher stays uninstalled/unstarted until a reviewed worker is bound.
-    dispatcher = {"ledger_path": config["ledger_path"], "worker_id": "REQUIRES_APPROVED_WORKER_ID",
-                  "transfer_directory": "/var/lib/probe-core/worker-transfers", "input_artifact_root": inputs,
-                  "bearer_secret_file": "/etc/probe-core/worker-token", "lease_seconds": 30, "poll_seconds": 0.25,
-                  "ssh": {"host": "REQUIRES_VERIFIED_WORKER_HOST", "user": "root", "ssh_port": 22,
-                          "remote_port": 8080, "identity_file": "/etc/probe-core/worker-ssh-key",
-                          "known_hosts_file": "/etc/probe-core/worker-known-hosts"}}
+    dispatcher = {
+        "ledger_path": config["ledger_path"],
+        "worker_id": "REQUIRES_APPROVED_WORKER_ID",
+        "transfer_directory": "/var/lib/probe-core/worker-transfers",
+        "input_artifact_root": inputs,
+        "bearer_secret_file": "/etc/probe-core/worker-token",
+        "lease_seconds": 30,
+        "poll_seconds": 0.25,
+        "ssh": {
+            "host": "REQUIRES_VERIFIED_WORKER_HOST",
+            "user": "root",
+            "ssh_port": 22,
+            "remote_port": 8080,
+            "identity_file": "/etc/probe-core/worker-ssh-key",
+            "known_hosts_file": "/etc/probe-core/worker-known-hosts",
+        },
+    }
     (destination / "dispatcher.json.pending").write_text(canonical_json(dispatcher))
     runtime = f"/run/user/{identities.trusted_uid}"
-    (destination / "research-runtime.env").write_text(f"XDG_RUNTIME_DIR={runtime}\nDBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus\n")
+    (destination / "research-runtime.env").write_text(
+        f"XDG_RUNTIME_DIR={runtime}\nDBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus\n"
+    )
     (destination / "backup.env").write_text(f"SOURCE_COMMIT={source_commit}\nDRIVE_FOLDER_ID={drive_folder_id}\n")
-    replacements = {"TRUSTED_UID": str(identities.trusted_uid), "HUMAN_UID": str(identities.human_uid),
-                    "AGENT_UID": str(identities.research_uid), "WATCHDOG_UID": str(identities.watchdog_uid),
-                    "IPC_GID": str(identities.ipc_gid), "STOP_GID": str(identities.stop_gid),
-                    "USER_RUNTIME": runtime}
+    replacements = {
+        "TRUSTED_UID": str(identities.trusted_uid),
+        "HUMAN_UID": str(identities.human_uid),
+        "AGENT_UID": str(identities.research_uid),
+        "WATCHDOG_UID": str(identities.watchdog_uid),
+        "IPC_GID": str(identities.ipc_gid),
+        "STOP_GID": str(identities.stop_gid),
+        "USER_RUNTIME": runtime,
+    }
     for template in sorted([*templates.glob("*.service"), *templates.glob("*.timer")]):
         text = template.read_text()
         for key, value in replacements.items():
@@ -103,25 +142,37 @@ def render_configuration(destination: str | Path, *, identities: Identities,
         elif line == "Type=simple":
             line = "Type=oneshot\nTimeoutStartSec=240\nEnvironmentFile=/etc/probe-core/sandbox-acceptance.env"
         elif line.startswith("ExecStart="):
-            research_command = ("/opt/probe-core/venv/bin/python -I -m probe_core.research_service "
-                                "--config /etc/probe-core/research.json")
+            research_command = (
+                "/opt/probe-core/venv/bin/python -I -m probe_core.research_service "
+                "--config /etc/probe-core/research.json"
+            )
             prefix, matched, suffix = line.partition(research_command)
-            if (not matched or prefix != "ExecStart=/bin/sh -ec '/usr/bin/chgrp probe-research /run/probe-research; exec "
-                    or suffix != "'"):
+            if (
+                not matched
+                or prefix != "ExecStart=/bin/sh -ec '/usr/bin/chgrp probe-research /run/probe-research; exec "
+                or suffix != "'"
+            ):
                 raise ValueError("research startup must use the exact reviewed directory preparation and exec prologue")
             # Both units share the runtime directory. Preserve its group repair
             # inside the main command, after systemd's per-command directory setup.
-            line = (prefix + "/opt/probe-core/venv/bin/python -I -m probe_core.sandbox_acceptance "
-                    "--image ${SANDBOX_IMAGE} --workspace /var/lib/probe-sandbox/acceptance "
-                    "--podman /usr/bin/podman --seccomp-profile /opt/probe-core/seccomp.json "
-                    "--output /var/lib/probe-sandbox/acceptance-report.json" + suffix)
+            line = (
+                prefix + "/opt/probe-core/venv/bin/python -I -m probe_core.sandbox_acceptance "
+                "--image ${SANDBOX_IMAGE} --workspace /var/lib/probe-sandbox/acceptance "
+                "--podman /usr/bin/podman --seccomp-profile /opt/probe-core/seccomp.json "
+                "--output /var/lib/probe-sandbox/acceptance-report.json" + suffix
+            )
         acceptance_lines.append(line)
     (destination / "probe-sandbox-acceptance.service").write_text("\n".join(acceptance_lines) + "\n")
     for file in destination.iterdir():
         file.chmod(0o600)
-    report = {"identities": asdict(identities), "source_commit": source_commit,
-              "drive_folder_id": drive_folder_id, "sandbox_enabled": sandbox_image is not None,
-              "services_started": False, "dispatcher_requires_worker_configuration": True}
+    report = {
+        "identities": asdict(identities),
+        "source_commit": source_commit,
+        "drive_folder_id": drive_folder_id,
+        "sandbox_enabled": sandbox_image is not None,
+        "services_started": False,
+        "dispatcher_requires_worker_configuration": True,
+    }
     (destination / "installation-plan.json").write_text(canonical_json(report))
     return report
 
@@ -156,9 +207,18 @@ def main():
     parser.add_argument("--drive-folder-id", required=True)
     parser.add_argument("--sandbox-image")
     args = parser.parse_args()
-    print(canonical_json(render_configuration(args.output, identities=Identities.discover(args.human),
-          templates=args.templates, source_commit=args.source_commit, drive_folder_id=args.drive_folder_id,
-          sandbox_image=args.sandbox_image)))
+    print(
+        canonical_json(
+            render_configuration(
+                args.output,
+                identities=Identities.discover(args.human),
+                templates=args.templates,
+                source_commit=args.source_commit,
+                drive_folder_id=args.drive_folder_id,
+                sandbox_image=args.sandbox_image,
+            )
+        )
+    )
 
 
 if __name__ == "__main__":

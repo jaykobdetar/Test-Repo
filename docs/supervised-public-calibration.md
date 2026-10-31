@@ -29,10 +29,8 @@ guard nor RunPod's unverified scheduled stop establishes host-loss safety.
 The general research worker and its stricter checks remain available unchanged.
 This profile accepts no arbitrary operation, user-provided dataset, model code,
 or private data. Both the Base and separately pinned posttrained checkpoint passed on September
-20, 2026. See the [results and exact scope](calibration-results.md). The next
-step is to connect this simpler worker to the installed ledger and prove its
-cancellation, limits, and recovery behavior. The [fixed public experiment](first-public-experiment.md)
-remains a later proposed run; it has not been executed.
+20, 2026. See the [results and exact scope](calibration-results.md). The
+current milestone and next step are recorded in [STATUS.md](../STATUS.md).
 
 The derived image includes a C compiler because the pinned PyTorch/Triton stack
 compiles GPU kernels during inference. The build compiles and executes a small C

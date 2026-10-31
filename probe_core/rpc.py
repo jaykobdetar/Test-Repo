@@ -3,6 +3,7 @@
 This is a private service transport, not MCP. MCP runs under the untrusted
 research identity and can reach only the explicitly permitted research socket.
 """
+
 from __future__ import annotations
 
 import errno
@@ -42,6 +43,7 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def decode(data: bytes) -> Any:
     def invalid(_: str) -> None:
         raise ValueError("non-finite JSON")
+
     return json.loads(data, object_pairs_hook=_pairs, parse_constant=invalid)
 
 
@@ -53,9 +55,16 @@ class UnixRPCServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
     block_on_close = True
 
-    def __init__(self, path: str | Path, dispatch: Callable[[str, dict[str, Any]], Any],
-                 *, allowed_uids: set[int], socket_gid: int | None = None,
-                 allow_service_uid: bool = False, timeout_seconds: float = 30):
+    def __init__(
+        self,
+        path: str | Path,
+        dispatch: Callable[[str, dict[str, Any]], Any],
+        *,
+        allowed_uids: set[int],
+        socket_gid: int | None = None,
+        allow_service_uid: bool = False,
+        timeout_seconds: float = 30,
+    ):
         if not allowed_uids or any(type(uid) is not int or uid < 0 for uid in allowed_uids):
             raise ValueError("explicit client OS identities are required")
         if os.geteuid() in allowed_uids and not allow_service_uid:
@@ -77,8 +86,12 @@ class UnixRPCServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         try:
             opened = os.fstat(fd)
-            if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid()
-                    or opened.st_nlink != 1 or opened.st_mode & 0o077):
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.geteuid()
+                or opened.st_nlink != 1
+                or opened.st_mode & 0o077
+            ):
                 raise PermissionError("service lock must be a private, owned, unshared regular file")
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -108,8 +121,7 @@ class UnixRPCServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             existing = self.path.lstat()
         except FileNotFoundError:
             return
-        if (not stat.S_ISSOCK(existing.st_mode) or existing.st_uid != os.geteuid()
-                or existing.st_nlink != 1):
+        if not stat.S_ISSOCK(existing.st_mode) or existing.st_uid != os.geteuid() or existing.st_nlink != 1:
             raise FileExistsError("refusing to replace a file, symlink, or unowned socket")
         # The lifetime lock excludes current servers. Also refuse a live socket
         # from an older service version that did not yet use this lock protocol.
@@ -172,10 +184,13 @@ class _Handler(socketserver.StreamRequestHandler):
             if len(data) > MAX_REQUEST or not data.endswith(b"\n"):
                 raise ValueError
             message = decode(data)
-            if (type(message) is not dict or set(message) != {"method", "params"}
-                    or type(message["method"]) is not str
-                    or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", message["method"]) is None
-                    or type(message["params"]) is not dict):
+            if (
+                type(message) is not dict
+                or set(message) != {"method", "params"}
+                or type(message["method"]) is not str
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", message["method"]) is None
+                or type(message["params"]) is not dict
+            ):
                 raise ValueError
             result = self.server.dispatch(message["method"], message["params"])
             response = {"ok": True, "result": result}
@@ -184,7 +199,10 @@ class _Handler(socketserver.StreamRequestHandler):
         except (ValueError, TypeError, KeyError):
             response = {"ok": False, "error": {"code": "invalid_request", "message": "invalid request"}}
         except Exception:
-            response = {"ok": False, "error": {"code": "service_error", "message": "service could not complete request"}}
+            response = {
+                "ok": False,
+                "error": {"code": "service_error", "message": "service could not complete request"},
+            }
         try:
             data = encode(response)
             if len(data) > MAX_RESPONSE:
@@ -195,8 +213,7 @@ class _Handler(socketserver.StreamRequestHandler):
 
 
 class UnixRPCClient:
-    def __init__(self, path: str | Path, *, expected_server_uid: int,
-                 timeout_seconds: float = 30):
+    def __init__(self, path: str | Path, *, expected_server_uid: int, timeout_seconds: float = 30):
         self.path = str(path)
         self.expected_server_uid = expected_server_uid
         self.timeout_seconds = timeout_seconds

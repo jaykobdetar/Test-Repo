@@ -1,4 +1,5 @@
 """Offline upgrade refusals and fail-closed ordering; no host services are used."""
+
 import base64
 import csv
 from datetime import datetime, timedelta, timezone
@@ -39,12 +40,18 @@ def write(path, raw, mode=0o600):
 
 
 def wheel_bytes(code=b"VERSION = 'old'\n", dependency="pydantic==2.13.5", extras=None):
-    members = {"probe_core/__init__.py": code, "probe_core/resources/seccomp.json": b"{}",
-               DIST + "/METADATA": f"Metadata-Version: 2.4\nName: probe-core\nVersion: 0.2.0\nRequires-Python: >=3.13,<3.14\nRequires-Dist: {dependency}\n\n".encode(),
-               DIST + "/WHEEL": b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"}
+    members = {
+        "probe_core/__init__.py": code,
+        "probe_core/resources/seccomp.json": b"{}",
+        DIST
+        + "/METADATA": f"Metadata-Version: 2.4\nName: probe-core\nVersion: 0.2.0\nRequires-Python: >=3.13,<3.14\nRequires-Dist: {dependency}\n\n".encode(),
+        DIST + "/WHEEL": b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
     members.update(extras or {})
-    rows = [[name, "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).decode().rstrip("="), str(len(raw))]
-            for name, raw in members.items()]
+    rows = [
+        [name, "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).decode().rstrip("="), str(len(raw))]
+        for name, raw in members.items()
+    ]
     rows.append([DIST + "/RECORD", "", ""])
     csvfile = io.StringIO()
     csv.writer(csvfile, lineterminator="\n").writerows(rows)
@@ -68,8 +75,11 @@ def make_original(root):
     write(root / "python/lib/module.py", b"SOURCE = 1\n")
     write(root / "python/lib/__pycache__/module.cpython-313.pyc", b"original cache")
     root.chmod(0o755)
-    files = [{"path": str(p.relative_to(root)), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
-             for p in root.rglob("*") if p.is_file()]
+    files = [
+        {"path": str(p.relative_to(root)), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+        for p in root.rglob("*")
+        if p.is_file()
+    ]
     manifest = json.dumps({"schema_version": 1, "files": files}).encode()
     write(root / "release-manifest.json", manifest)
     site = root / "venv/lib/python3.13/site-packages"
@@ -85,11 +95,21 @@ def make_release(directory, raw=None):
     wheel, checker, manifest = (directory / name for name in (NAME, "identity.py", "upgrade-release.json"))
     write(wheel, raw)
     write(checker, (SCRIPT.parent / "verify-installed-identities.py").read_bytes())
-    body = {"schema_version": 1, "source_commit": "b" * 40, "wheel_filename": NAME,
-            "wheel_sha256": hashlib.sha256(raw).hexdigest(), "identity_checker_sha256": hashlib.sha256(checker.read_bytes()).hexdigest()}
+    body = {
+        "schema_version": 1,
+        "source_commit": "b" * 40,
+        "wheel_filename": NAME,
+        "wheel_sha256": hashlib.sha256(raw).hexdigest(),
+        "identity_checker_sha256": hashlib.sha256(checker.read_bytes()).hexdigest(),
+    }
     write(manifest, json.dumps(body).encode())
-    return SimpleNamespace(wheel=wheel, identity_checker=checker, release_manifest=manifest,
-                           release_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(), human="human"), body
+    return SimpleNamespace(
+        wheel=wheel,
+        identity_checker=checker,
+        release_manifest=manifest,
+        release_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        human="human",
+    ), body
 
 
 def test_original_accepts_internal_links_and_root_generated_cache(tmp_path):
@@ -107,8 +127,12 @@ def test_original_accepts_internal_links_and_root_generated_cache(tmp_path):
 def test_original_refuses_changed_bytes_inventory_and_permissions(tmp_path, change):
     root = tmp_path / "root"
     _, digest, site = make_original(root)
-    path = {"manifest": root / "release-manifest.json", "source": root / "python/lib/module.py",
-            "installed": site / "probe_core/__init__.py", "extra": site / "probe_core/unreviewed.py"}.get(change)
+    path = {
+        "manifest": root / "release-manifest.json",
+        "source": root / "python/lib/module.py",
+        "installed": site / "probe_core/__init__.py",
+        "extra": site / "probe_core/unreviewed.py",
+    }.get(change)
     if path:
         write(path, b"changed")
     else:
@@ -141,9 +165,22 @@ def test_wheel_record_tampering_and_replaced_offered_input(tmp_path):
 
 
 def counts():
-    return dict(jobs=0, attempts=0, approvals=0, compute_requests=0, runpod_intents=0, audit_events=17,
-                pods=0, network_volumes=0, local_containers=0, history_sha256="a" * 64,
-                audit_tip="b" * 64, audit_prefix_sha256="b" * 64, idle=True, audit_valid=True)
+    return dict(
+        jobs=0,
+        attempts=0,
+        approvals=0,
+        compute_requests=0,
+        runpod_intents=0,
+        audit_events=17,
+        pods=0,
+        network_volumes=0,
+        local_containers=0,
+        history_sha256="a" * 64,
+        audit_tip="b" * 64,
+        audit_prefix_sha256="b" * 64,
+        idle=True,
+        audit_valid=True,
+    )
 
 
 @pytest.mark.parametrize("key", ["pods", "local_containers", "idle", "audit_valid"])
@@ -166,30 +203,60 @@ def test_history_reader_requires_one_pinned_literal_and_does_not_execute_offered
         upgrade.history_reader(b"STATE_READER = dangerous_call()")
     with pytest.raises(upgrade.UpgradeError, match="MISSING"):
         upgrade.history_reader(b"STATE_READER = 'a'\nSTATE_READER = 'b'")
-    assert upgrade.history_reader(b"raise RuntimeError('must not execute')\nSTATE_READER = 'reviewed reader'") == "reviewed reader"
+    assert (
+        upgrade.history_reader(b"raise RuntimeError('must not execute')\nSTATE_READER = 'reviewed reader'")
+        == "reviewed reader"
+    )
 
 
 def acceptance():
     now = datetime.now(timezone.utc).isoformat()
-    return {"status": "passed", "stage": "complete", "image": IMAGE, "service_uid": OWNER, "started_at": now, "finished_at": now,
-            "checks": {name: True for name in upgrade.SANDBOX_CHECKS},
-            "lifecycle": {key: True for key in ("program_started", "host_timer_excluded", "launchers_killed", "container_processes_stopped", "container_removed")}}
+    return {
+        "status": "passed",
+        "stage": "complete",
+        "image": IMAGE,
+        "service_uid": OWNER,
+        "started_at": now,
+        "finished_at": now,
+        "checks": {name: True for name in upgrade.SANDBOX_CHECKS},
+        "lifecycle": {
+            key: True
+            for key in (
+                "program_started",
+                "host_timer_excluded",
+                "launchers_killed",
+                "container_processes_stopped",
+                "container_removed",
+            )
+        },
+    }
 
 
 def identity_acceptance():
-    return {"schema_version": 1, "passed": True, "check_count": 26, "passed_count": 26,
-            "checks": {"check_" + str(index): True for index in range(26)}, "failure_codes": [],
-            "normal_research_audit_events": 2, "paid_actions_performed": False,
-            "checked_at": datetime.now(timezone.utc).isoformat()}
+    return {
+        "schema_version": 1,
+        "passed": True,
+        "check_count": 26,
+        "passed_count": 26,
+        "checks": {"check_" + str(index): True for index in range(26)},
+        "failure_codes": [],
+        "normal_research_audit_events": 2,
+        "paid_actions_performed": False,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def save_prior_upgrade(root, previous_raw, raw, *, previous=None, recovered=False):
     digest = hashlib.sha256(raw).hexdigest()
     directory = root / "upgrades" / digest
     checker = (SCRIPT.parent / "verify-installed-identities.py").read_bytes()
-    manifest = {"schema_version": 2 if previous else 1, "source_commit": "c" * 40,
-                "wheel_filename": NAME, "wheel_sha256": digest,
-                "identity_checker_sha256": hashlib.sha256(checker).hexdigest()}
+    manifest = {
+        "schema_version": 2 if previous else 1,
+        "source_commit": "c" * 40,
+        "wheel_filename": NAME,
+        "wheel_sha256": digest,
+        "identity_checker_sha256": hashlib.sha256(checker).hexdigest(),
+    }
     if previous:
         manifest["previous_upgrade"] = previous
     manifest_raw = json.dumps(manifest).encode()
@@ -200,17 +267,34 @@ def save_prior_upgrade(root, previous_raw, raw, *, previous=None, recovered=Fals
     write(directory / "sandbox-acceptance.json", json.dumps(acceptance()).encode())
     report_directory = directory / ("identity-recovery-" + "a" * 32) if recovered else directory
     write(report_directory / "identity-acceptance.json", json.dumps(identity_acceptance()).encode())
-    receipt = {"schema_version": 1, "status": "passed", "source_commit": manifest["source_commit"],
-               "wheel_sha256": digest, "sandbox_checks": 16, "identity_checks": 26,
-               "cloud_mutations_performed": False, "finished_at": datetime.now(timezone.utc).isoformat()}
+    receipt = {
+        "schema_version": 1,
+        "status": "passed",
+        "source_commit": manifest["source_commit"],
+        "wheel_sha256": digest,
+        "sandbox_checks": 16,
+        "identity_checks": 26,
+        "cloud_mutations_performed": False,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    }
     if recovered:
-        receipt.update(cause_confirmed=True, research_parent_group_correct=True, normal_research_reads_audited=True,
-                       unit_before_sha256="d" * 64, unit_after_sha256="e" * 64, application_reinstalled=False)
+        receipt.update(
+            cause_confirmed=True,
+            research_parent_group_correct=True,
+            normal_research_reads_audited=True,
+            unit_before_sha256="d" * 64,
+            unit_after_sha256="e" * 64,
+            application_reinstalled=False,
+        )
     else:
         receipt.update(previous_wheel_sha256=hashlib.sha256(previous_raw).hexdigest(), dependencies_unchanged=True)
     report_name = "recovery-receipt.json" if recovered else "upgrade-report.json"
     write(report_directory / report_name, json.dumps(receipt).encode())
-    return {"wheel_sha256": digest, "release_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest()}, directory, report_directory / report_name
+    return (
+        {"wheel_sha256": digest, "release_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest()},
+        directory,
+        report_directory / report_name,
+    )
 
 
 @pytest.mark.parametrize("recovered", [False, True])
@@ -222,10 +306,17 @@ def test_verified_prior_upgrade_is_the_installed_and_rollback_baseline(tmp_path,
     install_members(current, site)
     name, raw, wheel, actual_site, evidence = upgrade.verify_baseline(root, digest, previous, owner=OWNER)
     assert name == NAME and raw == current and actual_site == site and wheel == upgrade.inspect_wheel(current)
-    assert evidence == [{**previous, "completion_receipt": str(receipt.relative_to(directory)),
-        "completion_receipt_sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
-        "identity_report_sha256": hashlib.sha256((receipt.parent / "identity-acceptance.json").read_bytes()).hexdigest(),
-        "sandbox_report_sha256": hashlib.sha256((directory / "sandbox-acceptance.json").read_bytes()).hexdigest()}]
+    assert evidence == [
+        {
+            **previous,
+            "completion_receipt": str(receipt.relative_to(directory)),
+            "completion_receipt_sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
+            "identity_report_sha256": hashlib.sha256(
+                (receipt.parent / "identity-acceptance.json").read_bytes()
+            ).hexdigest(),
+            "sandbox_report_sha256": hashlib.sha256((directory / "sandbox-acceptance.json").read_bytes()).hexdigest(),
+        }
+    ]
     with pytest.raises(upgrade.UpgradeError, match="INSTALLED_PROJECT_BYTES_DIFFER"):
         upgrade.verify_original(root, digest, owner=OWNER)
 
@@ -238,13 +329,18 @@ def test_prior_upgrade_chain_is_rooted_in_original_and_checks_every_transition(t
     second_ref, _, _ = save_prior_upgrade(root, first, second, previous=first_ref)
     install_members(second, site)
     result = upgrade.verify_baseline(root, digest, second_ref, owner=OWNER)
-    assert result[1] == second and [item["wheel_sha256"] for item in result[4]] == [first_ref["wheel_sha256"], second_ref["wheel_sha256"]]
+    assert result[1] == second and [item["wheel_sha256"] for item in result[4]] == [
+        first_ref["wheel_sha256"],
+        second_ref["wheel_sha256"],
+    ]
     write(first_dir / "rollback" / NAME, first)
     with pytest.raises(upgrade.UpgradeError, match="ROLLBACK_HASH"):
         upgrade.verify_baseline(root, digest, second_ref, owner=OWNER)
 
 
-@pytest.mark.parametrize("fault", ["unconfirmed_cause", "wrong_identity_count", "legacy_only", "original_runtime_changed"])
+@pytest.mark.parametrize(
+    "fault", ["unconfirmed_cause", "wrong_identity_count", "legacy_only", "original_runtime_changed"]
+)
 def test_recovery_receipt_does_not_bypass_original_runtime_or_completed_repair(tmp_path, fault):
     root = tmp_path / "root"
     old, digest, site = make_original(root)
@@ -261,33 +357,64 @@ def test_recovery_receipt_does_not_bypass_original_runtime_or_completed_repair(t
         return
     else:
         body = json.loads(receipt_path.read_bytes())
-        body.update({"unconfirmed_cause": {"cause_confirmed": False}, "wrong_identity_count": {"identity_checks": 25}}[fault])
+        body.update(
+            {"unconfirmed_cause": {"cause_confirmed": False}, "wrong_identity_count": {"identity_checks": 25}}[fault]
+        )
         write(receipt_path, json.dumps(body).encode())
     with pytest.raises(upgrade.UpgradeError):
         upgrade.verify_baseline(root, digest, reference, owner=OWNER)
 
 
-@pytest.mark.parametrize("fault", ["manifest", "wheel", "checker", "rollback", "installed", "receipt_missing", "receipt_failed",
-                                  "wrong_receipt_wheel", "wrong_previous_wheel", "identity_failed", "sandbox_failed", "report_order",
-                                  "receipt_writable", "receipt_symlink", "ambiguous_success", "dependency_change"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "manifest",
+        "wheel",
+        "checker",
+        "rollback",
+        "installed",
+        "receipt_missing",
+        "receipt_failed",
+        "wrong_receipt_wheel",
+        "wrong_previous_wheel",
+        "identity_failed",
+        "sandbox_failed",
+        "report_order",
+        "receipt_writable",
+        "receipt_symlink",
+        "ambiguous_success",
+        "dependency_change",
+    ],
+)
 def test_prior_upgrade_evidence_failure_never_falls_back_to_original(tmp_path, fault):
     root = tmp_path / "root"
     old, digest, site = make_original(root)
-    current = wheel_bytes(b"accepted-upgrade\n", dependency="pydantic==999" if fault == "dependency_change" else "pydantic==2.13.5")
+    current = wheel_bytes(
+        b"accepted-upgrade\n", dependency="pydantic==999" if fault == "dependency_change" else "pydantic==2.13.5"
+    )
     reference, directory, receipt_path = save_prior_upgrade(root, old, current)
     install_members(current, site)
     if fault in {"manifest", "wheel", "checker", "rollback", "installed"}:
-        path = {"manifest": directory / "upgrade-release.json", "wheel": directory / NAME,
-                "checker": directory / "verify-installed-identities.py", "rollback": directory / "rollback" / NAME,
-                "installed": site / "probe_core/__init__.py"}[fault]
+        path = {
+            "manifest": directory / "upgrade-release.json",
+            "wheel": directory / NAME,
+            "checker": directory / "verify-installed-identities.py",
+            "rollback": directory / "rollback" / NAME,
+            "installed": site / "probe_core/__init__.py",
+        }[fault]
         write(path, b"changed")
     elif fault == "receipt_missing":
         receipt_path.unlink()
     elif fault in {"receipt_failed", "wrong_receipt_wheel", "wrong_previous_wheel", "report_order"}:
         body = json.loads(receipt_path.read_bytes())
-        body.update({"receipt_failed": {"status": "failed"}, "wrong_receipt_wheel": {"wheel_sha256": "f" * 64},
-                     "wrong_previous_wheel": {"previous_wheel_sha256": "f" * 64},
-                     "report_order": {"finished_at": "2000-01-01T00:00:00+00:00"}}[fault])
+        body.update(
+            {
+                "receipt_failed": {"status": "failed"},
+                "wrong_receipt_wheel": {"wheel_sha256": "f" * 64},
+                "wrong_previous_wheel": {"previous_wheel_sha256": "f" * 64},
+                "report_order": {"finished_at": "2000-01-01T00:00:00+00:00"},
+            }[fault]
+        )
         write(receipt_path, json.dumps(body).encode())
     elif fault in {"identity_failed", "sandbox_failed"}:
         path = directory / ("identity-acceptance.json" if fault == "identity_failed" else "sandbox-acceptance.json")
@@ -305,8 +432,10 @@ def test_prior_upgrade_evidence_failure_never_falls_back_to_original(tmp_path, f
         upgrade.verify_baseline(root, digest, reference, owner=OWNER)
 
 
-@pytest.mark.parametrize("previous", [None, {}, {"wheel_sha256": "a" * 64},
-                                    {"wheel_sha256": "../escape", "release_manifest_sha256": "b" * 64}])
+@pytest.mark.parametrize(
+    "previous",
+    [None, {}, {"wheel_sha256": "a" * 64}, {"wheel_sha256": "../escape", "release_manifest_sha256": "b" * 64}],
+)
 def test_second_upgrade_manifest_requires_exact_pinned_previous_release(tmp_path, previous):
     args, manifest = make_release(tmp_path / "release")
     manifest.update(schema_version=2, previous_upgrade=previous)
@@ -337,11 +466,14 @@ def test_new_gate_requires_fresh_independent_crash_cleanup(change):
 
 def test_readiness_waits_for_listener_and_times_out_without_retrying_identity_gate():
     clock, attempts = [0.0], []
+
     def sleep(seconds):
         clock[0] += seconds
+
     def check():
         attempts.append(True)
         return len(attempts) >= 3
+
     upgrade.wait_ready(check, monotonic=lambda: clock[0], sleep=sleep, timeout=1)
     assert len(attempts) == 3
     with pytest.raises(upgrade.UpgradeError, match="LISTENER_NOT_READY"):
@@ -352,7 +484,10 @@ class FakeHost:
     def __init__(self, root, units, site, report):
         self.root, self.units, self.site, self.report = root, units, site, report
         self.commands, self.counts, self.fail, self.race = [], counts(), None, False
-        self.state = {n: ("active" if n in upgrade.SERVICES or n.endswith(".timer") else "inactive") for n in (*upgrade.SERVICES, *upgrade.OTHER_UNITS)}
+        self.state = {
+            n: ("active" if n in upgrade.SERVICES or n.endswith(".timer") else "inactive")
+            for n in (*upgrade.SERVICES, *upgrade.OTHER_UNITS)
+        }
 
     def __call__(self, command, **options):
         self.commands.append(command)
@@ -364,7 +499,11 @@ class FakeHost:
             action = command[1]
             if action == "show":
                 name = command[2]
-                output = ((self.state[name] + "\n") if "--value" in command else f"LoadState=loaded\nFragmentPath={self.units / name}\nDropInPaths=\nActiveState={self.state[name]}\nUnitFileState=enabled\n").encode()
+                output = (
+                    (self.state[name] + "\n")
+                    if "--value" in command
+                    else f"LoadState=loaded\nFragmentPath={self.units / name}\nDropInPaths=\nActiveState={self.state[name]}\nUnitFileState=enabled\n"
+                ).encode()
             elif action in {"stop", "start", "restart"}:
                 if action == "restart" and self.fail == "final_restart":
                     assert json.loads((self.root.parent / "etc/research.json").read_bytes())["sandbox_image"] == IMAGE
@@ -382,7 +521,12 @@ class FakeHost:
         elif command[0] == "/usr/sbin/runuser":
             assert command[1:6] == ["-u", "probe-trusted", "-g", "probe-trusted", "--"]
             if "/usr/bin/podman" in command:
-                assert "HOME=/var/lib/probe-sandbox" in command and command[-4:] == ["ps", "--all", "--quiet", "--no-trunc"]
+                assert "HOME=/var/lib/probe-sandbox" in command and command[-4:] == [
+                    "ps",
+                    "--all",
+                    "--quiet",
+                    "--no-trunc",
+                ]
                 output = (("0" * 64 + "\n") * self.counts["local_containers"]).encode()
             else:
                 assert command[-1].endswith(upgrade.READ_IDLE) and "def idle_history_snapshot(" in command[-1]
@@ -410,28 +554,56 @@ def host(tmp_path, monkeypatch):
     args.original_manifest_sha256 = digest
     for name in (*upgrade.SERVICES, *upgrade.OTHER_UNITS):
         write(units / name, b"[Unit]\nDescription=fixture\n", 0o644)
-    users = {name: OWNER + offset for offset, name in enumerate(("probe-trusted", "probe-research", "probe-watchdog", "probe-backup", "human"))}
+    users = {
+        name: OWNER + offset
+        for offset, name in enumerate(("probe-trusted", "probe-research", "probe-watchdog", "probe-backup", "human"))
+    }
     monkeypatch.setattr(upgrade, "discover_users", lambda _: users)
-    original_config = json.dumps({"sandbox_image": IMAGE, "service_uid": OWNER, "research_uid": OWNER + 1,
-                                  "admin_uid": OWNER + 4, "private_setting": "preserve exactly"}, indent=2).encode()
+    original_config = json.dumps(
+        {
+            "sandbox_image": IMAGE,
+            "service_uid": OWNER,
+            "research_uid": OWNER + 1,
+            "admin_uid": OWNER + 4,
+            "private_setting": "preserve exactly",
+        },
+        indent=2,
+    ).encode()
     write(config / "research.json", original_config, 0o640)
     provenance = b"SOURCE_COMMIT=" + b"a" * 40 + b"\nDRIVE_FOLDER_ID=unchanged-public-folder\n"
     write(config / "backup.env", provenance, 0o640)
     backup_copy = tmp_path / "backup/backup.env"
     write(backup_copy, provenance)
     original_read = upgrade.read_file
+
     def read(path, **kwargs):
         if Path(path) == backup_copy:
             kwargs["owner"] = OWNER
         return original_read(path, **kwargs)
+
     monkeypatch.setattr(upgrade, "read_file", read)
     report = tmp_path / "sandbox/acceptance-report.json"
     fake = FakeHost(root, units, site, report)
-    operation = upgrade.Upgrade(root=root, config=config, units=units, owner=OWNER, run=fake, backup_copy=backup_copy, sandbox_report=report)
+    operation = upgrade.Upgrade(
+        root=root, config=config, units=units, owner=OWNER, run=fake, backup_copy=backup_copy, sandbox_report=report
+    )
     readiness = []
     operation.ready = lambda _: readiness.append(operation.stage)
-    return SimpleNamespace(root=root, config=config, units=units, old=old, args=args, release=release, original_config=original_config,
-                           provenance=provenance, fake=fake, operation=operation, backup_copy=backup_copy, site=site, readiness=readiness)
+    return SimpleNamespace(
+        root=root,
+        config=config,
+        units=units,
+        old=old,
+        args=args,
+        release=release,
+        original_config=original_config,
+        provenance=provenance,
+        fake=fake,
+        operation=operation,
+        backup_copy=backup_copy,
+        site=site,
+        readiness=readiness,
+    )
 
 
 def test_success_preserves_dependencies_and_enables_only_after_both_gates(host):
@@ -468,7 +640,10 @@ def test_second_upgrade_uses_verified_recovered_wheel_for_rollback(host):
     assert (host.root / NAME).read_bytes() == host.old
     assert result["previous_upgrade_evidence"][0]["wheel_sha256"] == reference["wheel_sha256"]
     selected = {"wheel_sha256": release["wheel_sha256"], "release_manifest_sha256": host.args.release_manifest_sha256}
-    assert upgrade.verify_baseline(host.root, host.args.original_manifest_sha256, selected, owner=OWNER)[1] == host.args.wheel.read_bytes()
+    assert (
+        upgrade.verify_baseline(host.root, host.args.original_manifest_sha256, selected, owner=OWNER)[1]
+        == host.args.wheel.read_bytes()
+    )
 
 
 def test_second_upgrade_gate_failure_retains_current_rollback_and_guards(host):
@@ -497,16 +672,24 @@ def bridge_host(host, tmp_path, monkeypatch):
     operation.backup_state.mkdir(mode=0o700)
     operation.backup_outbox = tmp_path / "outbox"
     operation.backup_receipts = tmp_path / "receipts"
-    operation.backup_outbox.mkdir(); operation.backup_receipts.mkdir()
-    users = {name: OWNER + offset for offset, name in enumerate(("probe-trusted", "probe-research", "probe-watchdog", "probe-backup", "human"))}
+    operation.backup_outbox.mkdir()
+    operation.backup_receipts.mkdir()
+    users = {
+        name: OWNER + offset
+        for offset, name in enumerate(("probe-trusted", "probe-research", "probe-watchdog", "probe-backup", "human"))
+    }
     users["probe-backup"] = OWNER  # Fake service writes under the test identity.
     monkeypatch.setattr(upgrade, "discover_users", lambda _: users)
     write(host.units / "probe-backup.service", (SCRIPT.parent / "live/probe-backup.service").read_bytes(), 0o644)
     transport = b"# exact reviewed test transport\n"
-    args, release = make_release(host.args.release_manifest.parent,
-                                 wheel_bytes(b"VERSION = 'bridge'\n", extras={"probe_core/backup.py": transport}))
+    args, release = make_release(
+        host.args.release_manifest.parent,
+        wheel_bytes(b"VERSION = 'bridge'\n", extras={"probe_core/backup.py": transport}),
+    )
     args.original_manifest_sha256 = host.args.original_manifest_sha256
-    release.update(schema_version=3, previous_upgrade=None, backup_transport_sha256=hashlib.sha256(transport).hexdigest())
+    release.update(
+        schema_version=3, previous_upgrade=None, backup_transport_sha256=hashlib.sha256(transport).hexdigest()
+    )
     write(args.release_manifest, json.dumps(release).encode())
     args.release_manifest_sha256 = hashlib.sha256(args.release_manifest.read_bytes()).hexdigest()
     host.args, host.release, host.transport = args, release, transport
@@ -521,37 +704,66 @@ def bridge_host(host, tmp_path, monkeypatch):
             paths = str(override) if name == "probe-backup.service" and override.exists() else ""
             state = host.fake.state[name]
             pid = "123" if host.bridge_fault == "unconfirmed_stop" and host.bridge_phases else "0"
-            return SimpleNamespace(returncode=0, stderr=b"", stdout=(f"LoadState=loaded\nFragmentPath={host.units/name}\n"
-                f"DropInPaths={paths}\nActiveState={state}\nMainPID={pid}\nControlPID=0\nKillMode=control-group\n").encode())
+            return SimpleNamespace(
+                returncode=0,
+                stderr=b"",
+                stdout=(
+                    f"LoadState=loaded\nFragmentPath={host.units / name}\n"
+                    f"DropInPaths={paths}\nActiveState={state}\nMainPID={pid}\nControlPID=0\nKillMode=control-group\n"
+                ).encode(),
+            )
         if command == ["/usr/bin/systemctl", "start", "probe-backup.service"]:
             host.fake.commands.append(command)
-            directory = next(path for path in operation.runtime.iterdir() if path.name.startswith("probe-upgrade-backup-"))
+            directory = next(
+                path for path in operation.runtime.iterdir() if path.name.startswith("probe-upgrade-backup-")
+            )
             assert directory.stat().st_mode & 0o777 == 0o755
             assert (directory / "backup.py").read_bytes() == transport
-            assert all((directory / name).stat().st_mode & 0o777 == 0o644 for name in ("backup.py", "bridge.py", "history.py", "request.json"))
+            assert all(
+                (directory / name).stat().st_mode & 0o777 == 0o644
+                for name in ("backup.py", "bridge.py", "history.py", "request.json")
+            )
             assert "User=" not in override.read_text() and "Requires=" not in override.read_text()
             assert (host.site / "probe_core/__init__.py").read_bytes() == b"VERSION = 'old'\n"
             request = json.loads((directory / "request.json").read_bytes())
             phase = request["phase"]
             host.bridge_phases.append(phase)
-            report = {"schema_version": 1, "phase": phase, "ok": True, "snapshot_ids": ["a"*64] if phase == "drain" else ["a"*64, "c"*64]}
+            report = {
+                "schema_version": 1,
+                "phase": phase,
+                "ok": True,
+                "snapshot_ids": ["a" * 64] if phase == "drain" else ["a" * 64, "c" * 64],
+            }
             if phase == "fresh":
-                report["fresh"] = {"snapshot_id": "c"*64, "archive_sha256": "d"*64, "created_at": request["not_before"],
-                                   "history_sha256": request["baseline"]["history_sha256"],
-                                   "audit_prefix_sha256": request["baseline"]["audit_tip"],
-                                   "audit_tip": {"sequence": request["baseline"]["audit_events"], "hash": request["baseline"]["audit_tip"]}}
-            if host.bridge_fault == "stale" and phase == "fresh": report["fresh"]["snapshot_id"] = "a"*64
-            if host.bridge_fault == "history" and phase == "fresh": report["fresh"]["history_sha256"] = "e"*64
+                report["fresh"] = {
+                    "snapshot_id": "c" * 64,
+                    "archive_sha256": "d" * 64,
+                    "created_at": request["not_before"],
+                    "history_sha256": request["baseline"]["history_sha256"],
+                    "audit_prefix_sha256": request["baseline"]["audit_tip"],
+                    "audit_tip": {
+                        "sequence": request["baseline"]["audit_events"],
+                        "hash": request["baseline"]["audit_tip"],
+                    },
+                }
+            if host.bridge_fault == "stale" and phase == "fresh":
+                report["fresh"]["snapshot_id"] = "a" * 64
+            if host.bridge_fault == "history" and phase == "fresh":
+                report["fresh"]["history_sha256"] = "e" * 64
             if host.bridge_fault in {"failed", "timeout"}:
-                report.update(ok=False, error_type="BackupError", error_code="BACKUP_TRANSPORT_CAT_RATE_LIMITED_AFTER_3_ATTEMPTS")
+                report.update(
+                    ok=False, error_type="BackupError", error_code="BACKUP_TRANSPORT_CAT_RATE_LIMITED_AFTER_3_ATTEMPTS"
+                )
             write(Path(request["report"]), json.dumps(report).encode())
-            if host.bridge_fault == "timeout": raise subprocess.TimeoutExpired(command, options["timeout"])
+            if host.bridge_fault == "timeout":
+                raise subprocess.TimeoutExpired(command, options["timeout"])
             return SimpleNamespace(returncode=int(not report["ok"]), stderr=b"", stdout=b"")
         if "pip" in command:
             assert not override.parent.exists()
             assert not list(operation.runtime.glob("probe-upgrade-backup-*"))
             assert host.bridge_phases == ["drain", "fresh"]
         return original_run(command, **options)
+
     operation.run = run
     return host
 
@@ -560,19 +772,26 @@ def test_schema3_bridge_preserves_gate_and_removes_override_before_install(bridg
     host = bridge_host
     result = host.operation.execute(host.args)
     assert result["backup_bridge"]["transport_sha256"] == host.release["backup_transport_sha256"]
-    assert result["backup_bridge"]["snapshot_id"] == "c"*64
+    assert result["backup_bridge"]["snapshot_id"] == "c" * 64
     assert host.bridge_phases == ["drain", "fresh"]
     assert not list(host.operation.backup_state.iterdir())
     assert host.fake.state["probe-backup.timer"] == "active"
-    reference = {"wheel_sha256": host.release["wheel_sha256"], "release_manifest_sha256": host.args.release_manifest_sha256}
-    assert upgrade.verify_baseline(host.root, host.args.original_manifest_sha256, reference, owner=OWNER)[1] == host.args.wheel.read_bytes()
+    reference = {
+        "wheel_sha256": host.release["wheel_sha256"],
+        "release_manifest_sha256": host.args.release_manifest_sha256,
+    }
+    assert (
+        upgrade.verify_baseline(host.root, host.args.original_manifest_sha256, reference, owner=OWNER)[1]
+        == host.args.wheel.read_bytes()
+    )
 
 
 @pytest.mark.parametrize("fault", ["failed", "timeout", "stale", "history"])
 def test_schema3_failed_backup_never_installs_and_restores_original_schedule(bridge_host, fault):
     host = bridge_host
     host.bridge_fault = fault
-    with pytest.raises(upgrade.UpgradeError): host.operation.execute(host.args)
+    with pytest.raises(upgrade.UpgradeError):
+        host.operation.execute(host.args)
     assert not host.operation.changed and host.operation.work is None
     assert not any("pip" in command for command in host.fake.commands)
     assert not (host.operation.runtime_units / "probe-backup.service.d").exists()
@@ -594,7 +813,7 @@ def test_schema3_unconfirmed_shutdown_keeps_code_and_timer_paused(bridge_host):
 
 def test_schema3_wrong_transport_pin_refuses_before_service_or_installed_code(bridge_host):
     host = bridge_host
-    host.release["backup_transport_sha256"] = "f"*64
+    host.release["backup_transport_sha256"] = "f" * 64
     raw = json.dumps(host.release).encode()
     write(host.args.release_manifest, raw)
     host.args.release_manifest_sha256 = hashlib.sha256(raw).hexdigest()
@@ -606,11 +825,15 @@ def test_schema3_wrong_transport_pin_refuses_before_service_or_installed_code(br
 def test_schema3_override_publish_failure_removes_own_partial_state(bridge_host, monkeypatch):
     host = bridge_host
     original = upgrade.os.rename
+
     def fail(source, destination):
-        if Path(destination).name == "90-probe-upgrade-backup.conf": raise OSError("injected rename failure")
+        if Path(destination).name == "90-probe-upgrade-backup.conf":
+            raise OSError("injected rename failure")
         return original(source, destination)
+
     monkeypatch.setattr(upgrade.os, "rename", fail)
-    with pytest.raises(OSError): host.operation.execute(host.args)
+    with pytest.raises(OSError):
+        host.operation.execute(host.args)
     assert not (host.operation.runtime_units / "probe-backup.service.d").exists()
     assert not list(host.operation.runtime.glob("probe-upgrade-backup-*"))
     assert host.fake.state["probe-backup.timer"] == "active"
@@ -620,18 +843,23 @@ def test_schema3_override_publish_failure_removes_own_partial_state(bridge_host,
 def test_schema3_timer_stop_timeout_restores_schedule(bridge_host):
     host = bridge_host
     original = host.operation.run
+
     def timeout(command, **options):
         result = original(command, **options)
         if command == ["/usr/bin/systemctl", "stop", "probe-backup.timer"]:
             raise subprocess.TimeoutExpired(command, options["timeout"])
         return result
+
     host.operation.run = timeout
-    with pytest.raises(subprocess.TimeoutExpired): host.operation.execute(host.args)
+    with pytest.raises(subprocess.TimeoutExpired):
+        host.operation.execute(host.args)
     assert host.fake.state["probe-backup.timer"] == "active"
     assert not list(host.operation.runtime.glob("probe-upgrade-backup-*"))
 
 
-@pytest.mark.parametrize("fault", [None, "old_snapshot", "different_history", "different_audit", "sensitive_error", "quota"])
+@pytest.mark.parametrize(
+    "fault", [None, "old_snapshot", "different_history", "different_audit", "sensitive_error", "quota"]
+)
 def test_bridge_wrapper_checks_real_snapshot_history_without_network(tmp_path, monkeypatch, fault):
     from contextlib import closing
     import sqlite3
@@ -644,7 +872,8 @@ def test_bridge_wrapper_checks_real_snapshot_history_without_network(tmp_path, m
     code = tmp_path / "code"
     code.mkdir(mode=0o755)
     outbox, receipts = tmp_path / "outbox", tmp_path / "receipts"
-    outbox.mkdir(); receipts.mkdir()
+    outbox.mkdir()
+    receipts.mkdir()
     provider = tmp_path / "provider.sqlite"
     with closing(sqlite3.connect(provider)) as connection:
         connection.execute("CREATE TABLE runpod_intents (worker_id TEXT PRIMARY KEY)")
@@ -658,22 +887,37 @@ def test_bridge_wrapper_checks_real_snapshot_history_without_network(tmp_path, m
         Controller(ledger, object(), watchdog_health_path=tmp_path / "unused-health", controller_idle_usd_per_day=0)
         ledger.record_event("tool_call", {"tool": "local_bridge_acceptance"})
         baseline = history_namespace["idle_history_snapshot"](tmp_path / "live.sqlite", provider)
-        snapshot = create_snapshot(ledger, outbox / "probe-snapshot.tar", input_store=store.root,
-                                   source_commit="a"*40, provider_database=provider)
+        snapshot = create_snapshot(
+            ledger,
+            outbox / "probe-snapshot.tar",
+            input_store=store.root,
+            source_commit="a" * 40,
+            provider_database=provider,
+        )
     verified = verify_snapshot(snapshot["archive"], expected_sha256=snapshot["archive_sha256"])
     restored = restore_snapshot(snapshot["archive"], tmp_path / "restored", expected_sha256=snapshot["archive_sha256"])
     results = [{**verified, "readback_verified": True, "restore_verified": restored["restored"]}]
     transport = (SCRIPT.parent.parent / "probe_core/backup.py").read_bytes()
     write(code / "backup.py", transport, 0o644)
     write(code / "history.py", history_raw.encode(), 0o644)
-    request = {"phase": "fresh", "transport_sha256": hashlib.sha256(transport).hexdigest(),
-               "history_sha256": hashlib.sha256(history_raw.encode()).hexdigest(), "baseline": baseline,
-               "not_before": before.isoformat(), "drained_ids": [], "outbox": str(outbox),
-               "receipts": str(receipts), "credential": str(tmp_path / "never-read.conf"),
-               "report": str(tmp_path / "report.json")}
-    if fault == "old_snapshot": request["not_before"] = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
-    if fault == "different_history": request["baseline"]["history_sha256"] = "f"*64
-    if fault == "different_audit": request["baseline"]["audit_tip"] = "f"*64
+    request = {
+        "phase": "fresh",
+        "transport_sha256": hashlib.sha256(transport).hexdigest(),
+        "history_sha256": hashlib.sha256(history_raw.encode()).hexdigest(),
+        "baseline": baseline,
+        "not_before": before.isoformat(),
+        "drained_ids": [],
+        "outbox": str(outbox),
+        "receipts": str(receipts),
+        "credential": str(tmp_path / "never-read.conf"),
+        "report": str(tmp_path / "report.json"),
+    }
+    if fault == "old_snapshot":
+        request["not_before"] = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+    if fault == "different_history":
+        request["baseline"]["history_sha256"] = "f" * 64
+    if fault == "different_audit":
+        request["baseline"]["audit_tip"] = "f" * 64
     write(code / "request.json", json.dumps(request).encode(), 0o644)
     namespace = {"__name__": "bridge_unit_test", "__file__": str(code / "bridge.py")}
     exec(upgrade.BACKUP_BRIDGE, namespace)
@@ -681,18 +925,26 @@ def test_bridge_wrapper_checks_real_snapshot_history_without_network(tmp_path, m
     # executes as the developer UID and substitutes only that root read check.
     namespace["checked"] = lambda path: path.read_bytes()
     original_spec = importlib.util.spec_from_file_location
+
     def module_spec(name, path):
         value = original_spec(name, path)
         original_exec = value.loader.exec_module
+
         def load(module):
             original_exec(module)
+
             def uploaded():
-                if fault == "sensitive_error": raise module.BackupError("secret-must-not-appear")
-                if fault == "quota": raise module.BackupError("BACKUP_TRANSPORT_CAT_RATE_LIMITED_AFTER_3_ATTEMPTS")
+                if fault == "sensitive_error":
+                    raise module.BackupError("secret-must-not-appear")
+                if fault == "quota":
+                    raise module.BackupError("BACKUP_TRANSPORT_CAT_RATE_LIMITED_AFTER_3_ATTEMPTS")
                 print(json.dumps(results))
+
             module.main = uploaded
+
         value.loader.exec_module = load
         return value
+
     monkeypatch.setattr(importlib.util, "spec_from_file_location", module_spec)
     monkeypatch.setattr(sys, "argv", ["bridge", "--drive-folder-id", "public-folder-id"])
     status = namespace["main"]()
@@ -729,7 +981,10 @@ def test_failures_leave_persistent_guard_and_disabled_config(host, failure):
     host.fake.fail = failure
     with pytest.raises(upgrade.UpgradeError):
         host.operation.execute(host.args)
-    assert host.operation.closed_after_failure and json.loads((host.config / "research.json").read_bytes())["sandbox_image"] is None
+    assert (
+        host.operation.closed_after_failure
+        and json.loads((host.config / "research.json").read_bytes())["sandbox_image"] is None
+    )
     assert (host.config / "upgrade-blocked").is_file()
     for name in upgrade.GUARDED:
         assert (host.units / (name + ".d") / upgrade.GUARD_NAME).read_bytes() == upgrade.GUARD
