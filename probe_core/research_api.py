@@ -26,6 +26,8 @@ class CloudRequests(Protocol):
     def request_start(self, worker_id: str, job_ids: list[str], max_runtime_seconds: int) -> Any: ...
     def status(self) -> Any: ...
     def stop_gpu(self, worker_id: str | None = None) -> Any: ...
+    def budget_status(self) -> Any: ...
+    def start_within_envelope(self, request_id: str) -> Any: ...
     def request_provision(
         self, deployment: dict, job_ids: list[str], max_runtime_seconds: int, replaces_worker_id: str | None = None
     ) -> Any: ...
@@ -60,6 +62,10 @@ class StartRequest(FrozenModel):
 
 class StopRequest(FrozenModel):
     worker_id: Identifier | None = None
+
+
+class EnvelopeStartRequest(FrozenModel):
+    request_id: Identifier
 
 
 class ProvisionRequest(FrozenModel):
@@ -143,6 +149,7 @@ class ResearchService:
             "request_gpu_start": self.request_gpu_start,
             "gpu_status": self.gpu_status,
             "request_gpu_provision": self.request_gpu_provision,
+            "start_gpu_within_envelope": self.start_gpu_within_envelope,
             "stop_gpu": self.stop_gpu,
             "run_sandboxed_experiment": self.run_sandboxed_experiment,
             "import_run_artifact": self.import_run_artifact,
@@ -187,11 +194,14 @@ class ResearchService:
     def lab_status(self, params: dict[str, Any]) -> dict[str, Any]:
         FrozenModel.model_validate(params)
         jobs = self.query_runs({"limit": 100})
+        budget = self.cloud.budget_status() if self.cloud is not None else None
         return {
             "jobs": jobs,
             "sandbox_configured": self.sandbox is not None,
             "cloud_controller_configured": self.cloud is not None,
-            "gpu_start_authority": False,
+            # Starts are possible only within an open human-approved envelope.
+            "gpu_start_authority": bool(budget and budget.get("active_envelope")),
+            "budget": budget,
             "evaluation_authority": False,
         }
 
@@ -293,6 +303,17 @@ class ResearchService:
             request.max_runtime_seconds,
             request.replaces_worker_id,
         )
+
+    def start_gpu_within_envelope(self, params: dict[str, Any]) -> Any:
+        request = EnvelopeStartRequest.model_validate(params)
+        if self.cloud is None:
+            raise RuntimeError("controller is not configured")
+        status = {item["request_id"]: item for item in self.cloud.status()}
+        if request.request_id not in status:
+            raise PermissionError("compute request is not visible")
+        for job_id in status[request.request_id]["job_ids"]:
+            self._job(job_id)
+        return self.cloud.start_within_envelope(request.request_id)
 
     def stop_gpu(self, params: dict[str, Any]) -> Any:
         request = StopRequest.model_validate(params)

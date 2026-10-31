@@ -205,6 +205,7 @@ class ExperimentMetadata(FrozenModel):
         "tensor_slice",
         "module_manifest",
         "backend_parity",
+        "recipe",
     ]
     modules: Annotated[tuple[ModuleName, ...], Field(min_length=1, max_length=112)]
     positions: Annotated[tuple[TokenPosition, ...], Field(min_length=1, max_length=1024)]
@@ -407,8 +408,198 @@ class BackendParity(FrozenModel):
     suite_version: Literal[1] = 1
 
 
+TokenId = Annotated[int, Field(strict=True, ge=0, le=2**31 - 1)]
+RecipeName = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")]
+_RESERVED_STEPS = {"baseline", "noop_check"}
+
+
+class PromptTokens(FrozenModel):
+    """Next-token IDs that a recipe's metrics compare for one prompt."""
+
+    prompt_id: Identifier
+    target_token_id: TokenId
+    alternative_token_id: TokenId
+
+    @model_validator(mode="after")
+    def distinct_tokens(self) -> Self:
+        if self.target_token_id == self.alternative_token_id:
+            raise ValueError("target and alternative tokens must differ")
+        return self
+
+
+class LogitDiffMetric(FrozenModel):
+    kind: Literal["logit_diff"]
+    name: RecipeName
+
+
+class LogProbMetric(FrozenModel):
+    kind: Literal["log_prob"]
+    name: RecipeName
+
+
+class KLToBaselineMetric(FrozenModel):
+    kind: Literal["kl_to_baseline"]
+    name: RecipeName
+
+
+class TopKTokensMetric(FrozenModel):
+    kind: Literal["top_k_tokens"]
+    name: RecipeName
+    k: Annotated[int, Field(strict=True, ge=1, le=20)] = 5
+
+
+Metric = Annotated[LogitDiffMetric | LogProbMetric | KLToBaselineMetric | TopKTokensMetric, Field(discriminator="kind")]
+
+
+class StepTensorRef(FrozenModel):
+    """A tensor captured by an earlier step of the same recipe run."""
+
+    step: RecipeName
+    tensor: Identifier
+
+
+class RecipeCapture(FrozenModel):
+    kind: Literal["capture"]
+    modules: Annotated[tuple[ModuleRef, ...], Field(min_length=1, max_length=28)]
+    positions: Positions
+
+
+class RecipeZeroAblate(FrozenModel):
+    kind: Literal["zero_ablate"]
+    target: ModuleRef
+    positions: Positions
+
+
+class RecipeMeanAblate(FrozenModel):
+    """Replace with the mean of an earlier capture over prompts and positions."""
+
+    kind: Literal["mean_ablate"]
+    target: ModuleRef
+    positions: Positions
+    baseline: StepTensorRef
+
+
+class RecipePatch(FrozenModel):
+    """Replace with an earlier capture of exactly the same prompts and positions."""
+
+    kind: Literal["patch"]
+    target: ModuleRef
+    positions: Positions
+    source: StepTensorRef
+
+
+class RecipeSteer(FrozenModel):
+    """Add strength times the mean of an earlier capture over prompts and positions."""
+
+    kind: Literal["steer"]
+    target: ModuleRef
+    positions: Positions
+    direction: StepTensorRef
+    strength: Annotated[float, Field(strict=True, ge=-100, le=100, allow_inf_nan=False)]
+
+
+class RecipeRandomNormMatched(FrozenModel):
+    """Control: add a seeded random vector whose norm equals the unmodified activation's.
+
+    Zero ablation displaces each selected activation by its own norm; this
+    displaces it by the same norm in a random direction.
+    """
+
+    kind: Literal["random_norm_matched"]
+    target: ModuleRef
+    positions: Positions
+    seed: Annotated[int, Field(strict=True, ge=0, le=2**32 - 1)]
+
+
+RecipeOperation = Annotated[
+    RecipeCapture | RecipeZeroAblate | RecipeMeanAblate | RecipePatch | RecipeSteer | RecipeRandomNormMatched,
+    Field(discriminator="kind"),
+]
+
+
+def capture_key(module: ModuleRef) -> str:
+    return f"layer_{module.layer}_{module.component}" + (f"_{module.head}" if module.head is not None else "")
+
+
+class RecipeStep(FrozenModel):
+    name: RecipeName
+    operation: RecipeOperation
+    retain_logits: StrictBool = False
+
+
+class Recipe(FrozenModel):
+    """A versioned, frozen multi-step experiment run inside one loaded model.
+
+    The runner always computes the unmodified baseline first and requires every
+    intervention target to pass an exact no-op hook check before any step runs.
+    """
+
+    recipe_id: RecipeName
+    version: Annotated[int, Field(strict=True, ge=1, le=10000)]
+    description: Text
+    prompts: Annotated[tuple[PromptTokens, ...], Field(min_length=1, max_length=256)]
+    steps: Annotated[tuple[RecipeStep, ...], Field(min_length=1, max_length=16)]
+    metrics: Annotated[tuple[Metric, ...], Field(min_length=1, max_length=8)]
+    primary_metric: RecipeName
+    primary_step: RecipeName
+    control_steps: Annotated[tuple[RecipeName, ...], Field(max_length=8)] = ()
+    seed: Annotated[int, Field(strict=True, ge=0, le=2**32 - 1)]
+
+    @model_validator(mode="after")
+    def references_resolve(self) -> Self:
+        ids = [prompt.prompt_id for prompt in self.prompts]
+        if len(set(ids)) != len(ids):
+            raise ValueError("recipe prompts must be distinct")
+        names = [metric.name for metric in self.metrics]
+        if len(set(names)) != len(names):
+            raise ValueError("metric names must be distinct")
+        primary = next((metric for metric in self.metrics if metric.name == self.primary_metric), None)
+        if primary is None or primary.kind == "top_k_tokens":
+            raise ValueError("the primary metric must be a declared scalar metric")
+        captured: dict[str, dict[str, tuple]] = {}
+        edits = set()
+        for step in self.steps:
+            if step.name in _RESERVED_STEPS or step.name in captured or step.name in edits:
+                raise ValueError("step names must be distinct and not reserved")
+            operation = step.operation
+            if operation.kind == "capture":
+                keys = [capture_key(module) for module in operation.modules]
+                if len(set(keys)) != len(keys):
+                    raise ValueError("a capture step must not repeat a module")
+                captured[step.name] = {key: operation.positions for key in keys}
+                continue
+            edits.add(step.name)
+            reference = getattr(operation, "source", None) or getattr(operation, "baseline", None)
+            reference = reference or getattr(operation, "direction", None)
+            if reference is not None:
+                if reference.step not in captured or reference.tensor not in captured[reference.step]:
+                    raise ValueError("a step may reference only a tensor captured by an earlier step")
+                if operation.kind == "patch" and captured[reference.step][reference.tensor] != operation.positions:
+                    raise ValueError("a patch source must be captured at exactly the patched positions")
+        if self.primary_step not in edits:
+            raise ValueError("the primary step must be an intervention step")
+        if not set(self.control_steps) <= edits or self.primary_step in self.control_steps:
+            raise ValueError("control steps must be intervention steps other than the primary step")
+        return self
+
+
+class RecipeRun(FrozenModel):
+    kind: Literal["recipe"]
+    recipe: Recipe
+
+
 Operation = Annotated[
-    Capture | Patch | Ablate | Steer | FitProbe | Generate | WeightStats | TensorSlice | ModuleManifest | BackendParity,
+    Capture
+    | Patch
+    | Ablate
+    | Steer
+    | FitProbe
+    | Generate
+    | WeightStats
+    | TensorSlice
+    | ModuleManifest
+    | BackendParity
+    | RecipeRun,
     Field(discriminator="kind"),
 ]
 
@@ -450,6 +641,13 @@ class JobSpec(FrozenModel):
                 self.model.dtype != "bfloat16" or self.model.quantized
             ):
                 raise ValueError("canonical backend parity requires unquantized BF16")
+        if self.operation.kind == "recipe":
+            recipe_prompts = tuple(prompt.prompt_id for prompt in self.operation.recipe.prompts)
+            if recipe_prompts != self.inputs.prompt_ids:
+                raise ValueError("recipe prompts must match the job's ordered prompt IDs")
+            if self.experiment_stage not in {ExperimentStage.EXPLORATORY, ExperimentStage.CALIBRATION}:
+                raise ValueError("recipes are exploratory until the trusted evaluator exists")
+            requested = 0
         if requested > self.limits.max_generated_tokens:
             raise ValueError("prompt count times max_new_tokens exceeds the declared generation limit")
         if self.experiment_stage in {ExperimentStage.CONFIRMATORY, ExperimentStage.REPLICATION}:
@@ -545,4 +743,41 @@ class ApprovalNonce(FrozenModel):
             raise ValueError("expires_at must follow issued_at")
         if (self.expires_at - self.issued_at).total_seconds() > 900:
             raise ValueError("approval lifetime must not exceed 15 minutes")
+        return self
+
+
+class PinnedModel(FrozenModel):
+    repo: Literal["Qwen/Qwen3-1.7B-Base", "Qwen/Qwen3-1.7B"]
+    revision_sha: GitSHA
+
+
+class BudgetEnvelope(FrozenModel):
+    """A human-approved spending envelope for exploratory research compute.
+
+    Within an open, unexpired envelope the controller may approve disposable
+    research Pods without a per-start human action. Every per-Pod price, idle,
+    deadline, watchdog and deletion check still applies. Nothing renews or
+    extends an envelope; the controller sets ``approved_by`` from the admin
+    socket's peer identity.
+    """
+
+    envelope_id: Identifier
+    max_gpu_usd: Annotated[float, Field(strict=True, gt=0, le=20, allow_inf_nan=False)]
+    max_llm_usd: Annotated[float, Field(strict=True, ge=0, le=0, allow_inf_nan=False)]
+    max_gpu_usd_per_hour: Annotated[float, Field(strict=True, gt=0, lt=1.50, allow_inf_nan=False)]
+    max_wall_seconds_per_pod: Annotated[int, Field(strict=True, ge=60, le=900)]
+    allowed_models: Annotated[tuple[PinnedModel, ...], Field(min_length=1, max_length=16)]
+    allowed_stages: Annotated[tuple[Literal[ExperimentStage.EXPLORATORY], ...], Field(min_length=1, max_length=1)]
+    issued_at: UTCTimestamp
+    expires_at: UTCTimestamp
+    approved_by: Annotated[str, StringConstraints(strict=True, pattern=r"^uid:[0-9]{1,10}$")]
+
+    @model_validator(mode="after")
+    def bounded_lifetime(self) -> Self:
+        if self.expires_at <= self.issued_at:
+            raise ValueError("expires_at must follow issued_at")
+        if (self.expires_at - self.issued_at).total_seconds() > 7 * 86400:
+            raise ValueError("an envelope must expire within seven days")
+        if len(set(self.allowed_models)) != len(self.allowed_models):
+            raise ValueError("allowed models must be distinct")
         return self

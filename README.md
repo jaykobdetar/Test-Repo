@@ -22,7 +22,9 @@ The project is not yet an automated interpretability lab; the
   patching, ablation, steering, probe fitting, bounded generation and weight
   inspection. Hugging Face/PyTorch provides a reference for NNsight comparisons.
 - **Exposes research tools through MCP:** an agent can submit work, inspect results
-  and record hypotheses. A compute request does not itself authorize a GPU start.
+  and record hypotheses. A compute request does not itself authorize a GPU start:
+  a human approves it, or it fits an open human-issued budget envelope, and
+  every per-Pod price, deadline and deletion check still applies.
 - **Runs bounded jobs:** the worker and dispatcher enforce job limits and verify
   returned artifacts. Arbitrary CPU Python runs in a rootless Podman sandbox;
   arbitrary agent-written GPU Python is not supported.

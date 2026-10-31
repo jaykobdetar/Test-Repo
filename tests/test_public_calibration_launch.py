@@ -146,6 +146,8 @@ def copied_results(tmp_path):
     manifest = {
         "kind": "standalone_public_calibration",
         "status": "passed",
+        "suite": "backend_parity_v1",
+        "scientific_evidence": False,
         "installed_ledger_used": False,
         "heldout_data_used": False,
         "lifecycle_acceptance": False,

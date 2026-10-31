@@ -58,6 +58,8 @@ submitted as a canonical confirmatory finding.
 `JobSpec.operation` is a discriminated union on `kind`: `capture`, `patch`,
 `ablate`, `steer`, `fit_probe`, `generate`, `weight_stats`, `tensor_slice`, or
 `module_manifest`; `backend_parity` is restricted to engineering calibration.
+`recipe` runs a frozen multi-step `Recipe` in one loaded model; see
+[worker and dispatcher](worker-dispatcher.md#recipes-and-metrics).
 Module references constrain Qwen's 28 layers
 and 16 query heads; `positions` accepts bounded token indices or `"last"`.
 Tensor inputs reference `.safetensors` artifacts. File format, hash, tensor

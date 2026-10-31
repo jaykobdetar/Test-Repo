@@ -33,7 +33,7 @@ probe-controller = "probe_core.controller:main"
 include = ["probe_core*"]
 
 [tool.setuptools.package-data]
-probe_core = ["py.typed", "resources/*.json"]
+probe_core = ["py.typed", "resources/*.json", "resources/recipes/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

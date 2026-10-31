@@ -112,6 +112,16 @@ def create_server(client: UnixRPCClient) -> MCPServer:
         )
 
     @server.tool()
+    async def start_gpu_within_envelope(request_id: str) -> dict[str, Any]:
+        """Start a pending disposable research Pod within the open human-approved budget envelope.
+
+        The controller refuses when no envelope is open, the jobs' models or stage
+        are outside it, or the remaining budget cannot cover the Pod's worst case.
+        lab_status shows the envelope and its spend.
+        """
+        return await call("start_gpu_within_envelope", request_id=request_id)
+
+    @server.tool()
     async def stop_gpu(worker_id: str | None = None) -> dict[str, Any]:
         """Request compute shutdown without obtaining new start authority."""
         return await call("stop_gpu", worker_id=worker_id)

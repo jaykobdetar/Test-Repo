@@ -80,6 +80,34 @@ The controller's private artifact store holds each tensor file at `<raw SHA256>/
 
 The versioned endpoints are `POST /v1/jobs`, `GET /v1/jobs/{attempt_id}`, `POST /v1/jobs/{attempt_id}/cancel`, `GET /v1/jobs/{attempt_id}/artifacts/{retained_path}` and `PUT /v1/tensors/{raw_sha256}`. All require the bearer secret. Request/receipt bodies are defined by `ExecutionRequest` and `ExecutionReceipt`; unknown fields are rejected. Submission is asynchronous and idempotent for the same exact attempt. Status and downloads have controller-side byte limits; tensor uploads are streamed with an explicit bounded content length. No endpoint accepts Python code or pickle.
 
+### Recipes and metrics
+
+A `recipe` operation runs a versioned, frozen `Recipe` (`probe_core/schemas.py`,
+executed by `probe_core/recipe_runner.py`) inside one loaded model. Its steps are
+`capture`, `zero_ablate`, `mean_ablate`, `patch`, `steer` and the control
+`random_norm_matched`. A later step may consume an earlier capture by name
+(`{"step": ..., "tensor": "layer_14_mlp_output"}`) instead of an uploaded tensor
+artifact: a patch source must match the patched positions exactly; mean-ablation
+baselines and steering directions use the capture's mean over prompts and
+positions. `random_norm_matched` adds a seeded random vector whose norm equals
+each selected unmodified activation's norm, the same displacement size as zero
+ablation.
+
+Before any step, the runner computes native Hugging Face baseline logits and
+requires the configured backend's unhooked forward and an identity patch at every
+intervention target to reproduce them exactly. If any no-op check fails, it
+raises and reports no intervention result.
+
+Metrics are computed on the worker from last-real-token logits, per prompt,
+against the baseline: `logit_diff` (target minus alternative token logit),
+`log_prob` (target token), `kl_to_baseline` and `top_k_tokens`. Each prompt
+declares its target and alternative token IDs. `summary.json` reports every
+prompt, the baseline, condition and delta, and per-step means; the primary step
+and metric and the control steps are named in the recipe. Retained tensors are
+the baseline logits, every capture, and the logits of steps marked
+`retain_logits`. Recipes are limited to exploratory and calibration stages and
+are labelled `scientific_evidence: false`.
+
 ## Runtime enforcement and acceptance gate
 
 The supervisor launches each job in a separate process, clears inherited secrets, installs seccomp restrictions, applies CPU/RAM/file limits, and monitors wall time, resident memory and output bytes. Before CUDA initialization, seccomp denies `socket()` for every domain except `AF_UNIX`; local UNIX socket creation is required by the CUDA driver. It continues to deny every `connect()`, `sendto()`, and `sendmsg()` call, including on UNIX sockets and inherited descriptors. This does not exempt descriptor numbers or move CUDA initialization ahead of the filter. CUDA configuration additionally requires delegated cgroup-v2 memory, CPU and PID enforcement and applies the requested PyTorch VRAM allocation ceiling. On timeout or cancellation it kills the process group (and delegated cgroup where configured) and confirms termination before issuing a stopped receipt. Restart reconciliation fences persisted process identity with boot ID and process start ticks. A terminal state without a positive stop receipt cannot free a ledger execution slot.
