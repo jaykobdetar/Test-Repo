@@ -100,7 +100,10 @@ def test_complete_manifest_json_round_trip_and_deep_immutability(manifest_data):
         manifest.inputs.prompt_ids[0] = "changed"
 
 
-@pytest.mark.parametrize("section", [None, "run", "model", "software", "hardware", "inputs", "experiment", "controls", "results", "cost", "security"])
+@pytest.mark.parametrize(
+    "section",
+    [None, "run", "model", "software", "hardware", "inputs", "experiment", "controls", "results", "cost", "security"],
+)
 def test_manifest_rejects_unknown_fields_at_each_boundary(manifest_data, section):
     (manifest_data if section is None else manifest_data[section])["python"] = "print('execute')"
     with pytest.raises(ValidationError):
@@ -193,7 +196,21 @@ def test_exploration_can_be_unregistered_and_nonheldout(manifest_data):
     assert RunManifest.model_validate(manifest_data).run.hypothesis_id is None
 
 
-@pytest.mark.parametrize("path", ["../secret", "artifacts/../../secret", "/etc/passwd", "C:\\secret", "artifacts//file", "./file", "artifacts/./file", "artifacts/%2e%2e/secret", "file\x00", "artifacts/file?token=secret"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "../secret",
+        "artifacts/../../secret",
+        "/etc/passwd",
+        "C:\\secret",
+        "artifacts//file",
+        "./file",
+        "artifacts/./file",
+        "artifacts/%2e%2e/secret",
+        "file\x00",
+        "artifacts/file?token=secret",
+    ],
+)
 def test_artifact_paths_cannot_escape_or_hide_encoding(manifest_data, path):
     manifest_data["artifacts"][0]["path"] = path
     with pytest.raises(ValidationError):
@@ -255,7 +272,18 @@ def test_job_rejects_executable_or_out_of_range_operations(job_data, operation):
         JobSpec.model_validate(job_data)
 
 
-@pytest.mark.parametrize("field,value", [("max_runtime_seconds", 0), ("max_runtime_seconds", True), ("max_runtime_seconds", 86401), ("max_output_bytes", -1), ("max_cpu_cores", 33), ("max_vram_bytes", 49 * 1024**3), ("max_generated_tokens", 255)])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("max_runtime_seconds", 0),
+        ("max_runtime_seconds", True),
+        ("max_runtime_seconds", 86401),
+        ("max_output_bytes", -1),
+        ("max_cpu_cores", 33),
+        ("max_vram_bytes", 49 * 1024**3),
+        ("max_generated_tokens", 255),
+    ],
+)
 def test_declared_job_budgets_are_bounded(job_data, field, value):
     job_data["limits"][field] = value
     with pytest.raises(ValidationError):
@@ -274,7 +302,9 @@ def test_registered_canonical_job_can_declare_confirmation_or_replication(job_da
 
 
 @pytest.mark.parametrize("stage", ["confirmatory", "replication"])
-@pytest.mark.parametrize("path,value", [(("hypothesis_id",), None), (("model", "dtype"), "float32"), (("model", "quantized"), True)])
+@pytest.mark.parametrize(
+    "path,value", [(("hypothesis_id",), None), (("model", "dtype"), "float32"), (("model", "quantized"), True)]
+)
 def test_confirmatory_job_requires_hypothesis_and_canonical_checkpoint(job_data, stage, path, value):
     job_data["experiment_stage"] = stage
     mutate(job_data, path, value)
@@ -285,17 +315,33 @@ def test_confirmatory_job_requires_hypothesis_and_canonical_checkpoint(job_data,
 def test_hypothesis_registration_round_trip_and_terminal_evidence(hypothesis_data):
     draft = HypothesisRecord.model_validate(hypothesis_data)
     assert draft.status == HypothesisState.DRAFT
-    registered = {**draft.model_dump(), "status": "FROZEN", "frozen_at": datetime.now(timezone.utc), "preregistration_hash": HASH}
+    registered = {
+        **draft.model_dump(),
+        "status": "FROZEN",
+        "frozen_at": datetime.now(timezone.utc),
+        "preregistration_hash": HASH,
+    }
     frozen = HypothesisRecord.model_validate(registered)
     assert HypothesisRecord.model_validate_json(frozen.model_dump_json()) == frozen
     for status in ("TESTING", "REPLICATING", "FALSIFIED"):
         assert HypothesisRecord.model_validate({**registered, "status": status}).status.value == status
     with pytest.raises(ValidationError):
         HypothesisRecord.model_validate({**registered, "status": "VALIDATED"})
-    assert HypothesisRecord.model_validate({**registered, "status": "VALIDATED", "replication_ids": ["run-2"], "novelty_status": "N0"}).replication_ids == ("run-2",)
+    assert HypothesisRecord.model_validate(
+        {**registered, "status": "VALIDATED", "replication_ids": ["run-2"], "novelty_status": "N0"}
+    ).replication_ids == ("run-2",)
 
 
-@pytest.mark.parametrize("changes", [{"status": "FROZEN"}, {"status": "TESTING"}, {"frozen_at": "2026-09-19T12:00:00Z", "preregistration_hash": HASH}, {"novelty_status": "novel"}, {"predicted_direction": "uncertain"}])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"status": "FROZEN"},
+        {"status": "TESTING"},
+        {"frozen_at": "2026-09-19T12:00:00Z", "preregistration_hash": HASH},
+        {"novelty_status": "novel"},
+        {"predicted_direction": "uncertain"},
+    ],
+)
 def test_hypothesis_rejects_inconsistent_registration(hypothesis_data, changes):
     with pytest.raises(ValidationError):
         HypothesisRecord.model_validate({**hypothesis_data, **changes})
@@ -341,7 +387,21 @@ def test_approval_token_is_redacted_and_never_dumped(approval_data):
     assert "token" not in nonce.model_dump()
 
 
-@pytest.mark.parametrize("changes", [{"token": "short"}, {"token": "x" * 513}, {"max_runtime_seconds": 0}, {"price_ceiling_usd_per_hour": 1.5001}, {"price_ceiling_usd_per_hour": float("nan")}, {"price_ceiling_usd_per_hour": 0}, {"batch_hash": "main"}, {"issued_at": "2026-09-19T12:00:00"}, {"expires_at": "2026-09-19T11:59:00Z"}, {"expires_at": "2026-09-19T12:16:00Z"}])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"token": "short"},
+        {"token": "x" * 513},
+        {"max_runtime_seconds": 0},
+        {"price_ceiling_usd_per_hour": 1.5001},
+        {"price_ceiling_usd_per_hour": float("nan")},
+        {"price_ceiling_usd_per_hour": 0},
+        {"batch_hash": "main"},
+        {"issued_at": "2026-09-19T12:00:00"},
+        {"expires_at": "2026-09-19T11:59:00Z"},
+        {"expires_at": "2026-09-19T12:16:00Z"},
+    ],
+)
 def test_approval_rejects_unbounded_or_ambiguous_authority(approval_data, changes):
     with pytest.raises(ValidationError):
         ApprovalNonce.model_validate({**approval_data, **changes})

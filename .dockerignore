@@ -1,0 +1,12 @@
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!probe_core
+!probe_core/**
+!deploy
+!deploy/gpu
+!deploy/gpu/**
+**/__pycache__
+**/*.pyc

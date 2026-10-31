@@ -1,0 +1,21 @@
+[Unit]
+Description=Auto Interpretability Lab approved public job over SSH
+After=network-online.target probe-controller.service probe-supervised-submit.service
+Wants=network-online.target
+Requires=probe-controller.service probe-supervised-submit.service
+
+[Service]
+Type=simple
+User=probe-trusted
+Group=probe-trusted
+SupplementaryGroups=probe-ipc probe-ledger-read
+WorkingDirectory=/opt/probe-core
+ExecStart=/opt/probe-core/venv/bin/python -I /opt/probe-core/supervised/supervised-entry.py run --suite /etc/probe-supervised/suite.json
+TimeoutStopSec=90
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/probe-core /var/lib/probe-provider
+UMask=0077

@@ -1,0 +1,70 @@
+name: Build diagnostic image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/live-deployment]
+    paths:
+      - deploy/gpu/Dockerfile.diagnostic
+      - deploy/gpu/diagnose.py
+      - deploy/gpu/diagnostic-entrypoint.py
+      - .github/workflows/diagnostic-image.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish the no-model diagnostic
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/gpu/Dockerfile.diagnostic
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ghcr.io/${{ github.repository_owner }}/probe-mcp-diagnostic:git-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.description=No-model GPU and cgroup diagnostic for Probe-MCP
+      - name: Record immutable image reference
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/probe-mcp-diagnostic
+          DIGEST: ${{ steps.image.outputs.digest }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          record = {
+              "image": os.environ["IMAGE"],
+              "digest": os.environ["DIGEST"],
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "gpu_execution_tested": False,
+          }
+          Path("diagnostic-image.json").write_text(json.dumps(record, indent=2) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write(f"Built `{record['image']}@{record['digest']}`.\n\n")
+              stream.write("This build does not validate GPU execution or provider shutdown.\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-image-reference
+          path: diagnostic-image.json

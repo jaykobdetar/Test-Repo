@@ -11,8 +11,13 @@ from probe_core.schemas import JobSpec
 @pytest.fixture
 def research(tmp_path):
     data = json.loads((Path(__file__).parent / "fixtures/manifest.json").read_text())
-    spec = JobSpec(idempotency_key="research-1", model=data["model"], inputs=data["inputs"],
-                   operation={"kind": "generate"}, limits={"max_runtime_seconds": 10, "max_output_bytes": 1024})
+    spec = JobSpec(
+        idempotency_key="research-1",
+        model=data["model"],
+        inputs=data["inputs"],
+        operation={"kind": "generate"},
+        limits={"max_runtime_seconds": 10, "max_output_bytes": 1024},
+    )
     with Ledger(tmp_path / "research.sqlite") as ledger:
         yield ResearchService(ledger, ResearchPolicy(discovery_datasets=(spec.inputs.dataset_revision,))), spec
 
@@ -27,8 +32,21 @@ def test_submission_disconnect_safe_and_cancel(research):
     assert service.dispatch("query_runs", {})[0]["failure_kind"] == "cancelled"
 
 
-@pytest.mark.parametrize("method", ["approve", "approve_gpu_start", "consume_approval", "end_approval", "confirm_stopped",
-                                    "complete_job", "transition_hypothesis", "evaluate", "read_file", "execute_python"])
+@pytest.mark.parametrize(
+    "method",
+    [
+        "approve",
+        "approve_gpu_start",
+        "consume_approval",
+        "end_approval",
+        "confirm_stopped",
+        "complete_job",
+        "transition_hypothesis",
+        "evaluate",
+        "read_file",
+        "execute_python",
+    ],
+)
 def test_trusted_methods_absent_and_denials_audited(research, method):
     service, _ = research
     with pytest.raises(PermissionError):
@@ -92,10 +110,18 @@ def test_provision_request_validates_entire_batch_before_contacting_controller(r
     data["idempotency_key"] = "hidden-provision"
     data["inputs"]["dataset_revision"] = "sha256:" + "f" * 64
     hidden = service.ledger.submit_job(JobSpec.model_validate(data))
-    deployment = DeploymentSpec(gpu_model="SIMULATED", image_digest="sha256:" + "c" * 64,
-                                volume_id="simulated-volume", volume_gb=100, region="simulation")
-    arguments = {"deployment": deployment.model_dump(mode="json"),
-                 "job_ids": [visible.job_id, hidden.job_id], "max_runtime_seconds": 60}
+    deployment = DeploymentSpec(
+        gpu_model="SIMULATED",
+        image_digest="sha256:" + "c" * 64,
+        volume_id="simulated-volume",
+        volume_gb=100,
+        region="simulation",
+    )
+    arguments = {
+        "deployment": deployment.model_dump(mode="json"),
+        "job_ids": [visible.job_id, hidden.job_id],
+        "max_runtime_seconds": 60,
+    }
     with pytest.raises(PermissionError):
         service.dispatch("request_gpu_provision", arguments)
     assert cloud.calls == []

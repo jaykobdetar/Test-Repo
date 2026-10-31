@@ -1,0 +1,21 @@
+[Unit]
+Description=Probe fixed public calibration submission through the research identity
+After=probe-research.service
+Requires=probe-research.service
+
+[Service]
+Type=oneshot
+User=probe-research
+Group=probe-research
+WorkingDirectory=/opt/probe-core
+ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.gpu_acceptance_runner submit --config /etc/probe-calibration/acceptance.json
+TimeoutStartSec=120
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/probe-calibration-submit
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

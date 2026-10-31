@@ -1,63 +1,44 @@
-# Auto Interpretability Lab: local implementation verification
+# Auto Interpretability Lab: Interpreting validation evidence
 
-This is the retained acceptance record for the local implementation described
-in [the project overview](../README.md) and [implementation scope](../IMPLEMENTATION.md).
-It covers real CPU model execution and a simulated cloud provider. The separate
-RunPod deployment effort lives in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1)
-on `feat/live-deployment`; its live acceptance requires its own evidence.
+[Project overview](../README.md) · [Status](../STATUS.md) · [Implementation boundaries](../IMPLEMENTATION.md)
 
-The full local acceptance run on September 19, 2026 completed with **429 passed,
-0 failed, 0 errors, and 0 skipped** in 157.41 seconds. It tested source commit
-`a639716cec57ecc5c4afd82a4baf25ebb74ce4e9`, before the public README and MIT license
-were added. All 277 original core tests are included in this count.
+This guide explains what each kind of evidence can and cannot establish. It
+does not record current results: those are in [STATUS.md](../STATUS.md), and
+earlier evidence records are in [project history](history/README.md).
 
-This count belongs to that source commit and environment, not every later
-checkout. The project rebrand does not change the recorded results or the
-existing `probe` runtime identifiers.
+## Separate claims
 
-| Area | Evidence |
-| --- | --- |
-| Ledger and audit | Transactions, concurrent access, leases, approvals, cancellation, recovery, immutable manifests, sealed artifacts, and hash-chain integrity |
-| Controller | Simulated provisioning/start/stop, price and idle-cost gates, separate approval authority, durable deadlines, and independent watchdog process |
-| Worker and dispatcher | Real tiny-Qwen CPU operations, HF/NNsight parity, token/head/padding semantics, thinking-template handling, authenticated loopback HTTP, separate execution processes, and a controller-driven dispatcher daemon |
-| Artifact reuse | Captured tensors replayed by patching; registered CPU direction transferred before steering; immutable artifacts reused after temporary outputs were removed |
-| Research interface | Real stdio MCP subprocess and reconnect, Unix peer identity checks, restricted methods, corpus/stage checks, and private-job access denial |
-| CPU sandbox | Nine real integration tests covering network/socket denial, secret/GPU absence, read-only mounts, resource/time/output bounds, cancellation, approved-job broker, scientific libraries, and retained artifact reuse |
-| Installed package | Separate offline installation; 15 module imports, five module CLIs, three console scripts, matching packaged source/policy bytes, and an approved-job/artifact/audit lifecycle |
+Source presence, a passing test, an installed acceptance gate, a live GPU run
+and a scientific result are separate claims. Each needs its own evidence.
 
-The native environment used Python 3.13.13, SQLite 3.53.1, Pydantic 2.13.5,
-PyTorch 2.14.0, Transformers 5.17.0, NNsight 0.7.0, safetensors 0.8.0, MCP 2.2.0,
-and pytest 9.1.1. The dependency graph is pinned in `uv.lock`.
+| Evidence | What it can establish | What it cannot establish |
+| --- | --- | --- |
+| Ordinary CI (`uv run --locked python -m pytest -q`) | The code's local contracts on CPU with a simulator provider and a tiny random Qwen3 | Containment, live GPU behaviour, canonical checkpoint parity or any scientific claim. Skipped sandbox cases are not evidence. |
+| Real sandbox gate (`PROBE_SANDBOX_REQUIRED=1`) | Rootless Podman containment on the host that ran it | Containment under a different host or service profile |
+| Installed acceptance receipts | The exact installed bytes and service accounts behaved as tested | Behaviour of later source that is not installed |
+| Supervised GPU run with retained manifest | Numerical parity for the exact model, image, prompts and suite recorded in its manifest | Managed-worker resource limits, cancellation, recovery, replacement, hostile-code containment or host-loss shutdown |
+| Exploratory research report | What happened on the declared public prompts under the declared recipe | Held-out confirmation, replication or a validated finding |
+| Trusted evaluator replication (future) | Promotion of a frozen hypothesis to VALIDATED or FALSIFIED | Anything outside the frozen recipe and held-out data |
 
-To run the current checkout's suite, follow the
-[development commands](../README.md#install-and-run-the-development-tests).
-Record its source commit, lock file and test output separately. A different
-checkout or host may produce a different count, especially when sandbox
-integration tests are skipped.
+A result's manifest must record exact model revision and weight hashes, dataset
+hash, code commit and image digest. Failed runs are retained and reported, never
+erased or replaced by a later success.
 
-The full gate required the real sandbox environment using
-`PROBE_SANDBOX_REQUIRED=1`. It ran in a temporary unprivileged user service with
-delegated cgroup v2 and Ubuntu's existing Podman AppArmor profile. The pinned
-scientific image and build-input hashes are recorded in
-[`deploy/sandbox/image-lock.json`](../deploy/sandbox/image-lock.json). No containers
-remained after the run.
+## Reproducing checks
 
-## Limits of this evidence
+Run the general suite on the branch you intend to test:
 
-The model tests used a randomly initialized tiny Qwen3 on CPU. The provider
-backend was a simulator. No cloud resources were created, no GPU was started,
-and the example permanent services were not installed. Live SSH, canonical
-checkpoint parity, CUDA limits, and deployment under final service identities
-still require their own acceptance runs.
+```sh
+uv sync --locked --all-extras
+uv run --locked python -m pytest -q
+```
 
-There is no blind scientific calibration result, hidden evaluator, or validated
-scientific finding. Confirmation/replication execution is intentionally refused
-until the trusted evaluator is implemented.
+To require the real sandbox checks after building its pinned image, follow the
+[sandbox guide](../deploy/sandbox/README.md). The GitHub workflow runs the general
+suite and builds the package; it does not configure the real Podman gate.
 
-The GitHub workflow runs the general suite and builds the package. It does not
-configure the mandatory real Podman gate. Skipped sandbox cases in ordinary CI
-are not evidence that containment works on a deployment host.
+## Where evidence lives
 
-See the [sandbox guide](../deploy/sandbox/README.md) for reproducing containment
-checks and the [historical core report](../VALIDATION.md) for the earlier
-277-test milestone.
+Public evidence files are in [`docs/evidence/`](evidence/). Private credentials,
+provider responses and administrator receipts stay with the operator's private
+deployment records and are only named, never copied, in this repository.

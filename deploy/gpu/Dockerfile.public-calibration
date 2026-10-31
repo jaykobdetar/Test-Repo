@@ -1,0 +1,15 @@
+# Reuse verified model/dependency layers; this profile runs fixed public tests.
+ARG WORKER_IMAGE
+FROM ${WORKER_IMAGE}
+ARG SOURCE_COMMIT
+# PyTorch's native Triton kernels compile a small C launcher at runtime.
+# The slim diagnostic parent deliberately contains no compiler toolchain.
+RUN apt-get -o Acquire::Check-Valid-Until=false update && \
+    apt-get install -y --no-install-recommends build-essential && \
+    rm -rf /var/lib/apt/lists/* && \
+    printf '#include <stdlib.h>\nint main(void) { return EXIT_SUCCESS; }\n' > /tmp/compiler-check.c && \
+    cc /tmp/compiler-check.c -o /tmp/compiler-check && /tmp/compiler-check && \
+    rm /tmp/compiler-check.c /tmp/compiler-check
+COPY deploy/gpu/public-calibration.py deploy/gpu/public-calibration-entrypoint.py /opt/probe/
+LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
+ENTRYPOINT ["/opt/probe-core/venv/bin/python", "-I", "/opt/probe/public-calibration-entrypoint.py"]

@@ -32,11 +32,27 @@ _FIELDS = {"sequence", "timestamp", "event_type", "payload", "previous_hash", "h
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 _SAFE_TOKEN_KEYS = {
-    "token_generation", "max_new_tokens", "min_new_tokens", "max_tokens",
-    "min_tokens", "num_tokens", "token_count", "token_counts", "token_ids",
-    "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens",
-    "total_tokens", "generated_tokens", "generation_tokens", "tokens_per_second",
-    "eos_token_id", "bos_token_id", "pad_token_id", "decoder_start_token_id",
+    "token_generation",
+    "max_new_tokens",
+    "min_new_tokens",
+    "max_tokens",
+    "min_tokens",
+    "num_tokens",
+    "token_count",
+    "token_counts",
+    "token_ids",
+    "input_tokens",
+    "output_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "generated_tokens",
+    "generation_tokens",
+    "tokens_per_second",
+    "eos_token_id",
+    "bos_token_id",
+    "pad_token_id",
+    "decoder_start_token_id",
 }
 
 
@@ -89,8 +105,7 @@ def canonical_json(value: Any) -> str:
     Lone Unicode surrogates, non-string keys, tuples and custom types are rejected.
     """
     _check_json(value, set())
-    result = json.dumps(value, ensure_ascii=False, sort_keys=True,
-                        separators=(",", ":"), allow_nan=False)
+    result = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     result.encode("utf-8", errors="strict")
     return result
 
@@ -105,17 +120,32 @@ def _key_words(key: str) -> tuple[str, str]:
 
 def _sensitive_key(key: str) -> bool:
     normalized, compact = _key_words(key)
-    if any(part in compact for part in (
-        "apikey", "password", "passwd", "secret", "credential", "privatekey",
-        "authorization", "authorisation",
-    )):
+    if any(
+        part in compact
+        for part in (
+            "apikey",
+            "password",
+            "passwd",
+            "secret",
+            "credential",
+            "privatekey",
+            "authorization",
+            "authorisation",
+        )
+    ):
         return True
     if normalized in _SAFE_TOKEN_KEYS:
         return False
     words = normalized.split("_")
-    return ("token" in words or "tokens" in words or
-            compact.endswith(("token", "tokens")) or
-            (compact.startswith("token") and not compact.startswith(("tokenizer", "tokeniser", "tokenization", "tokenisation"))))
+    return (
+        "token" in words
+        or "tokens" in words
+        or compact.endswith(("token", "tokens"))
+        or (
+            compact.startswith("token")
+            and not compact.startswith(("tokenizer", "tokeniser", "tokenization", "tokenisation"))
+        )
+    )
 
 
 def validate_audit_payload(payload: dict[str, Any]) -> None:
@@ -149,8 +179,9 @@ def _timestamp(timestamp: datetime) -> str:
     return timestamp.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def make_record(sequence: int, previous_hash: str, event_type: str,
-                payload: dict[str, Any], timestamp: datetime) -> dict[str, Any]:
+def make_record(
+    sequence: int, previous_hash: str, event_type: str, payload: dict[str, Any], timestamp: datetime
+) -> dict[str, Any]:
     """Build a detached record; the first record has sequence 1 and GENESIS_HASH."""
     if type(sequence) is not int or sequence < 1:
         raise ValueError("Audit sequence must be a positive integer")
@@ -229,7 +260,9 @@ class AuditLog:
         try:
             for component in self.path.parts[1:-1]:
                 try:
-                    child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=current)
+                    child = os.open(
+                        component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=current
+                    )
                 except FileNotFoundError:
                     if not create:
                         raise
@@ -238,7 +271,9 @@ class AuditLog:
                         os.fsync(current)
                     except FileExistsError:
                         pass
-                    child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=current)
+                    child = os.open(
+                        component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=current
+                    )
                 os.close(current)
                 current = child
             return current
@@ -250,10 +285,16 @@ class AuditLog:
     def _check_file(fd: int, parent: int, name: str) -> None:
         opened = os.fstat(fd)
         linked = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or
-                opened.st_uid != os.geteuid() or opened.st_mode & 0o022 or
-                (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)):
-            raise AuditPathError("Audit path must reference an owned, unshared regular file without group/world write permission")
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_uid != os.geteuid()
+            or opened.st_mode & 0o022
+            or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+        ):
+            raise AuditPathError(
+                "Audit path must reference an owned, unshared regular file without group/world write permission"
+            )
 
     @contextmanager
     def _locked(self, create: bool) -> Iterator[tuple[int, int] | None]:
@@ -322,8 +363,7 @@ class AuditLog:
         os.fsync(fd)
         os.fsync(parent)
 
-    def verify(self, *, expected_sequence: int | None = None,
-               expected_hash: str | None = None) -> list[dict[str, Any]]:
+    def verify(self, *, expected_sequence: int | None = None, expected_hash: str | None = None) -> list[dict[str, Any]]:
         """Return verified records; optionally compare a trusted external chain tip."""
         with self._locked(create=False) as opened:
             records = [] if opened is None else self._read(opened[0])
@@ -332,24 +372,29 @@ class AuditLog:
         if expected_hash is not None and (type(expected_hash) is not str or _HASH.fullmatch(expected_hash) is None):
             raise ValueError("Expected hash must be a lowercase SHA-256 digest")
         tip = records[-1]["hash"] if records else GENESIS_HASH
-        if ((expected_sequence is not None and len(records) != expected_sequence) or
-                (expected_hash is not None and not hmac.compare_digest(tip, expected_hash))):
+        if (expected_sequence is not None and len(records) != expected_sequence) or (
+            expected_hash is not None and not hmac.compare_digest(tip, expected_hash)
+        ):
             raise AuditIntegrityError("Audit chain does not match the trusted expected tip")
         return records
 
-    def append(self, event_type: str, payload: dict[str, Any],
-               timestamp: datetime | None = None) -> dict[str, Any]:
+    def append(self, event_type: str, payload: dict[str, Any], timestamp: datetime | None = None) -> dict[str, Any]:
         """Verify the complete file, append one event, and fsync before returning."""
         # Validate and detach before creating/opening files or acquiring their locks.
-        draft = make_record(1, GENESIS_HASH, event_type, payload,
-                            timestamp if timestamp is not None else datetime.now(timezone.utc))
+        draft = make_record(
+            1, GENESIS_HASH, event_type, payload, timestamp if timestamp is not None else datetime.now(timezone.utc)
+        )
         with self._locked(create=True) as opened:
             assert opened is not None
             fd, parent = opened
             records = self._read(fd)
-            record = make_record(len(records) + 1, records[-1]["hash"] if records else GENESIS_HASH,
-                                 draft["event_type"], draft["payload"],
-                                 datetime.fromisoformat(draft["timestamp"].replace("Z", "+00:00")))
+            record = make_record(
+                len(records) + 1,
+                records[-1]["hash"] if records else GENESIS_HASH,
+                draft["event_type"],
+                draft["payload"],
+                datetime.fromisoformat(draft["timestamp"].replace("Z", "+00:00")),
+            )
             self._write(fd, parent, [record])
             return record
 
@@ -373,7 +418,7 @@ class AuditLog:
             for existing_record, source_record in zip(existing, authoritative):
                 if canonical_json(existing_record) != canonical_json(source_record):
                     raise AuditIntegrityError("Audit projection conflicts with the authoritative chain")
-            missing = authoritative[len(existing):]
+            missing = authoritative[len(existing) :]
             # Also fsync idempotent retries: a previous fsync failure can leave
             # complete bytes visible without their durability being established.
             self._write(fd, parent, missing)

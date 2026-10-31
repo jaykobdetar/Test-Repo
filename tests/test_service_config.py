@@ -6,9 +6,14 @@ from probe_core.research_service import ServiceConfig, load_config
 
 
 def make_config(tmp_path, **changes):
-    values = dict(ledger_path=str(tmp_path / "research.sqlite"), socket_path=str(tmp_path / "research.sock"),
-                  service_uid=os.geteuid(), research_uid=os.geteuid() + 1, socket_gid=os.getegid(),
-                  policy={"discovery_datasets": []})
+    values = dict(
+        ledger_path=str(tmp_path / "research.sqlite"),
+        socket_path=str(tmp_path / "research.sock"),
+        service_uid=os.geteuid(),
+        research_uid=os.geteuid() + 1,
+        socket_gid=os.getegid(),
+        policy={"discovery_datasets": []},
+    )
     values["input_artifact_root"] = str(tmp_path / "inputs")
     values["admin_uid"] = os.geteuid() + 2
     values.update(changes)

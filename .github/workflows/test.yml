@@ -1,5 +1,8 @@
 name: Verify Probe
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 jobs:
   cpu-integration:
     runs-on: ubuntu-24.04
@@ -14,3 +17,55 @@ jobs:
       - run: uv sync --locked --all-extras
       - run: uv run --locked python -m pytest -q
       - run: uv build
+
+  pr-documentation-and-format:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require STATUS.md or docs/ with probe_core/ or deploy/ changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DOCS_NOT_NEEDED: ${{ contains(github.event.pull_request.labels.*.name, 'docs-not-needed') }}
+        run: |
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          code=0 docs=0
+          for path in "${changed[@]}"; do
+            case "$path" in
+              probe_core/*|deploy/*) code=1 ;;
+            esac
+            case "$path" in
+              STATUS.md|docs/*) docs=1 ;;
+            esac
+          done
+          if [ "$code" = 0 ]; then
+            echo "No probe_core/ or deploy/ changes."
+          elif [ "$docs" = 1 ]; then
+            echo "probe_core/ or deploy/ changed together with STATUS.md or docs/."
+          elif [ "$DOCS_NOT_NEEDED" = true ]; then
+            echo "probe_core/ or deploy/ changed without documentation; docs-not-needed label applied."
+          else
+            echo "::error::This PR changes probe_core/ or deploy/ without updating STATUS.md or docs/. Update them in the same PR (see CONTRIBUTING.md) or apply the docs-not-needed label."
+            exit 1
+          fi
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.21"
+          enable-cache: false
+      - run: uv python install 3.13
+      - run: uv sync --locked --extra lint
+      - name: Check formatting of changed Python files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$BASE_SHA...$HEAD_SHA" -- '*.py')
+          if [ "${#files[@]}" = 0 ]; then
+            echo "No changed Python files."
+            exit 0
+          fi
+          uv run --locked ruff format --check -- "${files[@]}"

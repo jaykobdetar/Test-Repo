@@ -1,0 +1,16 @@
+[Unit]
+Description=Probe retain two independently verified local archives
+
+[Service]
+Type=oneshot
+User=probe-trusted
+Group=probe-backup-read
+EnvironmentFile=/etc/probe-core/backup.env
+ExecStart=/opt/probe-core/venv/bin/python -I -m probe_core.backup prune-verified --outbox /var/lib/probe-backups/outbox --receipts /var/lib/probe-backups/receipts --drive-folder-id ${DRIVE_FOLDER_ID} --keep 2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/probe-backups/receipts
+ReadWritePaths=/var/lib/probe-backups/outbox
+UMask=0077

@@ -1,15 +1,17 @@
-# Auto Interpretability Lab: local implementation and acceptance
+# Auto Interpretability Lab: Implementation and acceptance boundaries
 
-This document describes the Phase 3–5 implementation on `main`. The supplied
-compute backend is explicitly simulated: these services provision no paid GPU.
-The worker executes real HF/PyTorch models on CPU for acceptance. The separate
-Phase 6 RunPod work is in [draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1)
-on `feat/live-deployment`, outside the implementation described here.
+[Project overview](README.md) · [Status](STATUS.md) · [Validation](docs/validation.md)
 
-Start with the [project overview](README.md) for setup and navigation. Use the
-[local verification report](docs/validation.md) to distinguish recorded test
-results from the requirements and remaining work below. The project display
-name does not change existing `probe-core`, `probe_core` or `probe-mcp` identifiers.
+This guide describes the deployment branch, including
+the guarded RunPod adapter, installed service boundaries, pinned worker images
+and backup tooling. The public main branch began with the smaller local foundation;
+its earlier milestones are recorded in [the historical core report](docs/history/2026-09-19-phase-2-verification.md).
+Package names, Python imports, service accounts and paths retain their `probe-*`
+identifiers despite the Auto Interpretability Lab display name.
+
+This guide describes design boundaries and requirements, not current standing.
+What has passed, what is unevidenced and what is deferred is recorded only in
+[STATUS.md](STATUS.md).
 
 ## Boundaries
 
@@ -59,9 +61,12 @@ do not prove Phase 5 complete.
   responses enter reconciliation; they never cause a blind second creation/start.
 - Watchdog operation is independent of the controller process. Stop requests
   remain pending until provider readback confirms shutdown. Expiry alone is not
-  a shutdown receipt. Idle work stops after five minutes.
-- Provider credentials belong in the controller's private configuration when
-  Phase 6 adds a real adapter. No credential is needed for this simulator.
+  a shutdown receipt. Ordinary idle work stops after five minutes. Initial
+  startup of one never-dispatched disposable calibration job uses the same fixed
+  dispatch cutoff as the runner, within the original approval deadline.
+- Provider credentials belong only to the trusted controller and its independent
+  stop broker. The watchdog uses a narrow Unix socket instead of holding a full
+  provider key. No credential is needed for the simulator.
 
 ## Phase 4 requirements
 
@@ -112,21 +117,14 @@ safetensors include exact `TensorArtifact` references usable in later jobs.
 so a captured activation or CPU-generated direction survives worker replacement.
 The dispatcher verifies and transfers those retained tensor inputs before execution.
 
-## Remaining deployment stages
+## Remaining work
 
-The separate Phase 6 deployment work must supply and verify the real RunPod adapter, secured
-service identities and credential provisioning on the chosen host, pinned worker
-image, reviewed storage strategy and exact scientific checkpoint revisions, real GPU parity,
-and a verified stopped state. Phase 7 supplies the private evaluator and its
-scientific promotion rules. Neither is represented as implemented by the local
-simulator or CPU acceptance tests.
+The ordering of remaining work is set by [REDIRECT-PLAN.md](REDIRECT-PLAN.md)
+and its progress by [STATUS.md](STATUS.md). The selected GPU storage design uses
+disposable Pod disks and immutable image assets; it supersedes the original
+network-volume proposal. Local simulator and CPU tests do not supply either
+scientific or live GPU evidence.
 
-Track deployment progress and its branch-specific acceptance evidence in
-[draft PR #1](https://github.com/jaykobdetar/auto-interpretability-lab/pull/1).
-That branch's current storage choice uses disposable Pod disks and baked immutable
-public assets, without a network volume.
-The requirements above do not certify that deployment or its GPU results.
-
-The agreed v1 CPU sandbox plus fixed GPU primitives deliberately does not execute
-arbitrary agent-written Python on the GPU. That original report capability needs
-its own later design and containment acceptance.
+The v1 CPU sandbox plus fixed GPU primitives deliberately does not execute
+arbitrary agent-written Python on the GPU. Changing that requires a reviewed
+threat model and its own containment acceptance (redirect plan, Milestone 5).
