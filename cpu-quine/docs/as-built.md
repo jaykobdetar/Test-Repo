@@ -168,7 +168,7 @@ to the debug port ($FFFE); check 10 compares them with the model.
 | Watch | if the guest sits on `DBNE` to itself, skip it; then draw 64 consecutive guest cycles, each held 0.25 s by a counted delay (47 × 65,536 iterations of `DBNE`) |
 | Replay | step instruction by instruction, drawing a frame every 3 × 65,536 guest cycles of real work (about 10 frames/s), for 433 frames |
 
-The loop measures 16.1 s + 43.9 s = 60.0 s. Parameters are build-time defines
+The loop measures 16.1 s + 44.0 s = 60.1 s. Parameters are build-time defines
 (`quine/build.py`, `ROM_PARAMS`).
 
 ### ROM use
