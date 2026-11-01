@@ -1,0 +1,24 @@
+# Check 2: the synthesized gate netlist is formally equivalent to the RTL.
+# Registers are matched by name; equiv_induct proves the matched next-state
+# and output functions equal for every reachable and unreachable state.
+read_verilog build/core.v
+proc
+opt_clean
+rename core gold
+design -stash gold
+read_verilog build/core_gates.v
+read_verilog build/cells_sim.v
+hierarchy -top core
+proc
+flatten
+opt_clean
+rename core gate
+design -stash gate
+design -copy-from gold -as gold gold
+design -copy-from gate -as gate gate
+equiv_make gold gate equiv
+hierarchy -top equiv
+async2sync
+equiv_simple -seq 1
+equiv_induct -seq 1
+equiv_status -assert

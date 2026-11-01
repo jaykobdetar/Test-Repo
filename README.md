@@ -162,6 +162,13 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing code. Changes to
 guide in the same commit, and superseded text moves to
 [docs/history/](docs/history/README.md).
 
+## Other projects in this repository
+
+[cpu-quine/](cpu-quine/README.md) is an independent project: a 16-bit CPU whose
+only program replays its own execution and draws every transistor. It has its
+own build, checks, CI workflow and [status](cpu-quine/STATUS.md), and shares no
+code with the lab.
+
 ## License
 
 [MIT](LICENSE). Model weights and third-party dependencies retain their own licenses.

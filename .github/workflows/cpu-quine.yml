@@ -1,0 +1,27 @@
+name: CPU-Quine
+on:
+  push:
+    paths:
+      - "cpu-quine/**"
+      - ".github/workflows/cpu-quine.yml"
+  pull_request:
+    paths:
+      - "cpu-quine/**"
+      - ".github/workflows/cpu-quine.yml"
+jobs:
+  verification-ladder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: cpu-quine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Yosys and Verilator
+        run: sudo apt-get update && sudo apt-get install -y yosys verilator
+      - name: Build and run checks 1-8 and 10
+        run: make -j4 check
+      - name: ISA reference matches quine/arch.py
+        run: |
+          python3 -m quine.isadoc > /tmp/isa.md
+          diff -u docs/isa.md /tmp/isa.md

@@ -1,0 +1,16 @@
+# Map the core onto the ten-cell library.  Run from cpu-quine/ (see Makefile).
+read_verilog build/core.v
+read_liberty -lib build/cells.lib
+hierarchy -check -top core
+# No FSM recoding: the flip-flops must stay the registers named in arch.py.
+synth -top core -flatten -nofsm
+# The library has only DFFR: unmap enables into logic, then map the flops.
+dfflegalize -cell $_DFF_PN0_ 0
+dfflibmap -liberty build/cells.lib
+# Area-oriented mapping (area = transistor count).  The classic mapper needs no buffer cell.
+abc -liberty build/cells.lib -script +strash;dc2;strash;dch,-f;amap;topo
+opt_clean
+check -assert -noinit
+stat -liberty build/cells.lib
+write_json build/core_gates.json
+write_verilog -noattr build/core_gates.v
