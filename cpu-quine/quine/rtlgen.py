@@ -49,11 +49,15 @@ def generate() -> str:
     w("    output reg  [15:0] addr,   // address for the read/write of this cycle")
     w("    output wire        space,  // 0 = ROM, 1 = RAM")
     w("    output wire        we,     // write enable (RAM space only)")
-    w("    output reg  [15:0] wdata")
+    w("    output reg  [15:0] wdata,")
+    order = ", ".join(n for n, _ in reversed(arch.REGISTERS))
+    total = sum(wd for _, wd in arch.REGISTERS)
+    w(f"    output wire [{total - 1}:0] state  // observation only: {{{order}}}")
     w(");")
     for name, wd in arch.REGISTERS:
         w(f"    reg [{wd - 1}:0] {name};")
     w("    wire fz = F[0], fn = F[1], fc = F[2];")
+    w(f"    assign state = {{{', '.join(n for n, _ in reversed(arch.REGISTERS))}}};")
     w("")
     w(f"    // ---- control word ({width} bits) ----")
     for name, pos, fw, vals in layout:

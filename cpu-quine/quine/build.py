@@ -68,6 +68,7 @@ def rom(*overrides):
     import struct
 
     (BUILD / "rom.bin").write_bytes(struct.pack(f"<{len(prog.rom)}H", *prog.rom))
+    (BUILD / "rom.hex").write_text("".join(f"{w:04x}\n" for w in prog.rom))
     (BUILD / "rom.sym").write_text(
         "".join(f"{v:04x} {k}\n" for k, v in sorted(prog.symbols.items(), key=lambda kv: kv[1]))
     )

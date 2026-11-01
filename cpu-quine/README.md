@@ -15,9 +15,10 @@ This directory holds the whole machine as a host-side build: the microarchitectu
 description, the generated RTL, the ten-cell transistor library, the synthesized
 netlist, the replay engine in the CPU's own assembly, cycle-exact models, and a
 verification ladder that ties every link from transistors to pixels together. It
-corresponds to phases 1 and 2 of the [design](docs/design.md); nothing here has
-run on an FPGA yet. [STATUS.md](STATUS.md) says exactly what works and how it was
-checked.
+covers phases 1 and 2 of the [design](docs/design.md) and the start of phase 3:
+the FPGA system top level, checked in simulation and placed and routed for an
+ECP5. Nothing has run on a board yet. [STATUS.md](STATUS.md) says exactly what
+works and how it was checked.
 
 ## Quick start
 
@@ -27,9 +28,10 @@ Needs Linux with `python3` (standard library only), `gcc`, `g++`, `make`,
 ```sh
 cd cpu-quine
 make            # RTL, synthesis, netlist checks, ROM image, C models, emulator
-make check      # the verification ladder, about a minute on 4 cores
+make check      # the verification ladder, about two minutes on 4 cores (make -j4)
 make frames     # PNG screenshots of the running machine in build/frames/
 make measure    # profile, page schedule, 13 simulated minutes, nesting timeline
+make fpga       # ECP5 synthesis and place-and-route (needs nextpnr-ecp5)
 ```
 
 The emulator runs the physical machine at roughly 0.7-1 billion cycles per
@@ -67,7 +69,8 @@ quine/arch.py ──► rtlgen ──► build/core.v ──► Yosys (rtl/synth
 | `quine/isadoc.py`, `quine/png.py` | ISA reference generator; PBM-to-PNG converter |
 | `engine/main.s` | the hand-written part of the replay engine |
 | `rtl/synth.ys`, `rtl/equiv.ys` | synthesis onto the library; formal equivalence (check 2) |
-| `csrc/` | the memory system (`qmachine.h`), the system emulator and checks (`emu.c`), switch-level chip check, model and RTL lockstep checks |
+| `rtl/system.v`, `quine/sysgen.py` | FPGA system top level; its generated CRC-32 matrix |
+| `csrc/` | the memory system (`qmachine.h`), the system emulator and checks (`emu.c`), switch-level chip check, model and RTL lockstep checks, the FPGA system testbench (`check_system.cpp`) |
 | `docs/` | as-built description, measurements, ISA reference, the original design |
 
 ## Documentation

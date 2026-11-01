@@ -11,7 +11,8 @@ Last updated: November 1, 2026.
 **Summary.** Phases 1 and 2 of the [design](docs/design.md) are built and
 verified on the host: the core, its transistor netlist, the replay engine in the
 CPU's own assembly, and the quine property itself, checked three levels deep.
-Nothing has run on an FPGA; phase 3 has not started.
+Phase 3 has started: the FPGA system top level is written and checked in
+simulation, and it places and routes for an ECP5. Nothing has run on a board.
 
 ## Works and verified
 
@@ -28,8 +29,10 @@ Nothing has run on an FPGA; phase 3 has not started.
 | Quine property (check 7) | real show script, 30 machine-seconds: level 2 equals the model at 146,927 boundaries and 66 watched cycles, its whole RAM at 21 comparisons. Fast-paced script, 60 machine-seconds: level 3 at 13,460 boundaries and 6 watched cycles, its whole RAM at 18 comparisons. Holds across self-resets (468 epochs) | `make check6-8`, `check6-8-deep`, `check6-8-epochs` |
 | Memory hygiene (check 8) | no read of an unwritten working-set word, no access to an unallocated page; 21 own pages per level | same |
 | Drawn frames (check 10) | every drawn frame's net-state hash equals the C expansion of the model at that guest cycle | `make check10` |
-| Measured costs | 25.9 instructions per replayed instruction; replay cost 24.5 cycles per guest cycle; drawn frame 5.3 ms; 60.0 s show loop | [measurements](docs/measurements.md), `make measure` |
-| Nesting timeline | levels 2, 3 and 4 appear at 16.3 s, 28.3 s and 7.5 min (measured in the emulator); later levels and the epoch length are extrapolated | [measurements](docs/measurements.md) |
+| Measured costs | 25.9 instructions per replayed instruction; replay cost 24.5 cycles per guest cycle; drawn frame 5.4 ms; 60.1 s show loop | [measurements](docs/measurements.md), `make measure` |
+| Nesting timeline | levels 2, 3, 4 and 5 appear at 16.3 s, 28.3 s, 7.5 min and 3.2 h (measured in a 6.7-hour emulator run); level 6 and the epoch length are extrapolated | [measurements](docs/measurements.md), `make measure-long` |
+| FPGA system RTL in simulation (check 9) | `rtl/system.v` (memories, reset controller with RAM clear, CRC observer, debug FIFO, UART, VGA) in Verilator with the model in lockstep: every flip-flop, every CRC and debug word decoded from the UART line, every VGA frame captured while the framebuffer was unchanged; 3×10⁷ cycles of the ROM and of a ROM that self-resets 9 times | `make check9-sim` |
+| FPGA implementation | Yosys and nextpnr for an LFE5U-45F: 61 of 108 block RAMs; the core clock meets 50 MHz at speed grade 8 (52.4 MHz) but not at grade 6 (39.2 MHz) | `make fpga`; [measurements](docs/measurements.md#fpga-design-phase-3) |
 
 ## Implemented but unverified
 
@@ -37,21 +40,22 @@ Nothing has run on an FPGA; phase 3 has not started.
 | --- | --- |
 | Guest self-reset (`guest_reset` in `engine/main.s`) | no run reaches it: a guest reaches its out-of-memory point only after its host has reset |
 | Level 4 and deeper replay correctness | check 7 reaches level 3; deeper levels run the same code but are not compared |
-| Epoch length (about 5.7 months) | extrapolated from 13 simulated minutes with `quine/budget.py`; no run has reached an epoch end on the real show script |
+| Epoch length (about 72 days) | extrapolated from 6.7 simulated hours with `quine/budget.py`; no run has reached an epoch end on the real show script |
 
 ## Not started
 
 | Work | Notes |
 | --- | --- |
-| FPGA build (design phase 3) | system top level: RAM-clear reset controller, video scan-out, CRC observer, UART; board bring-up |
-| Check 9 (hardware CRC stream) | needs the FPGA build |
+| Board bring-up (design phase 3) | pin constraints for a board, a bitstream, a speed grade 8 part or a 37.5 MHz clock |
+| Check 9 on hardware | the host-side comparison exists (`csrc/check_system.cpp` decodes the same UART stream); it needs a board |
 | Silicon | PDK cells, real placement, memory interface across the pins |
 
 ## Deviations from the design
 
-The build follows the design with 17 documented deviations, among them: no T
+The build follows the design with 18 documented deviations, among them: no T
 register (92 flip-flops), a six-NAND static flip-flop instead of a
 transmission-gate one (check 1 found the latter fights itself during reset), the
 transistor expansion doubling as the ROM's microcycle stepper, lazy flags in the
-replay, and a 21-page working set. The full table with reasons is in
+replay, a 21-page working set, and a core clock that needs a speed grade 8
+ECP5 to reach 50 MHz. The full table with reasons is in
 [as-built.md](docs/as-built.md#deviations-from-the-design).
